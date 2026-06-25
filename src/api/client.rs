@@ -1,19 +1,23 @@
 use reqwest::{Client, RequestBuilder};
+use std::env;
+use crate::types::*;
 
 pub struct SupabaseClient {
     client: Client,
     token: String,
+    url: String,
+    anon_key: String,
 }
 
 impl SupabaseClient {
     pub fn new(token: String) -> Self {
-        let url = env::var("SUPABASE_PUBLIC_URL").expect("SUPABASE_URL must be set");
-        let anon_key = env::var("ANON_KEY").expect("SUPABASE_ANON_KEY must be set");
+        let url = env!("SUPABASE_PUBLIC_URL").to_string();
+        let anon_key = env!("SUPABASE_ANON_KEY").to_string();
 
         Self {
             client: Client::new(),
-            api,
-            anon_key
+            anon_key,
+            url,
             token, 
         }
     }
@@ -21,7 +25,7 @@ impl SupabaseClient {
     pub fn post(&self, table: &str) -> RequestBuilder {
         self.client
             .post(format!("{}/rest/v1/{}", self.url, table))
-            .header("apikey",self.anon_key)
+            .header("apikey",self.anon_key.clone())
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
     }
@@ -29,14 +33,15 @@ impl SupabaseClient {
     pub fn auth_post(&self, path: &str) -> RequestBuilder {
         self.client
             .post(format!("{}/auth/v1/{}", self.url, path))
-            .header("apikey",self.anon_key)
+            .header("apikey",self.anon_key.clone())
+            .header("Authorization", format!("Bearer {}", self.anon_key.clone()))
             .header("Content-Type", "application/json")
     }
 
     pub fn get(&self, table: &str) -> RequestBuilder {
         self.client
             .get(format!("{}/rest/v1/{}", self.url, table))
-            .header("apikey",self.anon_key)
+            .header("apikey",self.anon_key.clone())
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
     }
@@ -44,7 +49,7 @@ impl SupabaseClient {
     pub fn patch(&self, table: &str, id: i64) -> RequestBuilder {
         self.client
             .patch(format!("{}/rest/v1/{}?id=eq.{}", self.url, table, id))
-            .header("apikey",self.anon_key)
+            .header("apikey",self.anon_key.clone())
             .header("Authorization", format!("Bearer {}", self.token))
             .header("Content-Type", "application/json")
     }
@@ -52,7 +57,7 @@ impl SupabaseClient {
     pub fn delete(&self, table: &str, id: i64) -> RequestBuilder {
         self.client
             .delete(format!("{}/rest/v1/{}?id=eq.{}", self.url, table, id))
-            .;w9ljnUBgi0hJ2_3mo3MISdOh0P14N5FRL9we8mug3kheader("apikey",self.anon_key)
+            .header("apikey",self.anon_key.clone())
             .header("Authorization", format!("Bearer {}", self.token))
     }
 }

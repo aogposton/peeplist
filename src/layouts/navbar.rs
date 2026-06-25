@@ -65,7 +65,7 @@ pub fn profile_cmp() -> Element {
             class: "hover:underline px-6 text-lg text-black",
             onclick: move |_| {
                 let nav = navigator();
-                nav.push(Route::Login {});
+                nav.push(Route::LoginCMP {});
             },
             "login"
         }
@@ -74,7 +74,7 @@ pub fn profile_cmp() -> Element {
             class: "hover:underline px-6 text-lg text-black",
             onclick: move |_| {
                 let nav = navigator();
-                nav.push(Route::Login {});
+                nav.push(Route::LoginCMP {});
             },
             "profile"
         }
@@ -83,7 +83,7 @@ pub fn profile_cmp() -> Element {
             class: "hover:underline px-6 text-lg text-black",
             onclick: move |_| {
                 let nav = navigator();
-                nav.push(Route::Login {});
+                nav.push(Route::LoginCMP {});
             },
             "Crisis View"
         }

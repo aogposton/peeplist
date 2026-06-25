@@ -33,7 +33,7 @@ pub fn Logout() -> Element {
 }
 
 #[component]
-pub fn Login() -> Element {
+pub fn LoginCMP() -> Element {
     let mut state = use_context::<AppState>();
     let mut loginform = use_signal(LoginForm::default);
     let submitform = move || {

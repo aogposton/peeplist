@@ -4,7 +4,7 @@
 use std::fmt;
 use dioxus::prelude::*;
 use crate::types::*;
-use views::{Logout, Login, Home};
+use views::{Logout, LoginCMP, Home};
 use layouts::{Navbar};
 
 
@@ -32,7 +32,7 @@ enum Route {
     Logout {},
 
     #[route("/login")]
-    Login {},
+    LoginCMP {},
 
     #[layout(Navbar)]
         #[route("/")]
