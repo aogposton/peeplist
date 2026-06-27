@@ -1,7 +1,7 @@
 use std::env;
 
 fn main() {
-    dotenv::from_path("docker/.env").ok();
+    dotenv::from_path(".env").ok();
     
     let supabase_url = env::var("SUPABASE_PUBLIC_URL")
         .unwrap_or_else(|_| "http://localhost:8000".to_string());

@@ -1583,15 +1583,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dioxus-sdk"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79a653986dc3151f00a2be4cf04f83ec6c2af24b600ab926d5fcbcd159c6dadf"
-dependencies = [
- "dioxus-sdk-window",
-]
-
-[[package]]
 name = "dioxus-sdk-time"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1601,19 +1592,6 @@ dependencies = [
  "futures",
  "gloo-timers",
  "tokio",
-]
-
-[[package]]
-name = "dioxus-sdk-window"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b12fdce3ba6233cc8a39decd5850c5ac2add9246e95c768786bbf86036421c0"
-dependencies = [
- "dioxus",
- "dioxus-config-macro",
- "dioxus-desktop",
- "wasm-bindgen",
- "web-sys",
 ]
 
 [[package]]
@@ -4094,8 +4072,6 @@ dependencies = [
  "dioxus",
  "dioxus-logger",
  "dioxus-primitives 0.0.1 (git+https://github.com/DioxusLabs/components)",
- "dioxus-sdk",
- "dioxus-sdk-window",
  "dotenv",
  "futures",
  "gloo-events",
