@@ -60,16 +60,19 @@ pub fn Sidebar() -> Element {
 
 #[component]
 pub fn profile_cmp() -> Element {
+    let state = use_context::<AppState>();
     rsx! {
-        a {
-            class: "hover:underline px-6 text-lg text-black",
-            onclick: move |_| {
-                let nav = navigator();
-                nav.push(Route::LoginCMP {});
-            },
-            "login"
+        if state.auth_token.read().is_none() {
+            a {
+                class: "hover:underline px-6 text-lg text-black",
+                onclick: move |_| {
+                    let nav = navigator();
+                    nav.push(Route::LoginCMP {});
+                },
+                "login"
+            }
+            br { }
         }
-        br { }
         a {
             class: "hover:underline px-6 text-lg text-black",
             onclick: move |_| {

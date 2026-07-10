@@ -36,8 +36,17 @@ pub fn Logout() -> Element {
 pub fn LoginCMP() -> Element {
     let mut state = use_context::<AppState>();
     let mut loginform = use_signal(LoginForm::default);
-    let submitform = move || {
+    let mut error = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        if state.auth_token.read().is_some() {
+            navigator().push(Route::Home {});
+        }
+    });
+
+    let mut submitform = move || {
         let form = loginform.read().clone();
+        error.set(None);
         spawn(async move {
             match login(form.email, form.password).await {
                 Ok(auth) => {
@@ -48,7 +57,10 @@ pub fn LoginCMP() -> Element {
                     let nav = navigator();
                     nav.push(Route::Home {});
                 }
-                Err(e) => clog!("{:?}", e),
+                Err(e) => {
+                    clog!("{:?}", e);
+                    error.set(Some("Incorrect email or password.".to_string()));
+                }
             }
         });
     };
@@ -88,6 +100,12 @@ pub fn LoginCMP() -> Element {
                             }
                         },
                         class: "text-black w-full border focus:border-teal focus:outline-none focus:ring-0",
+                    }
+                }
+                if let Some(msg) = error() {
+                    div {
+                        class: "flex justify-around text-red-500 text-sm",
+                        "{msg}"
                     }
                 }
                 div {
