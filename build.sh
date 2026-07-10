@@ -2,11 +2,11 @@
 set -e
 
 echo "🔨 Building..."
-docker run --rm --platform linux/amd64 \
-  -v $(pwd):/app \
-  -w /app \
-  rust:latest \
-  bash -c "cargo install dioxus-cli --locked && dx bundle --release --platform web"
+# docker run --rm --platform linux/amd64 \
+#   -v $(pwd):/app \
+  # -w /app \
+  # rust:latest \
+  # bash -c "cargo install dioxus-cli --locked && dx bundle --release --platform web"
 
 echo "📦 Copying to server..."
 scp target/dx/peeplist/release/web/server root@134.209.212.174:~/dev/peeplist/
