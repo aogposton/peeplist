@@ -34,24 +34,26 @@ use crate::types::{EntityType, MomentType, NewMomentType};
 //     let height = w.inner_height().unwrap().as_f64().unwrap();
 //     (width, height)
 // }
+const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
+const NAV_LINK_DESTRUCTIVE_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors cursor-pointer";
+
 #[component]
 pub fn Sidebar() -> Element {
     let state = use_context::<AppState>();
     let mut sidebarTgl = state.sidebarTgl;
     rsx! {
         div {
-            style: "background-color:{BG};",
             class: if *sidebarTgl.read() {
-                "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform translate-x-0 transition-transform duration-200"
+                "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform translate-x-0 transition-transform duration-200 bg-background border-r border-border"
             } else {
-                "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform -translate-x-full transition-transform duration-200"
+                "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform -translate-x-full transition-transform duration-200 bg-background border-r border-border"
             },
             div {
                 class:"h-10",
             }
             profile_cmp { }
             div {
-                class: "p-6 mt-12 text-lg text-black",
+                class: "px-3 mt-8",
                 peep_list_cmp { }
             }
         }
@@ -62,42 +64,42 @@ pub fn Sidebar() -> Element {
 pub fn profile_cmp() -> Element {
     let state = use_context::<AppState>();
     rsx! {
-        if state.auth_token.read().is_none() {
+        div {
+            class: "flex flex-col gap-y-1 px-3",
+            if state.auth_token.read().is_none() {
+                a {
+                    class: NAV_LINK_CLASS,
+                    onclick: move |_| {
+                        let nav = navigator();
+                        nav.push(Route::LoginCMP {});
+                    },
+                    "Login"
+                }
+            }
             a {
-                class: "hover:underline px-6 text-lg text-black",
+                class: NAV_LINK_CLASS,
                 onclick: move |_| {
                     let nav = navigator();
                     nav.push(Route::LoginCMP {});
                 },
-                "login"
+                "Profile"
             }
-            br { }
-        }
-        a {
-            class: "hover:underline px-6 text-lg text-black",
-            onclick: move |_| {
-                let nav = navigator();
-                nav.push(Route::LoginCMP {});
-            },
-            "profile"
-        }
-        br { }
-        a {
-            class: "hover:underline px-6 text-lg text-black",
-            onclick: move |_| {
-                let nav = navigator();
-                nav.push(Route::LoginCMP {});
-            },
-            "Crisis View"
-        }
-        br { }
-        a {
-            class: "hover:underline px-6 text-lg text-black",
-            onclick: move |_| {
-                let nav = navigator();
-                nav.push(Route::Logout {});
-            },
-            "logout"
+            a {
+                class: NAV_LINK_CLASS,
+                onclick: move |_| {
+                    let nav = navigator();
+                    nav.push(Route::LoginCMP {});
+                },
+                "Crisis View"
+            }
+            a {
+                class: NAV_LINK_DESTRUCTIVE_CLASS,
+                onclick: move |_| {
+                    let nav = navigator();
+                    nav.push(Route::Logout {});
+                },
+                "Logout"
+            }
         }
     }
 }
@@ -172,13 +174,13 @@ pub fn Navbar() -> Element {
                 style: "background-color:{BG};",
                 class: "flex h-screen w-full overflow-hidden",
                 div {
-                    class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-black transform translate-x-0 transition-transform duration-200",
+                    class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-border bg-background transform translate-x-0 transition-transform duration-200",
                     div {
                         class:"h-10",
                     }
                     profile_cmp { }
                     div {
-                        class: "p-6 mt-12 text-lg text-black",
+                        class: "px-3 mt-8",
                         peep_list_cmp { }
                     }
                 }

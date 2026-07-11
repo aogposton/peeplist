@@ -8,6 +8,9 @@ use crate::types::*;
 use crate::ui::*;
 use crate::api::*;
 use web_sys::{window, Storage};
+use lumen_blocks::components::input::{Input, InputVariant};
+use lumen_blocks::components::button::{Button, ButtonVariant};
+use lumen_blocks::components::label::Label;
 
 
 pub fn Logout() -> Element {
@@ -68,55 +71,52 @@ pub fn LoginCMP() -> Element {
 
     rsx! {
         div {
-            class: "flex justify-center items-center w-full h-screen",
-            style: "background-color: {BG};",
+            class: "flex justify-center items-center w-full h-screen bg-background",
             div {
-                class: "w-100 p-4 flex flex-col gap-y-4",
-                style: "background-color: {BG};",
+                class: "w-full max-w-sm p-8 flex flex-col gap-y-5 rounded-lg border border-border bg-card shadow-sm",
                 span {
-                    class:"text-2xl flex justify-center",
+                    class: "text-2xl font-semibold text-center text-foreground",
                     "Login"
                 }
                 div {
-                    class: "flex text-2xl justify-around ",
-                    span {class:"text-slate-600 mr-4","Email"}
-                    input {
-                        r#name: "email",
-                        oninput: move |e| loginform.write().email = e.value(),
-                        class: "text-black w-full border focus:border-teal focus:outline-none focus:ring-0",
+                    class: "flex flex-col gap-y-1.5",
+                    Label { for_id: Some("login-email".to_string()), "Email" }
+                    Input {
+                        id: Some("login-email".to_string()),
+                        name: "email",
+                        input_type: "email",
+                        full_width: true,
+                        on_input: move |e: Event<FormData>| loginform.write().email = e.value(),
                     }
                 }
-
                 div {
-                    class: "flex text-2xl justify-around ",
-                    span {class:"text-slate-600 mr-4","Password"}
-                    input {
-                        r#name: "password",
-                        r#type: "password",
-                        oninput: move |e| loginform.write().password = e.value(),
-                        onkeypress: move |e| {
-                            if e.key() == Key::Enter {
-                                submitform();
-                            }
-                        },
-                        class: "text-black w-full border focus:border-teal focus:outline-none focus:ring-0",
+                    class: "flex flex-col gap-y-1.5",
+                    onkeypress: move |e| {
+                        if e.key() == Key::Enter {
+                            submitform();
+                        }
+                    },
+                    Label { for_id: Some("login-password".to_string()), "Password" }
+                    Input {
+                        id: Some("login-password".to_string()),
+                        name: "password",
+                        input_type: "password",
+                        full_width: true,
+                        variant: if error().is_some() { InputVariant::Error } else { InputVariant::Default },
+                        on_input: move |e: Event<FormData>| loginform.write().password = e.value(),
                     }
                 }
                 if let Some(msg) = error() {
                     div {
-                        class: "flex justify-around text-red-500 text-sm",
+                        class: "text-sm text-destructive",
                         "{msg}"
                     }
                 }
-                div {
-                    class: "flex justify-around ",
-                    button_cmp {
-                        btnclick: move |_| {
-                            submitform();
-                        },
-                        label: rsx! {"submit"},
-                        class: "text-black w-full border focus:border-teal focus:outline-none focus:ring-0",
-                    }
+                Button {
+                    variant: ButtonVariant::Primary,
+                    full_width: true,
+                    on_click: move |_| submitform(),
+                    "Login"
                 }
             }
         }

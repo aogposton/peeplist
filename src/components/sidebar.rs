@@ -10,6 +10,8 @@ use crate::components::{
     ab_task_cmp,
 };
 
+const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
+
 #[component]
 pub fn peep_list_cmp() -> Element {
     let state = use_context::<AppState>();
@@ -17,50 +19,42 @@ pub fn peep_list_cmp() -> Element {
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
     let mut entityModalTgl = state.entityModalTgl;
-    let mut isHovering = use_signal(|| false);
-
-
-    let opacity = if isHovering() { "0.3" } else { "1.0" };
 
     rsx! {
         div {
-            div { 
-                class: "h-10 py-2 w-full flex transition-all justify-center",
-                style: "background-color:{HL}; color: white; opacity: {opacity};",
-                onclick: move |_| entityModalTgl.set(true), 
-                onmouseenter: move |_| isHovering.set(true),
-                onmouseout: move |_| isHovering.set(false),
-                "Add entity +"
+            class: "flex flex-col gap-y-1",
+            button {
+                class: "w-full rounded-md py-2 mb-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer",
+                style: "background-color:{HL};",
+                onclick: move |_| entityModalTgl.set(true),
+                "+ Add entity"
             }
 
             a {
-                class:"hover:bg-blue-100 pointer w-full",
+                class: NAV_LINK_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
                     currentView.set(View::Inbox);
-                }, 
-                "- All"
+                },
+                "All"
             }
-            br {}
             a {
-                class:"hover:bg-blue-100 pointer w-full",
+                class: NAV_LINK_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
                     currentView.set(View::SELF);
-                }, 
-                "- Self"
+                },
+                "Self"
             }
-            br {}
             for entity in entities.read().clone().into_iter(){
                 a {
-                    class:"hover:bg-blue-100 pointer w-full",
+                    class: NAV_LINK_CLASS,
                     onclick: move |_| {
                         current_entity.set(Some(entity.clone()));
                         currentView.set(View::Entity);
-                    }, 
-                    "- {entity.name}"
+                    },
+                    "{entity.name}"
                 }
-                br {}
             }
         }
     }
