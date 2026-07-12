@@ -8,6 +8,9 @@ pub struct EntityType {
     pub id: i64,
     pub name: String,
     pub entity_type_id: Option<i64>,
+    // Server-generated on insert; never sent back on writes.
+    #[serde(skip_serializing, default)]
+    pub created_at: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -63,6 +66,26 @@ pub struct MomentType {
     pub completed_at: Option<String>,
     pub deleted_at: Option<String>,
     pub reactions: Option<Vec<ReactionType>>,
+    // Server-generated on insert; never sent back on writes (see below).
+    #[serde(skip_serializing, default)]
+    pub created_at: String,
+    // Single taskwarrior-style dependency. The `moments` table only has room
+    // for one (bare `depends_on bigint`, no join table) — a real multi-dependency
+    // feature would need a `moment_dependencies` join table added later.
+    #[serde(default)]
+    pub depends_on: Option<i64>,
+    // Freeform jsonb column, repurposed client-side for tags + manual sort
+    // order rather than adding new schema. See MomentMetadata.
+    #[serde(default)]
+    pub metadata: Option<MomentMetadata>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct MomentMetadata {
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub sort_index: Option<f64>,
 }
 
 

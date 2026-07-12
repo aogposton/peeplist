@@ -46,6 +46,14 @@ pub fn peep_list_cmp() -> Element {
                 },
                 "Self"
             }
+            a {
+                class: NAV_LINK_CLASS,
+                onclick: move |_| {
+                    current_entity.set(None);
+                    currentView.set(View::Priority);
+                },
+                "Priority"
+            }
             for entity in entities.read().clone().into_iter(){
                 a {
                     class: NAV_LINK_CLASS,
@@ -54,6 +62,50 @@ pub fn peep_list_cmp() -> Element {
                         currentView.set(View::Entity);
                     },
                     "{entity.name}"
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn tag_list_cmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let mut tag_filter = state.tag_filter;
+
+    let mut tags: Vec<String> = moments.read().iter()
+        .filter_map(|m| m.metadata.as_ref())
+        .flat_map(|meta| meta.tags.clone())
+        .collect();
+    tags.sort();
+    tags.dedup();
+
+    rsx! {
+        div {
+            class: "flex flex-col gap-y-1",
+            if tags.is_empty() {
+                span {
+                    class: "px-3 text-xs text-muted-foreground",
+                    "No tags yet"
+                }
+            } else {
+                for tag in tags.iter() {
+                    a {
+                        class: if tag_filter.read().as_deref() == Some(tag.as_str()) {
+                            "block rounded-md px-3 py-2 text-sm font-medium bg-muted text-foreground cursor-pointer"
+                        } else {
+                            NAV_LINK_CLASS
+                        },
+                        onclick: {
+                            let tag = tag.clone();
+                            move |_| {
+                                let is_active = tag_filter.read().as_deref() == Some(tag.as_str());
+                                tag_filter.set(if is_active { None } else { Some(tag.clone()) });
+                            }
+                        },
+                        "#{tag}"
+                    }
                 }
             }
         }

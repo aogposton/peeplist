@@ -9,12 +9,17 @@ pub use moment::MomentInputCmp;
 pub use moment::CompletedSectionCmp;
 pub use moment::NotesSectionCmp;
 pub use moment::ab_task_cmp;
+pub use moment::PriorityViewCmp;
 
 mod sidebar;
 pub use sidebar::peep_list_cmp;
+pub use sidebar::tag_list_cmp;
 
 mod entity;
 pub use entity::EntityModalCmp;
 pub use entity::entity_view_cmp;
+pub use entity::ab_history_cmp;
+pub use entity::ab_stats_cmp;
+pub use entity::ab_info_cmp;
 
 pub mod context_menu;

@@ -2,125 +2,386 @@ use dioxus::prelude::*;
 use crate::types::*;
 use crate::theme::*;
 use crate::AppState;
+use crate::ABView;
 use crate::api::{
     createEntity,
     getEntities,
     getEntityTypes,
 };
-use lumen_blocks::components::collapsible::{
-    Collapsible, CollapsibleContent, CollapsibleTrigger,
-};
+use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
+use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
+
+fn stat_row(label: &str, value: &str) -> Element {
+    rsx! {
+        div {
+            class: "flex justify-between items-center text-sm py-1.5",
+            span { class: "text-muted-foreground", "{label}" }
+            span { class: "text-foreground font-medium", "{value}" }
+        }
+    }
+}
 
 #[component]
 pub fn entity_view_cmp() -> Element {
     let state = use_context::<AppState>();
     let current_entity = state.current_entity;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut backdropTgl = state.backdropTgl;
     let mut is_graphs_open = use_signal(|| false);
-    let mut is_stats_open = use_signal(|| false);
-    let mut is_info_open = use_signal(|| false);
-    let x = if let Some(entity) = current_entity() {
-        rsx! {
-            div {
-                h1 {
-                    class: "text-2xl w-full flex justify-center",
-                    "{entity.name}"
-                }
-                div {
-                    class: "flex justify-center gap-x-4",
-                    a {
-                        onclick: move  |_| {
-                            let tgl = *is_stats_open.read();
-                            is_info_open.set(!tgl);
-                        },
-                        "info"
 
+    let entity = current_entity();
+    let name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
+    let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
+
+    let tab_variant = |open: bool| if open { ButtonVariant::Secondary } else { ButtonVariant::Ghost };
+    let info_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::Info;
+    let history_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::History;
+    let stats_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::Stats;
+
+    rsx! {
+        div {
+            class: "flex flex-col items-center gap-3 px-6 pt-6 pb-4 border-b border-border",
+            Avatar {
+                class: "h-14 w-14",
+                AvatarFallback { class: "text-lg", "{initial}" }
+            }
+            h1 {
+                class: "text-2xl font-semibold text-foreground",
+                "{name}"
+            }
+            if entity.is_some() {
+                div {
+                    class: "flex gap-1.5",
+                    Button {
+                        variant: tab_variant(info_active),
+                        size: ButtonSize::Small,
+                        on_click: move |_| {
+                            if info_active {
+                                activity_bar_tgl.set(false);
+                                backdropTgl.set(false);
+                            } else {
+                                activity_bar_view.set(ABView::Info);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
+                        },
+                        "Info"
                     }
-                    a {
-                        onclick: move  |_| {
-                            let tgl = *is_stats_open.read();
-                            is_stats_open.set(!tgl);
+                    Button {
+                        variant: tab_variant(history_active),
+                        size: ButtonSize::Small,
+                        on_click: move |_| {
+                            if history_active {
+                                activity_bar_tgl.set(false);
+                                backdropTgl.set(false);
+                            } else {
+                                activity_bar_view.set(ABView::History);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
                         },
                         "History"
-
                     }
-                    a {
-                        onclick: move  |_| {
-                            let tgl = *is_stats_open.read();
-                            is_stats_open.set(!tgl);
+                    Button {
+                        variant: tab_variant(stats_active),
+                        size: ButtonSize::Small,
+                        on_click: move |_| {
+                            if stats_active {
+                                activity_bar_tgl.set(false);
+                                backdropTgl.set(false);
+                            } else {
+                                activity_bar_view.set(ABView::Stats);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
                         },
-                        "stats"
-
+                        "Stats"
                     }
-                    a {
-                        onclick: move  |_| {
+                    Button {
+                        variant: tab_variant(*is_graphs_open.read()),
+                        size: ButtonSize::Small,
+                        on_click: move |_| {
                             let tgl = *is_graphs_open.read();
                             is_graphs_open.set(!tgl);
                         },
-                        "graphs"
+                        "Graphs"
+                    }
+                }
+            }
+        }
+    }
+}
 
-                    }
-                }
-                if *is_stats_open.read(){
-                    div{
-                        class: "flex justify-around",
-                        div {
-                            class: "m-4 w-100",
-                            div {
-                                class: "border-b",
-                            "Relationship Details:" 
-                            }
-                            div {
-                                class: "flex justify-between",
-                                span {"promise kept:"}
-                                span {"10"}
-                            }
-                            div {
-                                class: "flex justify-between",
-                                span {"promise pending:"}
-                                span {"10"}
-                            }
-                            div {
-                                class: "flex justify-between",
-                                span {"tasks with reactions:"}
-                                span {"10"}
-                            }
-                            div {
-                                class: "flex justify-between",
-                                span {"Distance:"}
-                                span {"10"}
-                            }
-                            div {
-                                class: "flex justify-between",
-                                span {"Drift:"}
-                                span {"10"}
-                            }
-                        }
-                        div {
-                            class: "m-4 w-100",
-                            div {
-                                class: "border-b",
-                            "Surperlatives" 
-                            }
-                            div {
-                                class: "flex justify-between",
-                                span {"Entity Ranking"}
-                                span {"#2 out of 30"}
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    } else {
-        rsx! { 
+#[component]
+pub fn ab_history_cmp() -> Element {
+    let state = use_context::<AppState>();
+    let current_entity = state.current_entity;
+    let moments = state.moments;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    let entity = current_entity.read().clone();
+    let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
+    let entity_id = entity.as_ref().map(|e| e.id);
+
+    // Chronological "story" order: a moment's place in the timeline is when it
+    // happened — its completion — not when it was created. Notes never complete,
+    // so they fall back to when they were entered; the same fallback covers
+    // still-open tasks/promises so they show up where they were introduced
+    // rather than being dropped from the timeline.
+    let timeline_key = |m: &MomentType| m.completed_at.clone().unwrap_or_else(|| m.created_at.clone());
+
+    let mut entity_moments = moments.read().iter()
+        .filter(|m| Some(m.entity_id) == entity_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    entity_moments.sort_by(|a, b| timeline_key(a).cmp(&timeline_key(b)));
+
+    let kind_label = |t: i64| match t {
+        2i64 => "Promise",
+        3i64 => "Note",
+        _ => "Task",
+    };
+
+    let fmt_ts = |s: &str| -> String { s.chars().take(16).collect() };
+
+    rsx! {
+        div {
+            class: "flex flex-col h-full bg-background",
             div {
-                h1 {
-                    class: "text-2xl w-full flex justify-center",
-                    "All"
+                class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
+                span {
+                    class: "text-sm font-medium text-muted-foreground",
+                    "History — {entity_name}"
+                }
+                button {
+                    class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                    onclick: move |_| {
+                        activity_bar_tgl.set(false);
+                        backdropTgl.set(false);
+                    },
+                    "×"
+                }
+            }
+
+            div {
+                class: "flex flex-col gap-3 px-4 py-4 overflow-y-auto flex-1",
+                if entity_moments.is_empty() {
+                    div {
+                        class: "text-sm text-muted-foreground text-center py-8",
+                        "No history yet for {entity_name}."
+                    }
+                } else {
+                    for m in entity_moments.iter() {
+                        div {
+                            class: "rounded-lg border border-border p-3",
+                            div {
+                                class: "flex items-start justify-between gap-2",
+                                span {
+                                    class: "text-sm font-medium text-foreground",
+                                    "{m.title}"
+                                }
+                                span {
+                                    class: "text-xs shrink-0 px-2 py-0.5 rounded-full border border-border text-muted-foreground",
+                                    "{kind_label(m.moment_type_id)}"
+                                }
+                            }
+                            if let Some(desc) = m.description.clone() {
+                                if !desc.is_empty() {
+                                    div {
+                                        class: "text-xs text-muted-foreground mt-1 whitespace-pre-wrap",
+                                        "{desc}"
+                                    }
+                                }
+                            }
+                            div {
+                                class: "flex items-center gap-2 mt-1.5 text-xs text-muted-foreground",
+                                if let Some(completed) = m.completed_at.clone() {
+                                    span { "Completed {fmt_ts(&completed)}" }
+                                } else if m.moment_type_id == 3i64 {
+                                    span { "Added {fmt_ts(&m.created_at)}" }
+                                } else if let Some(due) = m.due_at.clone() {
+                                    span { "Due {fmt_ts(&due)}" }
+                                } else {
+                                    span { "Added {fmt_ts(&m.created_at)}" }
+                                }
+                                if m.gravity.unwrap_or(0) != 0 {
+                                    span {
+                                        class: "px-1.5 py-0.5 rounded border border-border",
+                                        "Gravity {m.gravity.unwrap_or(0)}"
+                                    }
+                                }
+                            }
+                            if let Some(reactions) = m.reactions.clone() {
+                                if !reactions.is_empty() {
+                                    div {
+                                        class: "mt-2 pt-2 border-t border-border flex flex-col gap-1.5",
+                                        for r in reactions.iter() {
+                                            div {
+                                                class: "ml-4 pl-3 border-l-2 border-border flex items-center justify-between gap-2 text-xs",
+                                                span { class: "text-foreground", "{r.description}" }
+                                                span { class: "text-muted-foreground shrink-0", "{r.value}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-    }; x
+    }
+}
+
+#[component]
+pub fn ab_stats_cmp() -> Element {
+    let state = use_context::<AppState>();
+    let current_entity = state.current_entity;
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    let entity = current_entity.read().clone();
+    let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
+    let entity_id = entity.as_ref().map(|e| e.id);
+
+    // Promises kept/pending and reaction coverage, scoped to this entity's moments.
+    let (promises_kept, promises_pending, tasks_with_reactions) = {
+        let all = moments.read();
+        let for_entity = all.iter().filter(|m| Some(m.entity_id) == entity_id);
+        for_entity.fold((0usize, 0usize, 0usize), |(kept, pending, reacted), m| {
+            let kept = kept + (m.moment_type_id == 2i64 && m.completed_at.is_some()) as usize;
+            let pending = pending + (m.moment_type_id == 2i64 && m.completed_at.is_none()) as usize;
+            let reacted = reacted + m.reactions.as_ref().is_some_and(|r| !r.is_empty()) as usize;
+            (kept, pending, reacted)
+        })
+    };
+
+    // Ranking: entities ordered by total moments logged, most active first.
+    let (entity_rank, total_entities) = {
+        let all_moments = moments.read();
+        let all_entities = entities.read();
+        let mut counts: Vec<(i64, usize)> = all_entities.iter()
+            .map(|e| (e.id, all_moments.iter().filter(|m| m.entity_id == e.id).count()))
+            .collect();
+        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        let rank = entity_id.and_then(|id| counts.iter().position(|(eid, _)| *eid == id)).map(|pos| pos + 1);
+        (rank, counts.len())
+    };
+    let ranking_label = match entity_rank {
+        Some(rank) => format!("#{rank} out of {total_entities}"),
+        None => "—".to_string(),
+    };
+
+    rsx! {
+        div {
+            class: "flex flex-col h-full bg-background",
+            div {
+                class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
+                span { class: "text-sm font-medium text-muted-foreground", "Stats — {entity_name}" }
+                button {
+                    class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                    onclick: move |_| {
+                        activity_bar_tgl.set(false);
+                        backdropTgl.set(false);
+                    },
+                    "×"
+                }
+            }
+            div {
+                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1",
+                div {
+                    class: "rounded-lg border border-border p-4",
+                    h3 {
+                        class: "text-sm font-semibold text-foreground mb-2 pb-2 border-b border-border",
+                        "Relationship Details"
+                    }
+                    div {
+                        class: "flex flex-col divide-y divide-border",
+                        {stat_row("Promises kept", &promises_kept.to_string())}
+                        {stat_row("Promises pending", &promises_pending.to_string())}
+                        {stat_row("Tasks with reactions", &tasks_with_reactions.to_string())}
+                    }
+                }
+                div {
+                    class: "rounded-lg border border-border p-4",
+                    h3 {
+                        class: "text-sm font-semibold text-foreground mb-2 pb-2 border-b border-border",
+                        "Superlatives"
+                    }
+                    div {
+                        class: "flex flex-col divide-y divide-border",
+                        {stat_row("Engagement ranking", &ranking_label)}
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn ab_info_cmp() -> Element {
+    let state = use_context::<AppState>();
+    let current_entity = state.current_entity;
+    let auth_token = state.auth_token;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+    let mut entity_types = use_signal(|| vec![]);
+
+    use_effect(move || {
+        let token = auth_token;
+        spawn(async move {
+            let token_val = token.read().clone().unwrap_or_default();
+            match getEntityTypes(token_val).await {
+                Ok(data) => entity_types.set(data),
+                Err(e) => clog!("Error fetching entity types: {}", e),
+            }
+        });
+    });
+
+    let entity = current_entity.read().clone();
+    let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
+    let type_name = entity.as_ref()
+        .and_then(|e| e.entity_type_id)
+        .and_then(|type_id| entity_types.read().iter().find(|t| t.id == type_id).map(|t| t.name.clone()))
+        .unwrap_or_else(|| "Not set".to_string());
+    let known_since = entity.as_ref()
+        .map(|e| e.created_at.chars().take(10).collect::<String>())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    rsx! {
+        div {
+            class: "flex flex-col h-full bg-background",
+            div {
+                class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
+                span { class: "text-sm font-medium text-muted-foreground", "Info — {entity_name}" }
+                button {
+                    class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                    onclick: move |_| {
+                        activity_bar_tgl.set(false);
+                        backdropTgl.set(false);
+                    },
+                    "×"
+                }
+            }
+            div {
+                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1",
+                div {
+                    class: "rounded-lg border border-border p-4",
+                    div {
+                        class: "flex flex-col divide-y divide-border",
+                        {stat_row("Name", &entity_name)}
+                        {stat_row("Type", &type_name)}
+                        {stat_row("Known since", &known_since)}
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]
@@ -140,13 +401,14 @@ pub fn EntityModalCmp() -> Element {
         spawn(async move {
             let new_entity = NewEntityType {
                 name: form_data.name.clone(),
-                entity_type_id: None,
+                entity_type_id: form_data.entity_type_sel.parse::<i64>().ok(),
                 parent_entity_id: None,
                 user_id: None,
                 archived_at: None,
             };
     
-            match createEntity(new_entity, token.read().clone().unwrap_or_default()).await {
+            let token_val = token.read().clone().unwrap_or_default();
+            match createEntity(new_entity, token_val).await {
                 Ok(created) => {
                     entities.write().insert(0, created);
                 }
@@ -160,7 +422,8 @@ pub fn EntityModalCmp() -> Element {
     use_effect(move || {
         let token = auth_token;
         spawn(async move {
-            match getEntityTypes(token.read().clone().unwrap_or_default()).await {
+            let token_val = token.read().clone().unwrap_or_default();
+            match getEntityTypes(token_val).await {
                 Ok(data) => entityTypes.set(data),
                 Err(e) => clog!("Error fetching entities: {}",e),
             }

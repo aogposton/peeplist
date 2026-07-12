@@ -14,16 +14,29 @@ use crate::components::{
     MomentInputCmp,
     EntityModalCmp,
     ab_task_cmp,
+    ab_history_cmp,
+    ab_stats_cmp,
+    ab_info_cmp,
     peep_list_cmp,
+    tag_list_cmp,
     NotesSectionCmp,
 };
 
 use crate::api::{
     createEntity,
     createMoment,
+    get_current_user,
+    refresh_access_token,
 };
 
 use crate::types::{EntityType, MomentType, NewMomentType};
+use web_sys::window;
+use gloo_timers::future::TimeoutFuture;
+
+// Refresh the access token this long before it would otherwise expire via
+// inactivity/backend expiry, so a live session never silently dies underneath
+// the user. Supabase's default JWT lifetime is 1 hour; 50 minutes leaves margin.
+const TOKEN_REFRESH_INTERVAL_MS: u32 = 50 * 60 * 1000;
 
 
 // #[cfg(target_arch = "wasm32")]
@@ -55,6 +68,14 @@ pub fn Sidebar() -> Element {
             div {
                 class: "px-3 mt-8",
                 peep_list_cmp { }
+            }
+            div {
+                class: "px-3 mt-8",
+                span {
+                    class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                    "Tags"
+                }
+                tag_list_cmp { }
             }
         }
     }
@@ -115,18 +136,80 @@ pub fn Navbar() -> Element {
     let current_moment = state.current_moment;
     let current_view = state.currentView;
     let current_entity = state.current_entity;
+    let mut auth_token = state.auth_token;
+    let mut user_id = state.user_id;
+    let mut refresh_loop_started = use_signal(|| false);
     let moment = current_moment.read().clone();
+
+    // On every load of the main app, confirm the token we have cached in
+    // localStorage is still actually accepted by Supabase. A token can die
+    // server-side (expiry, revocation) with no client-side signal, which
+    // previously left the app showing an empty "logged in" shell. If the
+    // token is dead, log the user out for real (clear storage + state) and
+    // send them to the login screen instead of failing silently.
+    use_effect(move || {
+        let Some(token) = auth_token.read().clone() else {
+            return;
+        };
+
+        spawn(async move {
+            if let Err(e) = get_current_user(token).await {
+                clog!("Session check failed, logging out: {}", e);
+                if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                    storage.set("auth_token", &"").ok();
+                    storage.set("refresh_token", &"").ok();
+                }
+                auth_token.set(None);
+                user_id.set(None);
+                navigator().push(Route::LoginCMP {});
+            }
+        });
+
+        // Keep the session alive proactively so it doesn't reach the point
+        // of dying in the first place. Started once per mounted session.
+        if !*refresh_loop_started.read() {
+            refresh_loop_started.set(true);
+            spawn(async move {
+                loop {
+                    TimeoutFuture::new(TOKEN_REFRESH_INTERVAL_MS).await;
+                    let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) else {
+                        break;
+                    };
+                    let Some(refresh_tok) = storage.get_item("refresh_token").ok().flatten().filter(|s| !s.is_empty()) else {
+                        break;
+                    };
+                    match refresh_access_token(refresh_tok).await {
+                        Ok(auth) => {
+                            storage.set("auth_token", &auth.access_token).ok();
+                            storage.set("refresh_token", &auth.refresh_token).ok();
+                            auth_token.set(Some(auth.access_token));
+                            user_id.set(Some(auth.user.id));
+                        }
+                        Err(e) => {
+                            clog!("Token refresh failed, logging out: {}", e);
+                            storage.set("auth_token", &"").ok();
+                            storage.set("refresh_token", &"").ok();
+                            auth_token.set(None);
+                            user_id.set(None);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+    });
     let activity_bar_class = if *activity_bar_tgl.read() {
-        "openedbtw fixed inset-y-0 right-0 z-50 w-2/3 transition-transform duration-300 translate-x-0"
+        "openedbtw fixed inset-y-0 right-0 z-[60] w-full xl:w-96 transition-transform duration-300 translate-x-0"
     } else {
-        "closedbtw fixed inset-y-0 right-0 z-50 w-1/3 transition-transform duration-300 translate-x-full"
+        "closedbtw fixed inset-y-0 right-0 z-[60] w-full xl:w-96 transition-transform duration-300 translate-x-full"
     };
  
     //
     let header_title = match current_view.read().clone() {
         Inbox => "".to_string(),
         SELF => "".to_string(),
-        Entity => "".to_string()
+        Entity => "".to_string(),
+        Priority => "".to_string(),
     };
 
     rsx! {
@@ -142,7 +225,7 @@ pub fn Navbar() -> Element {
         }
 
 
-        if *backdropTgl.read() || *sidebarTgl.read() {
+        if *backdropTgl.read() || *sidebarTgl.read() || *momentInputTgl.read() {
             div {
                 id: "backdrop",
                 class: "xl:hidden fixed inset-0 bg-black/20 z-30",
@@ -161,13 +244,21 @@ pub fn Navbar() -> Element {
             EntityModalCmp { }
             button {
                 id: "add-moment-button",
-                class: "fixed h-20 w-20 bottom-4 right-4 z-10 rounded-lg m-8 shadow-lg",
+                class: "xl:hidden fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95",
                 style: "background-color:{HL};",
                 onclick: move |_| {
                     let current = *momentInputTgl.read();
                     momentInputTgl.set(!current);
                 },
                 if *momentInputTgl.read() { "✕" } else { "+" }
+            }
+            div {
+                class: if *momentInputTgl.read() {
+                    "xl:hidden fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-100 translate-y-0"
+                } else {
+                    "xl:hidden fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-0 translate-y-4 pointer-events-none"
+                },
+                MomentInputCmp { }
             }
             Sidebar { }
             div {
@@ -183,6 +274,14 @@ pub fn Navbar() -> Element {
                         class: "px-3 mt-8",
                         peep_list_cmp { }
                     }
+                    div {
+                        class: "px-3 mt-8",
+                        span {
+                            class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                            "Tags"
+                        }
+                        tag_list_cmp { }
+                    }
                 }
                 div {
                     class: "xl:w-2/3 w-full overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black/30",
@@ -191,20 +290,35 @@ pub fn Navbar() -> Element {
                 }
                 div {
                     id:"activity-bar",
-                    class: "{activity_bar_class}",
-                    style: "background-color:{BG}; ",
-                    if let Some(_) = current_moment.read().clone() {
+                    class: "{activity_bar_class} bg-background border-l border-border shadow-2xl",
+                    if current_moment.read().is_some()
+                        || *activity_bar_view.read() == ABView::History
+                        || *activity_bar_view.read() == ABView::Stats
+                        || *activity_bar_view.read() == ABView::Info {
                         match activity_bar_view.read().clone() {
                             ABView::Task => rsx! {
                                 ab_task_cmp {
                                     key: "{*activity_bar_tgl.read()}"
                                 }
-                            }
+                            },
+                            ABView::History => rsx! {
+                                ab_history_cmp {
+                                    key: "{*activity_bar_tgl.read()}"
+                                }
+                            },
+                            ABView::Stats => rsx! {
+                                ab_stats_cmp {
+                                    key: "{*activity_bar_tgl.read()}"
+                                }
+                            },
+                            ABView::Info => rsx! {
+                                ab_info_cmp {
+                                    key: "{*activity_bar_tgl.read()}"
+                                }
+                            },
                         }
                     }
                 }
-
-                if *momentInputTgl.read() { MomentInputCmp { } } 
             }
         }
     }

@@ -50,13 +50,42 @@ const FA_JS: Asset = asset!("/assets/ae47c6a44d.js");
 pub enum View {
     Entity,
     Inbox,
-    SELF
+    SELF,
+    Priority,
 
 }
 
 #[derive(Clone, PartialEq)]
 pub enum ABView {
    Task,
+   History,
+   Stats,
+   Info,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum SortMode {
+    Default,
+    DueDate,
+    Custom,
+}
+
+impl SortMode {
+    pub fn as_storage_str(&self) -> &'static str {
+        match self {
+            SortMode::Default => "default",
+            SortMode::DueDate => "due_date",
+            SortMode::Custom => "custom",
+        }
+    }
+
+    pub fn from_storage_str(s: &str) -> SortMode {
+        match s {
+            "due_date" => SortMode::DueDate,
+            "custom" => SortMode::Custom,
+            _ => SortMode::Default,
+        }
+    }
 }
 
 impl fmt::Display for View {
@@ -65,6 +94,7 @@ impl fmt::Display for View {
             View::Inbox   => write!(f, "Inbox"),
             View::Entity => write!(f, "Entity"),
             View::SELF => write!(f, "Self"),
+            View::Priority => write!(f, "Priority"),
         }
     }
 }
@@ -84,6 +114,8 @@ pub struct AppState {
     pub auth_token: Signal<Option<String>>,
     pub user_id: Signal<Option<String>>,
     pub backdropTgl: Signal<bool>,
+    pub tag_filter: Signal<Option<String>>,
+    pub sort_mode: Signal<SortMode>,
 }
 
 fn main() {
@@ -107,6 +139,8 @@ fn App() -> Element {
         auth_token: Signal::new(None::<String>),
         user_id: Signal::new(None::<String>),
         backdropTgl: Signal::new(false),
+        tag_filter: Signal::new(None::<String>),
+        sort_mode: Signal::new(SortMode::Default),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -114,7 +148,7 @@ fn App() -> Element {
         {
             let storage = web_sys::window().unwrap()
                 .local_storage().unwrap().unwrap();
-            
+
             match storage.get_item("auth_token").unwrap() {
                 Some(token) => {
                     state.auth_token.set(Some(token));
@@ -122,6 +156,10 @@ fn App() -> Element {
                 None => {
                     // navigator().push(Route::Login {});
                 }
+            }
+
+            if let Some(mode) = storage.get_item("sort_mode").unwrap() {
+                state.sort_mode.set(SortMode::from_storage_str(&mode));
             }
         }
     });

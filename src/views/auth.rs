@@ -23,10 +23,11 @@ pub fn Logout() -> Element {
     });
 
     let nav = navigator();
-    nav.push(Route::Home {});
+    nav.push(Route::LoginCMP {});
 
     let storage = window().unwrap().local_storage().unwrap().unwrap();
-    storage.set("auth_token", &"");
+    storage.set("auth_token", &"").ok();
+    storage.set("refresh_token", &"").ok();
     state.auth_token.set(None);
     state.user_id.set(None);
 
@@ -54,7 +55,8 @@ pub fn LoginCMP() -> Element {
             match login(form.email, form.password).await {
                 Ok(auth) => {
                     let storage = window().unwrap().local_storage().unwrap().unwrap();
-                    storage.set("auth_token", &auth.access_token);
+                    storage.set("auth_token", &auth.access_token).ok();
+                    storage.set("refresh_token", &auth.refresh_token).ok();
                     state.auth_token.set(Some(auth.access_token));
                     state.user_id.set(Some(auth.user.id));
                     let nav = navigator();

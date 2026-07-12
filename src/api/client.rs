@@ -38,6 +38,13 @@ impl SupabaseClient {
             .header("Content-Type", "application/json")
     }
 
+    pub fn auth_get(&self, path: &str) -> RequestBuilder {
+        self.client
+            .get(format!("{}/auth/v1/{}", self.url, path))
+            .header("apikey",self.anon_key.clone())
+            .header("Authorization", format!("Bearer {}", self.token))
+    }
+
     pub fn get(&self, table: &str) -> RequestBuilder {
         self.client
             .get(format!("{}/rest/v1/{}", self.url, table))

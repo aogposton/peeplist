@@ -77,8 +77,11 @@ pub async fn updateMoment(moment: MomentType, token: String) -> Result<MomentTyp
 }
 
 pub async fn getMoments(token: String) -> Result<Vec<MomentType>, reqwest::Error> {
+    // Without an explicit order, Postgres/PostgREST returns rows in unspecified
+    // (effectively random-looking) order. id.asc gives a stable baseline; the
+    // client layers Default/Due date/Custom sort modes on top of this.
     let response = SupabaseClient::new(token)
-        .get("moments?deleted_at=is.null&select=*,reactions(*)")
+        .get("moments?deleted_at=is.null&select=*,reactions(*)&order=id.asc")
         .send()
         .await?;
     let moments = response.json::<Vec<MomentType>>().await?;

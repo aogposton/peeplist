@@ -68,12 +68,3 @@
   cursor: pointer;
 }
 
-#activity-bar {
-  width: 66.666%;
-}
-
-@media (min-width: 1280px) {
-  #activity-bar {
-    width: calc(33.333% - 16rem);
-  }
-}
