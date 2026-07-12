@@ -62,26 +62,48 @@ lumen-blocks was already in `Cargo.toml`/`Cargo.lock` and partially used in `src
   - The shared backdrop (`#backdrop`) now also shows for `*momentInputTgl.read()` (previously only `backdropTgl`/`sidebarTgl`), so the mobile popup dims the background and tapping outside it closes it — reuses the backdrop's existing click handler, which already reset `momentInputTgl` to `false`.
   - Verified via headless-browser screenshots at a 390×844 mobile viewport: input hidden by default, "+" opens the popup card above the FAB with the backdrop dimmed and the button flipped to "✕", tapping the backdrop closes it again. No console errors beyond expected 401s.
 
+## Session — 2026-07-12: bug fixes, activity bar rebuild, and first real features
+
+Long session, several sub-parts. Everything below is **already committed** (`784a011 "so many changes its almost not worth listing"`) — see "State of the working tree" for what that leaves outstanding.
+
+### Bug fixes
+- **RefCell `AlreadyBorrowed` panic on logout** (`src/layouts/navbar.rs`, `src/components/entity.rs`, `src/components/moment.rs`, `src/views/home.rs`): the pattern `match some_async_fn(token.read().clone()...).await { ... }` keeps the `token.read()` guard alive for the *entire match block* (Rust's temporary-lifetime-extension rule for match scrutinees), including across the `.await` and through the `Ok`/`Err` arm. With ~11 call sites doing this on the shared `auth_token` signal, any concurrent write (e.g. the session-check logout in `Navbar`) could hit an already-borrowed signal and panic. Fixed by extracting `let token_val = token.read().clone().unwrap_or_default();` as its own statement before the match, everywhere this pattern occurred.
+- **Logout redirected to `Route::Home` instead of the login page** (`src/views/auth.rs`) — one-line fix.
+
+### Activity bar (`#activity-bar`, right-hand panel) — fully rebuilt
+This used to be raw `input`/`textarea`/`button_cmp` and is now the app's general-purpose right-hand panel, driven by `ABView` (`Task | History | Stats | Info`) + `activity_bar_tgl`/`backdropTgl` signals in `AppState`.
+- **Visual pass**: `ab_task_cmp` (`src/components/moment.rs`) restyled with lumen-blocks tokens, got a real header with a working close (×) button — previously the close affordance was dead, the delete button was the *only* way to close the panel on desktop.
+- **Width bug**: `assets/styling/main.css` had an *unlayered* `#activity-bar { width: 66.666%; }` / `calc(33.333% - 16rem)` rule that silently beat every Tailwind `w-*` utility (unlayered CSS always wins over `@layer utilities`, regardless of specificity — a real CSS Cascade Layers gotcha, not obvious from reading the Rust source). Removed that rule, now a plain `xl:w-96` (384px, same order of magnitude as the 256px sidebar) via Tailwind, full-width below `xl` as a mobile sheet.
+- **Hamburger-overlap regression**: making the panel full-width below `xl` meant it now covers the same top-left corner as the global sidebar-hamburger button (`z-51`), which floated on top of it (`z-50`) since it's rendered earlier in the DOM. Fixed by bumping the activity-bar's z-index to `z-[60]` when it's the full-screen mobile sheet.
+- **History tab** (`ab_history_cmp`, `src/components/entity.rs`): timeline of a person's moments + reactions. Ordered chronologically by `completed_at`, falling back to `created_at` for notes/still-open items (notes never complete; that's the "input date" ordering the user asked for). Reactions render indented under their moment (`ml-4 pl-3 border-l-2`). Gravity shown when non-zero. **Not** an audit/activity log — see memory `project_history_vs_activity_log`.
+- **Stats tab** (`ab_stats_cmp`): promises kept/pending, tasks-with-reactions, and an "Engagement ranking" (entities ranked by total moments logged) — all real, computed from `state.moments`/`state.entities`. "Distance"/"Drift" were dropped from this pass — see memory `project_distance_drift_spec`, not implemented, needs more product design first.
+- **Info tab** (`ab_info_cmp`): Name, Type (resolved via `getEntityTypes`), Known since (`entities.created_at`). Building this surfaced a real bug: `EntityModalCmp`'s create-entity handler hardcoded `entity_type_id: None` — the Type dropdown in the New Entity modal was always discarded. Fixed.
+- **Notes context menu**: `NotesSectionCmp` had a right-click handler that captured coordinates but never actually rendered a menu (structurally vestigial, called out in the last pass). Now has a real "Convert to Task / Convert to Promise" menu, same `update_moment_field` plumbing `MomentListCmp` already used for its own convert-to menu.
+
+### `created_at` exposure (`src/types.rs`)
+Both `moments.created_at` and `entities.created_at` already existed in the Supabase schema (`schema.sql`) but weren't in the Rust structs, so they were silently dropped on every fetch. Added to `MomentType`/`EntityType` as `#[serde(skip_serializing, default)] pub created_at: String` — readable, never echoed back on writes (important since `deleteMoment`/`updateMoment` PATCH the *whole* struct).
+
+### Ordering, tags, dependencies, priority — no schema migration needed
+Discovered the `moments` table already had two unused columns: `metadata jsonb` and `depends_on bigint`. Built all of the below on top of them rather than asking for a migration:
+- **Stable order** (`src/api/moment.rs`, `getMoments`): added `&order=id.asc` — previously had no `order=` param at all, so Postgres/PostgREST returned rows in unspecified (effectively random-looking) order on every refresh.
+- **Tags**: `MomentMetadata { tags: Vec<String>, sort_index: Option<f64> }` stored in `metadata`. Add/remove chips in `ab_task_cmp`. Sidebar (`src/components/sidebar.rs`, `tag_list_cmp`) shows the distinct set of all tags in use, click to filter (`state.tag_filter`, applied in `home.rs` alongside entity filtering).
+- **Sort modes** (`MomentListCmp`): Default (id order) / Due date / Custom (drag-and-drop, HTML5 drag events, persists position to `metadata.sort_index`). Chosen mode persisted to `localStorage` (`sort_mode` key) so it survives reloads — `SortMode` enum + `as_storage_str`/`from_storage_str` in `src/main.rs`.
+- **Depends on**: `moments.depends_on` now exposed and wired — a picker in `ab_task_cmp` (scoped to other open moments in the same entity), a "Blocked by …" indicator, and a reverse "Blocking N other open moment(s)" line. **Caveat**: this is a single dependency (`bigint`, not a join table) — real taskwarrior-style multi-dependency would need a `moment_dependencies` table (see memory `project_db_coordination`).
+- **Priority view** (`PriorityViewCmp`, `src/components/moment.rs`, new `View::Priority` reachable via a sidebar nav link): all open tasks/promises across every entity, ranked by a taskwarrior-esque urgency score — `compute_urgency()` combines due-date proximity (ramps to +12 as due/overdue), gravity (scaled to ±5), a small age bonus (caps at +2 after 30 days), a heavy blocked penalty (-8), and a blocking bonus (+8). Coefficients are a first draft (commented inline), not tuned against real usage yet.
+- **Due date shown in the center list** (`MomentCmp`): small trailing label (`"%b %d"`), red/bold if overdue and not completed.
+
 ## Not yet touched (candidates for "what's next")
 
-- `src/components/entity.rs` `EntityModalCmp` (the "New Entity" modal) — still plain HTML `input`/`select`, not restyled.
-- `src/layouts/navbar.rs::Navbar()` activity bar (`#activity-bar`) / `ab_task_cmp` (the activity-bar detail panel, still using raw `input`/`textarea`/`button_cmp`) — not touched in this pass.
-- `src/components/context_menu/`.
-- `src/ui.rs` custom components (`button_cmp`, `gravity_select`) — still used elsewhere (e.g. nowhere critical left after login rework, but check before deleting anything — the user does not want components erased, only restyled).
+- `src/components/entity.rs` `EntityModalCmp` (the "New Entity" modal) — still plain HTML `input`/`select`, not restyled. Also still collects Relationship/How-met/birthday/location fields with **no matching DB columns at all** — that input has always gone nowhere; would need a schema change (see memory `project_db_coordination`) to actually persist.
+- `src/components/context_menu/` — never touched, unclear if still used.
+- `src/ui.rs` custom components (`button_cmp`, `gravity_select`) — `button_cmp` still has a real bug (its class list includes literal `BG` — a hex color string like `#fff` — where a Tailwind class was probably intended; it's a no-op). Both still used in a couple of spots; check before deleting.
+- **Graphs tab** (`ABView`/entity tabs) — still a dead toggle, renders nothing. The "orbit/relationship graph" from the original app vision; biggest lift of the remaining pieces (needs a real layout/viz approach, not just data wiring like History/Stats/Info were).
+- **Priority engine tuning** — the urgency formula in `compute_urgency` (`src/components/moment.rs`) is an untested first draft. Worth revisiting once there's a feel for whether it actually surfaces the right things.
 
 ## State of the working tree
 
-The foundational-setup + login/sidebar work from earlier in this pass got committed by the user at some point as `89af106 "towards a better ui"` — don't assume everything above is still uncommitted; check `git log`/`git status` fresh each session rather than trusting this doc's file list. As of the end of *this* session, uncommitted on top of that commit:
-```
-M src/api/auth.rs
-M src/api/client.rs
-M src/api/mod.rs
-M src/components/entity.rs
-M src/components/moment.rs
-M src/layouts/navbar.rs
-M src/views/auth.rs
-M src/views/home.rs
-```
-Ask the user before committing/pushing anything; they haven't asked for a commit yet.
+As of 2026-07-12 ~03:30am, everything through the session above is committed (`784a011`). `git status` should be clean except for `assets/tailwind.css` (generated output — the `tailwindcss --watch` process regenerates it continuously as source changes; don't worry about it drifting, don't hand-edit it, just let `dx build`/`dx serve` keep it current). Check `git log`/`git status` fresh each session rather than trusting this note — it goes stale fast.
 
-A `dx serve` instance may still be running in the background on `http://localhost:8080` from verifying this pass — check for a stray process before starting another one, or just reuse it.
+A `dx serve` instance (plus its `tailwindcss --watch` sidecar) may still be running in the background on `http://localhost:8080` — check for stray processes (`ps aux | grep -E "dx serve|tailwindcss"`) before starting another one, or just reuse it.
+
+**Verification note**: most of this session's feature work (Stats numbers, History ordering, tag filtering, drag-to-reorder, depends-on blocking, priority ranking) was verified by `cargo check` + headless-browser smoke tests (console-error-free loads) only — I don't have login credentials to this app's real hosted Supabase project, so I could not exercise these features end-to-end with real data. Worth a real look before trusting the numbers/ordering blindly.
