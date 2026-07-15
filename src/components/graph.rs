@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use crate::AppState;
 use crate::View;
 use crate::types::*;
+use crate::api::is_self_entity;
 use super::entity::compute_distance;
 
 // You're fixed at the canvas center; every entity gets a node whose target
@@ -14,9 +15,8 @@ use super::entity::compute_distance;
 // live and Dioxus-native (wheel + drag update a transform on a wrapping
 // <g>) — no d3.zoom() involved, d3 is scoped to layout only.
 //
-// The center "You" node already represents SELF_ENTITY_ID (see
-// crate::types::SELF_ENTITY_ID / memory project_self_entity_convention), so
-// it's excluded from the orbiting entities.
+// The center "You" node already represents the self entity, so it's
+// excluded from the orbiting entities — see api::is_self_entity.
 const CANVAS_SIZE: f64 = 600.0;
 const CENTER: f64 = CANVAS_SIZE / 2.0;
 const MIN_RADIUS: f64 = 70.0;
@@ -76,7 +76,7 @@ pub fn GraphViewCmp() -> Element {
 
     use_effect(move || {
         let entity_list: Vec<EntityType> = entities.read().iter()
-            .filter(|e| e.id != SELF_ENTITY_ID)
+            .filter(|e| !is_self_entity(&e.id))
             .cloned()
             .collect();
         let moment_list = moments.read().clone();
@@ -107,7 +107,7 @@ pub fn GraphViewCmp() -> Element {
     });
 
     let entity_lookup: Vec<EntityType> = entities.read().iter()
-        .filter(|e| e.id != SELF_ENTITY_ID)
+        .filter(|e| !is_self_entity(&e.id))
         .cloned()
         .collect();
 

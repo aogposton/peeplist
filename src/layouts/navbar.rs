@@ -125,17 +125,11 @@ pub fn vault_switcher_cmp() -> Element {
     };
     let has_synced = user_email.read().is_some();
 
-    // `active_vault` defaults to Synced app-wide (see AppState in main.rs —
-    // deliberate, so an already-logged-in session doesn't regress to an
-    // empty Local vault). That means the raw signal can say "Synced" even
-    // on a first-ever, never-logged-in visit. Mirror exactly the fallback
-    // ActiveStorage::for_vault itself already applies (Synced only counts
-    // if there's actually a token) so the switcher never claims to be on a
-    // vault that isn't in its own list.
-    let current = match *active_vault.read() {
-        VaultKind::Synced if auth_token.read().is_some() => VaultKind::Synced,
-        _ => VaultKind::Local,
-    };
+    // See VaultKind::effective's doc comment — the raw signal can say
+    // "Synced" even on a first-ever, never-logged-in visit, so the switcher
+    // has to normalize it the same way the storage layer does, or it'll
+    // claim to be on a vault that isn't even in its own list.
+    let current = active_vault.read().effective(&auth_token.read());
     let current_label = entries.iter().find(|e| e.kind == current)
         .map(|e| e.label.clone())
         .unwrap_or_else(|| "Local".to_string());

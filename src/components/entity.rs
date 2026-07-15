@@ -3,7 +3,7 @@ use crate::types::*;
 use crate::theme::*;
 use crate::AppState;
 use crate::ABView;
-use crate::api::ActiveStorage;
+use crate::api::{ActiveStorage, is_self_entity};
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
 use lumen_blocks::components::input::Input;
@@ -302,10 +302,14 @@ pub fn ab_stats_cmp() -> Element {
     }).unwrap_or_else(|| "—".to_string());
 
     // Ranking: entities ordered by total moments logged, most active first.
+    // Excludes the self entity (api::is_self_entity) — "your relationship
+    // with yourself, ranked" isn't meaningful, and every moment posted with
+    // no entity selected is attributed to it.
     let (entity_rank, total_entities) = {
         let all_moments = moments.read();
         let all_entities = entities.read();
         let mut counts: Vec<(String, usize)> = all_entities.iter()
+            .filter(|e| !is_self_entity(&e.id))
             .map(|e| (e.id.clone(), all_moments.iter().filter(|m| m.entity_id == e.id).count()))
             .collect();
         counts.sort_by(|a, b| b.1.cmp(&a.1));

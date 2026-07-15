@@ -17,18 +17,24 @@ use crate::types::*;
 #[derive(Debug)]
 pub enum StorageError {
     Network(reqwest::Error),
-    // The Local vault has no real backend yet (that's Phase 1d/1e — flat-file
-    // format + localStorage/filesystem backends). Until then it's a stub:
-    // reads return empty results (so the UI just shows "nothing yet" rather
-    // than an error), writes return this so nothing is silently lost.
+    // Kept for a future backend/path that's genuinely not implemented yet
+    // (e.g. the desktop filesystem backend — see memory
+    // reference_local_first_pivot_plan). The web LocalStorage backend
+    // (src/api/local.rs) is real as of Phase 1e's web slice and uses
+    // StorageError::Local for its own failures instead.
     NotImplemented,
+    // LocalStorage-specific failures: localStorage unavailable, a record
+    // referenced by id that isn't in the vault, or a JSON merge-patch that
+    // didn't round-trip. See src/api/local.rs.
+    Local(String),
 }
 
 impl std::fmt::Display for StorageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StorageError::Network(e) => write!(f, "{e}"),
-            StorageError::NotImplemented => write!(f, "the Local vault isn't implemented yet"),
+            StorageError::NotImplemented => write!(f, "not implemented yet"),
+            StorageError::Local(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -59,6 +65,52 @@ impl VaultKind {
             _ => VaultKind::Synced,
         }
     }
+
+    // `active_vault` defaults to Synced app-wide (see AppState in main.rs —
+    // deliberate, so an already-logged-in session doesn't regress to an
+    // empty Local vault the moment this existed). That means the raw signal
+    // can say Synced on a session that was never logged in at all, or that
+    // just logged out. `effective` collapses that down to what's actually
+    // going to happen: Synced only holds if there's really a token,
+    // otherwise Local. `ActiveStorage::for_vault` already applies exactly
+    // this rule when picking a backend — anything that reads `active_vault`
+    // for a *display or logic* decision (not just to construct storage)
+    // needs to go through this too, or it'll disagree with what the
+    // storage layer actually does. Getting this wrong is what caused two
+    // real bugs already: the vault switcher showing the wrong vault as
+    // current, and MomentInputCmp defaulting new moments to the Supabase
+    // self id ("0") even while actually writing to the Local vault.
+    pub fn effective(self, token: &Option<String>) -> VaultKind {
+        match self {
+            VaultKind::Synced if token.is_some() => VaultKind::Synced,
+            _ => VaultKind::Local,
+        }
+    }
+
+    // The "this entity means yourself" sentinel differs per vault and isn't
+    // reconciled at the type level (see types.rs's SELF_ENTITY_ID doc
+    // comment and memory project_self_entity_convention) — the Synced
+    // backend is still bound to the live Supabase self-row's real id ("0"),
+    // while a local vault's self entity is minted fresh per vault with the
+    // reserved id vault_format::LOCAL_SELF_ENTITY_ID ("self"). Anything that
+    // needs "the id that means self right now" should go through this
+    // rather than hardcoding one or the other.
+    pub fn self_entity_id(&self) -> &'static str {
+        match self {
+            VaultKind::Local => super::vault_format::LOCAL_SELF_ENTITY_ID,
+            VaultKind::Synced => crate::types::SELF_ENTITY_ID,
+        }
+    }
+}
+
+// Checked against both possible self ids rather than needing to know which
+// vault is active — the two sentinels never collide with a real entity's id
+// in either backend, so this is safe to call from anywhere that just needs
+// "is this entity the self entity" without threading vault context through
+// (e.g. general entity lists that should exclude it — see memory
+// project_self_entity_convention).
+pub fn is_self_entity(id: &str) -> bool {
+    id == crate::types::SELF_ENTITY_ID || id == super::vault_format::LOCAL_SELF_ENTITY_ID
 }
 
 pub struct SupabaseStorage {
@@ -115,60 +167,11 @@ impl SupabaseStorage {
     }
 }
 
-// Stub — see the StorageError::NotImplemented doc comment above. Gets
-// replaced by the real flat-file-backed local vault in Phase 1d/1e without
-// changing this surface, so call sites won't need to move again.
-pub struct LocalStorage;
-
-impl LocalStorage {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub async fn get_moments(&self) -> Result<Vec<MomentType>, StorageError> {
-        Ok(vec![])
-    }
-
-    pub async fn get_entities(&self) -> Result<Vec<EntityType>, StorageError> {
-        Ok(vec![])
-    }
-
-    pub async fn get_entity_types(&self) -> Result<Vec<EntityTypeType>, StorageError> {
-        Ok(vec![])
-    }
-
-    pub async fn create_moment(&self, _m: NewMomentType) -> Result<MomentType, StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn create_entity(&self, _e: NewEntityType) -> Result<EntityType, StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn create_reaction(&self, _r: NewReactionType) -> Result<ReactionType, StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn update_moment_field(&self, _id: String, _field: &str, _value: Value) -> Result<(), StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn update_entity_field(&self, _id: String, _field: &str, _value: Value) -> Result<(), StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn delete_moment(&self, _moment: MomentType) -> Result<(), StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn delete_entity(&self, _id: String) -> Result<(), StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-
-    pub async fn delete_reaction(&self, _reaction: ReactionType) -> Result<(), StorageError> {
-        Err(StorageError::NotImplemented)
-    }
-}
+// The real implementation lives in api::local — a flat-file-shaped vault
+// backed by browser localStorage (see src/api/local.rs and
+// src/api/vault_format.rs). Re-exported here so ActiveStorage's match arms
+// below read the same either way as SupabaseStorage.
+pub use super::local::LocalStorage;
 
 pub enum ActiveStorage {
     Local(LocalStorage),
@@ -177,13 +180,10 @@ pub enum ActiveStorage {
 
 impl ActiveStorage {
     pub fn for_vault(vault: VaultKind, token: Option<String>) -> Self {
-        match vault {
-            VaultKind::Synced => match token {
-                Some(t) => ActiveStorage::Supabase(SupabaseStorage::new(t)),
-                // Can't sync logged out — fall back rather than firing a
-                // doomed authenticated request.
-                None => ActiveStorage::Local(LocalStorage::new()),
-            },
+        match vault.effective(&token) {
+            // effective() only returns Synced when token is Some, so the
+            // token.expect() below can't actually fire.
+            VaultKind::Synced => ActiveStorage::Supabase(SupabaseStorage::new(token.expect("effective() guarantees a token here"))),
             VaultKind::Local => ActiveStorage::Local(LocalStorage::new()),
         }
     }

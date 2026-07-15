@@ -3,6 +3,7 @@ use crate::theme::*;
 use crate::ui::*;
 use crate::View;
 use crate::AppState;
+use crate::api::is_self_entity;
 
 const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
 const NAV_LINK_ICON_CLASS: &str = "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
@@ -55,6 +56,15 @@ pub fn entity_list_cmp() -> Element {
     let mut currentView = state.currentView;
     let mut entityModalTgl = state.entityModalTgl;
 
+    // The self entity (see api::is_self_entity) is always present once a
+    // vault's been opened — it's not a "real" person you'd add/click on
+    // from a general list like this one, so it's excluded here the same
+    // way Graph View already excludes it from the orbiting nodes.
+    let visible_entities: Vec<_> = entities.read().iter()
+        .filter(|e| !is_self_entity(&e.id))
+        .cloned()
+        .collect();
+
     rsx! {
         div {
             class: "flex flex-col gap-y-1",
@@ -64,13 +74,13 @@ pub fn entity_list_cmp() -> Element {
                 onclick: move |_| entityModalTgl.set(true),
                 "+ Add entity"
             }
-            if entities.read().is_empty() {
+            if visible_entities.is_empty() {
                 span {
                     class: "px-3 text-xs text-muted-foreground",
                     "No entities yet"
                 }
             } else {
-                for entity in entities.read().clone().into_iter(){
+                for entity in visible_entities.into_iter(){
                     a {
                         class: NAV_LINK_CLASS,
                         onclick: move |_| {
