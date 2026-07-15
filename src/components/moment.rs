@@ -57,14 +57,16 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
     let state = use_context::<AppState>();
     let mut moments = state.moments;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
 
     let onConvertTo = move |mType: i64| {
         let id = last_moment_right_clicked_id.read().clone();
         let token = auth_token;
+                        let vault = active_vault;
         let note_type = mType;
         spawn(async move {
-            let token_val = token.read().clone().unwrap_or_default();
-            match update_moment_field(id.clone(), "moment_type_id", serde_json::json!(Some(note_type.clone())), token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.update_moment_field(id.clone(), "moment_type_id", serde_json::json!(Some(note_type.clone()))).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -222,6 +224,7 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
     let mut moments = state.moments;
     let mut sort_mode = state.sort_mode;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
 
     let moments_list = props.moments.clone();
 
@@ -235,10 +238,11 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
     let onConvertTo = move |mType:i64| {
         let id = last_moment_right_clicked_id.read().clone();
         let token = auth_token;
+                        let vault = active_vault;
         let note_type = mType;
         spawn(async move {
-                let token_val = token.read().clone().unwrap_or_default();
-                match update_moment_field(id.clone(),"moment_type_id",serde_json::json!(Some(note_type.clone())), token_val).await {
+                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                match storage.update_moment_field(id.clone(),"moment_type_id",serde_json::json!(Some(note_type.clone()))).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -334,12 +338,13 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                                     let to_pos = order.iter().position(|m| m.id == target_id).unwrap_or(order.len());
                                     order.insert(to_pos, dragged_item);
                                     let token = auth_token;
+                        let vault = active_vault;
                                     spawn(async move {
-                                        let token_val = token.read().clone().unwrap_or_default();
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                         for (idx, m) in order.iter().enumerate() {
                                             let tags = m.metadata.as_ref().map(|md| md.tags.clone()).unwrap_or_default();
                                             let new_meta = MomentMetadata { tags, sort_index: Some(idx as f64) };
-                                            if update_moment_field(m.id.clone(), "metadata", serde_json::json!(new_meta), token_val.clone()).await.is_ok() {
+                                            if storage.update_moment_field(m.id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
                                                 let mut list = moments.write();
                                                 if let Some(existing) = list.iter_mut().find(|x| x.id == m.id) {
                                                     existing.metadata = Some(new_meta);
@@ -421,6 +426,7 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     let mut current_moment = state.current_moment;
     let mut is_hovering = use_signal(|| false);
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
     let mut bg = match (is_hovering(), props.moment.moment_type_id == 2i64) {
         (true, true)   => BGpromiseHover,
         (true, false)  => BGhover,
@@ -451,13 +457,14 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
         let mut updated = moment.clone();
         updated.completed_at = if checked { Some(chrono::Utc::now().to_rfc3339()) } else { None };
         let token = auth_token;
+                        let vault = active_vault;
         let id = updated.clone().id;
         spawn(async move {
             if checked {
                 gloo_timers::future::TimeoutFuture::new(350).await;
             }
-            let token_val = token.read().clone().unwrap_or_default();
-            match update_moment_field(id,"completed_at",serde_json::json!(updated.completed_at), token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.update_moment_field(id,"completed_at",serde_json::json!(updated.completed_at)).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == updated.id) {
@@ -535,6 +542,7 @@ pub fn MomentInputCmp() -> Element {
     let mut description = use_signal(|| String::new());
     let current_entity = state.current_entity;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
     let mut selected_entity = use_signal(|| None::<String>); 
 
     
@@ -578,6 +586,7 @@ pub fn MomentInputCmp() -> Element {
 
         form.set(reset_form);
         let token = auth_token;
+                        let vault = active_vault;
 
         spawn(async move {
             let new_moment = NewMomentType {
@@ -588,8 +597,8 @@ pub fn MomentInputCmp() -> Element {
                 moment_type_id: 1,
                 deleted_at: None,
             };
-            let token_val = token.read().clone().unwrap_or_default();
-            match createMoment(new_moment, token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.create_moment(new_moment).await {
                 Ok(created_moment) => moments.write().insert(0,created_moment),
                 Err(e) => clog!("Error: {}", e),
             }
@@ -667,6 +676,7 @@ pub fn ab_task_cmp() -> Element {
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
 
     let moment = current_moment.read().clone().unwrap();
     let moment_sig = use_signal(|| moment.clone());
@@ -697,12 +707,13 @@ pub fn ab_task_cmp() -> Element {
     let mut save_tags = move |new_tags: Vec<String>| {
         let id = id_for_tags.clone();
         let token = auth_token;
+                        let vault = active_vault;
         let sort_index = moment_sig.read().metadata.as_ref().and_then(|m| m.sort_index);
         let new_meta = MomentMetadata { tags: new_tags.clone(), sort_index };
         moment_tags.set(new_tags);
         spawn(async move {
-            let token_val = token.read().clone().unwrap_or_default();
-            match update_moment_field(id.clone(), "metadata", serde_json::json!(new_meta), token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.update_moment_field(id.clone(), "metadata", serde_json::json!(new_meta)).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -761,10 +772,11 @@ pub fn ab_task_cmp() -> Element {
                                 move |checked| {
                                     let id = id.clone();
                                     let token = auth_token;
+                        let vault = active_vault;
                                     spawn(async move {
                                         let completed_at = if checked { Some(chrono::Utc::now().to_rfc3339()) } else { None };
-                                        let token_val = token.read().clone().unwrap_or_default();
-                                        match update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at), token_val).await {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        match storage.update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at)).await {
                                             Ok(_) => {
                                                 let mut list = moments.write();
                                                 if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -787,9 +799,10 @@ pub fn ab_task_cmp() -> Element {
                                 move |e: Event<FormData>| {
                                     let id = id.clone();
                                     let token = auth_token;
+                        let vault = active_vault;
                                     spawn(async move {
-                                        let token_val = token.read().clone().unwrap_or_default();
-                                        match update_moment_field(id.clone(), "due_at", serde_json::json!(Some(e.value())), token_val).await {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        match storage.update_moment_field(id.clone(), "due_at", serde_json::json!(Some(e.value()))).await {
                                             Ok(_) => {
                                                 let mut list = moments.write();
                                                 if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -813,9 +826,10 @@ pub fn ab_task_cmp() -> Element {
                         move |e| {
                             let id = id.clone();
                             let token = auth_token;
+                        let vault = active_vault;
                             spawn(async move {
-                                let token_val = token.read().clone().unwrap_or_default();
-                                match update_moment_field(id.clone(), "title", serde_json::json!(e.value()), token_val).await {
+                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                match storage.update_moment_field(id.clone(), "title", serde_json::json!(e.value())).await {
                                     Ok(_) => {
                                         let mut list = moments.write();
                                         if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -838,9 +852,10 @@ pub fn ab_task_cmp() -> Element {
                         move |e| {
                             let id = id.clone();
                             let token = auth_token;
+                        let vault = active_vault;
                             spawn(async move {
-                                let token_val = token.read().clone().unwrap_or_default();
-                                match update_moment_field(id.clone(), "description", serde_json::json!(e.value()), token_val).await {
+                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                match storage.update_moment_field(id.clone(), "description", serde_json::json!(e.value())).await {
                                     Ok(_) => {
                                         let mut list = moments.write();
                                         if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -864,9 +879,10 @@ pub fn ab_task_cmp() -> Element {
                             move |e: i32| {
                                 let id = id.clone();
                                 let token = auth_token;
+                        let vault = active_vault;
                                 spawn(async move {
-                                    let token_val = token.read().clone().unwrap_or_default();
-                                    match update_moment_field(id.clone(), "gravity", serde_json::json!(Some(e)), token_val).await {
+                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    match storage.update_moment_field(id.clone(), "gravity", serde_json::json!(Some(e))).await {
                                         Ok(_) => {
                                             let mut list = moments.write();
                                             if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -970,9 +986,10 @@ pub fn ab_task_cmp() -> Element {
                                 let new_dep: Option<String> = if val.is_empty() { None } else { Some(val) };
                                 let id = id.clone();
                                 let token = auth_token;
+                        let vault = active_vault;
                                 spawn(async move {
-                                    let token_val = token.read().clone().unwrap_or_default();
-                                    match update_moment_field(id.clone(), "depends_on", serde_json::json!(new_dep), token_val).await {
+                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(new_dep)).await {
                                         Ok(_) => {
                                             let mut list = moments.write();
                                             if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -1028,6 +1045,7 @@ pub fn ab_task_cmp() -> Element {
                                     move |_| {
                                         let id = id.clone();
                                         let token = auth_token;
+                        let vault = active_vault;
                                         spawn(async move {
                                             let completed_at = Some(chrono::Utc::now().to_rfc3339());
                                             let new_reaction = NewReactionType {
@@ -1035,10 +1053,10 @@ pub fn ab_task_cmp() -> Element {
                                                 description: ReactionForm.read().description.clone(),
                                                 value: ReactionForm.read().value,
                                             };
-                                            let token_val = token.read().clone().unwrap_or_default();
+                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                             let (complete_result, reaction_result) = futures::join!(
-                                                update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at), token_val.clone()),
-                                                createReaction(new_reaction, token_val)
+                                                storage.update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at)),
+                                                storage.create_reaction(new_reaction)
                                             );
                                             let new_r = reaction_result.expect("hello?");
                                             // update the signal so UI reacts
@@ -1081,9 +1099,10 @@ pub fn ab_task_cmp() -> Element {
                                                 let reaction_id = reaction.id.clone();
                                                 let reaction = reaction.clone();
                                                 let token = auth_token;
+                        let vault = active_vault;
                                                 spawn(async move {
-                                                    let token_val = token.read().clone().unwrap_or_default();
-                                                    match deleteReaction(reaction, token_val).await {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    match storage.delete_reaction(reaction).await {
                                                         Ok(_) => {
                                                             // update signal — drives the UI
                                                             reactions.write().retain(|r| r.id != reaction_id);
@@ -1116,9 +1135,10 @@ pub fn ab_task_cmp() -> Element {
                         let moment = moment_sig.read().clone();
                         let mut moments = moments.clone();
                         let token = auth_token;
+                        let vault = active_vault;
                         spawn(async move {
-                            let token_val = token.read().clone().unwrap_or_default();
-                            match deleteMoment(moment.clone(), token_val).await {
+                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                            match storage.delete_moment(moment.clone()).await {
                                 Ok(()) => {
                                     moments.write().retain(|m| m.id != moment.id);
                                 }

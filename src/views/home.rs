@@ -13,14 +13,9 @@ use crate::components::{
     GraphViewCmp,
 };
 
-use crate::api::{
-    createEntity,
-    createMoment,
-    getEntities,
-    getMoments,
-};
+use crate::api::ActiveStorage;
 
-use crate::types::{EntityType, MomentType, NewMomentType};
+use crate::types::MomentType;
 
 
 #[component]
@@ -33,6 +28,7 @@ pub fn Home() -> Element {
     let current_entity = state.current_entity;
     let tag_filter = state.tag_filter;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
 
     let has_tag = |m: &MomentType, tag: &str| {
         m.metadata.as_ref().is_some_and(|meta| meta.tags.iter().any(|t| t == tag))
@@ -40,15 +36,15 @@ pub fn Home() -> Element {
 
     use_effect(move || {
         let token = auth_token;
+        let vault = active_vault;
         spawn(async move {
-            let token_val = token.read().clone().unwrap_or_default();
-            match getMoments(token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.get_moments().await {
                 Ok(data) => moments.set(data),
                 Err(e) => log::info!("Error fetching moments: {}", e),
             }
 
-            let token_val = token.read().clone().unwrap_or_default();
-            match getEntities(token_val).await {
+            match storage.get_entities().await {
                 Ok(data) => entities.set(data),
                 Err(e) => log::info!("Error fetching entities: {}", e),
             }

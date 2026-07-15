@@ -4,6 +4,7 @@
 use std::fmt;
 use dioxus::prelude::*;
 use crate::types::*;
+use crate::api::VaultKind;
 use views::{Logout, LoginCMP, Home};
 use layouts::{Navbar};
 
@@ -120,6 +121,14 @@ pub struct AppState {
     pub backdropTgl: Signal<bool>,
     pub tag_filter: Signal<Option<String>>,
     pub sort_mode: Signal<SortMode>,
+    // Local-first pivot Phase 1b (see memory reference_local_first_pivot_plan).
+    // Defaults to Synced, not Local as the plan's eventual design intends —
+    // the Local vault is a stub until Phase 1d/1e build the real flat-file
+    // backend, so defaulting to it would empty the app for the only
+    // currently-functional backend (Supabase). ActiveStorage::for_vault
+    // already falls back to Local when logged out, so this matches today's
+    // behavior in both the logged-in and logged-out cases.
+    pub active_vault: Signal<VaultKind>,
 }
 
 fn main() {
@@ -146,6 +155,7 @@ fn App() -> Element {
         backdropTgl: Signal::new(false),
         tag_filter: Signal::new(None::<String>),
         sort_mode: Signal::new(SortMode::Default),
+        active_vault: Signal::new(VaultKind::Synced),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -165,6 +175,10 @@ fn App() -> Element {
 
             if let Some(mode) = storage.get_item("sort_mode").unwrap() {
                 state.sort_mode.set(SortMode::from_storage_str(&mode));
+            }
+
+            if let Some(vault) = storage.get_item("active_vault").unwrap() {
+                state.active_vault.set(VaultKind::from_storage_str(&vault));
             }
         }
     });
