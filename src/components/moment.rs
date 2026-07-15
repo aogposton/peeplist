@@ -20,12 +20,26 @@ pub fn CheckboxCmp(props: CheckboxProps) -> Element {
     rsx! {
         div {
             label {
-                class: "flex items-center cursor-pointer relative",
+                class: if props.disabled {
+                    "flex items-center relative cursor-not-allowed"
+                } else {
+                    "flex items-center cursor-pointer relative"
+                },
+                title: if props.disabled { "Blocked by an incomplete dependency" } else { "" },
                 input {
                     r#type: "checkbox",
                     checked: props.checked,
-                    class: "peer h-5 w-5 cursor-pointer transition-colors appearance-none rounded-md border-2 border-input bg-background checked:bg-primary checked:border-primary hover:border-primary/50",
-                    onchange: move |e| props.on_change.call(e.checked()),
+                    disabled: props.disabled,
+                    class: if props.disabled {
+                        "peer h-5 w-5 appearance-none rounded-md border-2 border-input bg-muted opacity-50 cursor-not-allowed"
+                    } else {
+                        "peer h-5 w-5 cursor-pointer transition-colors appearance-none rounded-md border-2 border-input bg-background checked:bg-primary checked:border-primary hover:border-primary/50"
+                    },
+                    onchange: move |e| {
+                        if !props.disabled {
+                            props.on_change.call(e.checked());
+                        }
+                    },
                 }
                 span {
                     class: "absolute text-primary-foreground opacity-0 peer-checked:opacity-100 top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 pointer-events-none",
@@ -442,7 +456,15 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     let accent_border = if is_promise { HL } else { "transparent" };
     let moment = props.moment.clone();
 
-    let mut is_completed = use_signal(|| props.moment.completed_at.is_some());
+    // Deliberately NOT a separate use_signal seeded once at mount — this
+    // component instance persists across re-renders (same list position),
+    // and a completion change that arrives via a different path than this
+    // row's own checkbox (namely: cascade_uncomplete below, which can
+    // un-complete a moment other than the one actually clicked) needs to
+    // show up here without the row having been clicked itself. Reading the
+    // live prop directly keeps this correct regardless of which code path
+    // changed the underlying data.
+    let is_completed = || props.moment.completed_at.is_some();
     let mut visual_opacity = use_signal(|| if props.moment.completed_at.is_some() { "0.4" } else { "1" });
 
     let due_display = props.moment.due_at.as_deref()
@@ -452,9 +474,18 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
             (dt.format("%b %d").to_string(), is_overdue)
         });
 
+    // A moment can't be completed while what it depends on isn't — see
+    // MomentType::depends_on. Previously this was purely informational
+    // (shown in ab_task_cmp's "Depends on" panel, factored into urgency
+    // scoring) but never actually enforced at the point of completion.
+    let is_blocked = props.moment.depends_on.as_ref().is_some_and(|dep_id| {
+        moments.read().iter().find(|m| &m.id == dep_id).is_some_and(|dep| dep.completed_at.is_none())
+    });
 
     let onCheckClicked = move |checked: bool| {
-        is_completed.set(checked);
+        if is_blocked {
+            return;
+        }
         visual_opacity.set(if checked { "0" } else { "1" });  // fade to nothing
                                                               //
         let mut updated = moment.clone();
@@ -469,9 +500,14 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
             let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
             match storage.update_moment_field(id,"completed_at",serde_json::json!(updated.completed_at)).await {
                 Ok(_) => {
-                    let mut list = moments.write();
-                    if let Some(m) = list.iter_mut().find(|m| m.id == updated.id) {
-                        m.completed_at = updated.completed_at;
+                    {
+                        let mut list = moments.write();
+                        if let Some(m) = list.iter_mut().find(|m| m.id == updated.id) {
+                            m.completed_at = updated.completed_at.clone();
+                        }
+                    }
+                    if updated.completed_at.is_none() {
+                        cascade_uncomplete(&storage, moments, updated.id.clone()).await;
                     }
                 }
                 Err(e) => log::info!("Error updating moment: {}", e),
@@ -498,6 +534,7 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
                     CheckboxCmp {
                         checked:is_completed(),
                         on_change: onCheckClicked,
+                        disabled: is_blocked,
                     },
                 }
             }
@@ -513,6 +550,12 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
                         class: "text-xs font-medium",
                         style: "color: {HL};",
                         "Promise"
+                    }
+                }
+                if is_blocked {
+                    span {
+                        class: "text-xs font-medium text-destructive",
+                        "Blocked"
                     }
                 }
                 // p {
@@ -732,12 +775,23 @@ pub fn ab_task_cmp() -> Element {
     };
 
     // Taskwarrior-style single dependency (see MomentType::depends_on).
+    // Read the current moment's own depends_on live off the `moments`
+    // signal by id, rather than off the `moment` snapshot taken once from
+    // current_moment at panel-open time — the depends-on <select>'s own
+    // handler below updates `moments` (so the list view and this panel's
+    // dependency_candidates/blocking_count already reflect it live) but
+    // never updates `current_moment` itself, so `moment.depends_on` goes
+    // stale the instant you change the dependency without closing and
+    // reopening the panel. That staleness previously meant a freshly-set
+    // dependency didn't actually block completion (or show as selected in
+    // the dropdown) until the panel was closed and reopened.
     let entity_id = moment.entity_id.clone();
     let dependency_candidates: Vec<MomentType> = moments.read().iter()
         .filter(|m| m.entity_id == entity_id && m.id != id && m.completed_at.is_none())
         .cloned()
         .collect();
-    let blocked_on = moment.depends_on.clone().and_then(|dep_id| {
+    let current_depends_on = moments.read().iter().find(|m| m.id == id).and_then(|m| m.depends_on.clone());
+    let blocked_on = current_depends_on.clone().and_then(|dep_id| {
         moments.read().iter().find(|m| m.id == dep_id).cloned()
     });
     let is_blocked = blocked_on.as_ref().is_some_and(|dep| dep.completed_at.is_none());
@@ -771,11 +825,34 @@ pub fn ab_task_cmp() -> Element {
                 if moment.moment_type_id != 3i64 {
                     div {
                         class: "flex items-center gap-3",
+                        // The underlying <input type="checkbox">'s live DOM
+                        // `checked` property can decouple from the declared
+                        // value once a user has actually clicked it —
+                        // switching to a different moment reuses the same
+                        // persisted DOM node (this panel doesn't remount
+                        // between moments, only between open/close), so the
+                        // checkbox kept showing the *previous* moment's
+                        // checked state until manually toggled twice. A
+                        // `key` prop on a single always-present child isn't
+                        // honored by Dioxus's diffing the way it is for
+                        // siblings inside a `for` — so this uses the same
+                        // single-iteration `for`-with-key pattern already
+                        // proven to force a real remount elsewhere in this
+                        // file (see MomentListCmp's drag-and-drop rows),
+                        // which guarantees a genuinely fresh DOM node (and
+                        // thus a fresh, undirtied `checked` property) every
+                        // time the moment being shown changes.
+                        for _key in [id.clone()] {
                         CheckboxCmp {
+                            key: "{_key}",
                             checked: moment.completed_at.clone().is_some(),
+                            disabled: is_blocked,
                             on_change: {
                                 let id = id.clone();
                                 move |checked| {
+                                    if is_blocked {
+                                        return;
+                                    }
                                     let id = id.clone();
                                     let token = auth_token;
                         let vault = active_vault;
@@ -784,9 +861,14 @@ pub fn ab_task_cmp() -> Element {
                                         let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                         match storage.update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at)).await {
                                             Ok(_) => {
-                                                let mut list = moments.write();
-                                                if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                    m.completed_at = completed_at;
+                                                {
+                                                    let mut list = moments.write();
+                                                    if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                        m.completed_at = completed_at.clone();
+                                                    }
+                                                }
+                                                if completed_at.is_none() {
+                                                    cascade_uncomplete(&storage, moments, id.clone()).await;
                                                 }
                                             }
                                             Err(e) => clog!("Error updating moment: {}", e),
@@ -794,6 +876,7 @@ pub fn ab_task_cmp() -> Element {
                                     });
                                 }
                             }
+                        }
                         }
                         Input {
                             input_type: "datetime-local",
@@ -1010,11 +1093,11 @@ pub fn ab_task_cmp() -> Element {
                                 });
                             }
                         },
-                        option { value: "", selected: moment.depends_on.is_none(), "None" }
+                        option { value: "", selected: current_depends_on.is_none(), "None" }
                         for candidate in dependency_candidates.iter() {
                             option {
                                 value: "{candidate.id}",
-                                selected: moment.depends_on == Some(candidate.id.clone()),
+                                selected: current_depends_on == Some(candidate.id.clone()),
                                 "{candidate.title}"
                             }
                         }
@@ -1049,9 +1132,13 @@ pub fn ab_task_cmp() -> Element {
                             Button {
                                 variant: ButtonVariant::Secondary,
                                 full_width: true,
+                                disabled: is_blocked,
                                 on_click: {
                                     let id = id.clone();
                                     move |_| {
+                                        if is_blocked {
+                                            return;
+                                        }
                                         let id = id.clone();
                                         let token = auth_token;
                         let vault = active_vault;
@@ -1161,6 +1248,37 @@ pub fn ab_task_cmp() -> Element {
                     "Delete"
                 }
             }
+        }
+    }
+}
+
+// "Completed" has to mean something real: a moment that's blocked by an
+// incomplete dependency can't be completed (see CheckboxCmp's `disabled`
+// handling above) — so the reverse has to hold too, or completion status
+// becomes a lie the instant a finished blocker gets un-finished again.
+// Un-completing `root_id` therefore un-completes anything that transitively
+// depends on it as well, rather than leaving a completed-but-actually-
+// blocked moment sitting there. The user's own framing: don't let the app
+// paper over an untangled blocked/blocking chain — force it to be resolved.
+async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<MomentType>>, root_id: String) {
+    let mut queue = vec![root_id];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(current) = queue.pop() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+        let dependents: Vec<String> = moments.read().iter()
+            .filter(|m| m.depends_on.as_deref() == Some(current.as_str()) && m.completed_at.is_some())
+            .map(|m| m.id.clone())
+            .collect();
+        for dep_id in dependents {
+            if storage.update_moment_field(dep_id.clone(), "completed_at", serde_json::json!(None::<String>)).await.is_ok() {
+                let mut list = moments.write();
+                if let Some(m) = list.iter_mut().find(|m| m.id == dep_id) {
+                    m.completed_at = None;
+                }
+            }
+            queue.push(dep_id);
         }
     }
 }

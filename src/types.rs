@@ -244,6 +244,9 @@ pub struct MomentListProps {
 pub struct CheckboxProps {
     pub checked: bool,
     pub on_change: EventHandler<bool>,
+    // e.g. a moment blocked by an incomplete dependency — see MomentType::depends_on.
+    #[props(default)]
+    pub disabled: bool,
 }
 
 
