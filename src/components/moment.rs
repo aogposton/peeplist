@@ -821,7 +821,10 @@ pub fn ab_task_cmp() -> Element {
                 input {
                     class: "text-xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1",
                     value: "{title}",
-                    oninput: {
+                    // Commit on blur, not every keystroke — a local-vault write
+                    // rewrites the whole entity file (see api/vault_format.rs),
+                    // and this cuts Supabase chatter today too.
+                    onchange: {
                         let id = id.clone();
                         move |e| {
                             let id = id.clone();
@@ -847,7 +850,7 @@ pub fn ab_task_cmp() -> Element {
                     class: "w-full min-h-32 rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y",
                     placeholder: "Add a description...",
                     value: "{description.clone().unwrap_or_default()}",
-                    oninput: {
+                    onchange: {
                         let id = id.clone();
                         move |e| {
                             let id = id.clone();

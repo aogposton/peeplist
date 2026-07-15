@@ -3,6 +3,7 @@ pub mod entity;
 pub mod moment;
 pub mod auth;
 pub mod storage;
+pub mod vault_format;
 
 pub use auth::{login, get_current_user, refresh_access_token};
 pub use storage::{ActiveStorage, VaultKind, StorageError};

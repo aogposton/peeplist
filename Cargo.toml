@@ -28,6 +28,11 @@ futures = "0.3.32"
 gloo-events = "0.2"
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
 lumen-blocks = { git = "https://github.com/Leaf-Computer/lumen-blocks.git", tag = "v0.3.0" }
+# YAML (de)serialization for the local vault format (see src/api/vault_format.rs).
+# Maintained fork — serde_yaml was archived upstream in 2024.
+serde_norway = "0.9"
+# Unicode-safe filename slugs for the vault's people/*.md files.
+slug = "0.1"
 
 [features]
 default = ["web"]
