@@ -139,6 +139,11 @@ pub fn vault_switcher_cmp() -> Element {
 
     let mut select_vault = move |kind: VaultKind| {
         active_vault.set(kind);
+        // Desktop has no preference persistence yet (see main.rs's startup
+        // effect) — web_sys::window() panics on a native target rather than
+        // just returning None, so this has to be compiled out entirely
+        // rather than relying on the `if let Some(...)` to fail gracefully.
+        #[cfg(not(feature = "desktop"))]
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
             storage.set("active_vault", kind.as_storage_str()).ok();
         }
@@ -149,6 +154,7 @@ pub fn vault_switcher_cmp() -> Element {
     // the active vault, so the switcher never points at a vault that no
     // longer exists.
     let mut remove_synced = move || {
+        #[cfg(not(feature = "desktop"))]
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
             storage.set("auth_token", "").ok();
             storage.set("refresh_token", "").ok();
@@ -285,6 +291,7 @@ pub fn Navbar() -> Element {
                 }
                 Err(e) => {
                 clog!("Session check failed, logging out: {}", e);
+                #[cfg(not(feature = "desktop"))]
                 if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
                     storage.set("auth_token", &"").ok();
                     storage.set("refresh_token", &"").ok();
@@ -300,6 +307,10 @@ pub fn Navbar() -> Element {
 
         // Keep the session alive proactively so it doesn't reach the point
         // of dying in the first place. Started once per mounted session.
+        // Desktop has no persisted refresh_token to act on (see main.rs's
+        // startup effect) and web_sys::window() panics on a native target,
+        // so there's nothing useful for this loop to do there yet.
+        #[cfg(not(feature = "desktop"))]
         if !*refresh_loop_started.read() {
             refresh_loop_started.set(true);
             spawn(async move {

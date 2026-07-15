@@ -4,6 +4,14 @@ pub mod moment;
 pub mod auth;
 pub mod storage;
 pub mod vault_format;
+// Two concrete Local vault backends, sharing vault_format — `dx build`
+// compiles in `desktop` regardless of whether default features (which
+// include `web`) are also active, so this has to key off `desktop` being
+// *present*, not `web` being absent. See storage.rs's `pub use` below,
+// which picks whichever of these is actually compiled in as `LocalStorage`.
+#[cfg(feature = "desktop")]
+pub mod local_desktop;
+#[cfg(not(feature = "desktop"))]
 pub mod local;
 
 pub use auth::{login, get_current_user, refresh_access_token};

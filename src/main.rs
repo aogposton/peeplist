@@ -9,9 +9,17 @@ use views::{Logout, LoginCMP, Home};
 use layouts::{Navbar};
 
 
+// web_sys::console::log_1 panics on a native (non-wasm) target — this is
+// used for debug logging at dozens of call sites app-wide, so it's fixed
+// once here rather than gating every individual clog!() call for desktop.
 macro_rules! clog {
     ($($arg:tt)*) => {
-        web_sys::console::log_1(&format!($($arg)*).into())
+        {
+            #[cfg(not(feature = "desktop"))]
+            web_sys::console::log_1(&format!($($arg)*).into());
+            #[cfg(feature = "desktop")]
+            println!($($arg)*);
+        }
     };
 }
 
@@ -159,7 +167,17 @@ fn App() -> Element {
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
-        #[cfg(feature = "web")]
+        // `#[cfg(feature = "web")]` alone doesn't actually exclude this on a
+        // desktop build — `default = ["web"]` in Cargo.toml means the web
+        // feature stays active unless a build explicitly disables default
+        // features, and `dx build --platform desktop` doesn't do that on its
+        // own. web_sys::window() panics at runtime on a native (non-wasm)
+        // target ("cannot access imported statics on non-wasm targets"), so
+        // this has to key off `desktop` being *absent* specifically, not
+        // `web` being present. Desktop has no session/preference persistence
+        // yet (a known, deliberately deferred gap, not solved here) — it
+        // just starts fresh on defaults every launch.
+        #[cfg(not(feature = "desktop"))]
         {
             let storage = web_sys::window().unwrap()
                 .local_storage().unwrap().unwrap();

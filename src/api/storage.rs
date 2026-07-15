@@ -167,10 +167,14 @@ impl SupabaseStorage {
     }
 }
 
-// The real implementation lives in api::local — a flat-file-shaped vault
-// backed by browser localStorage (see src/api/local.rs and
-// src/api/vault_format.rs). Re-exported here so ActiveStorage's match arms
-// below read the same either way as SupabaseStorage.
+// Two concrete implementations, chosen at compile time (see mod.rs) — a
+// browser-localStorage-backed one for web, a real std::fs one for desktop,
+// both flat-file-shaped via vault_format. Re-exported here under one name
+// so ActiveStorage's match arms below read the same either way as
+// SupabaseStorage.
+#[cfg(feature = "desktop")]
+pub use super::local_desktop::LocalStorage;
+#[cfg(not(feature = "desktop"))]
 pub use super::local::LocalStorage;
 
 pub enum ActiveStorage {

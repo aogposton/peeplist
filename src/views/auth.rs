@@ -22,10 +22,15 @@ pub fn Logout() -> Element {
     let nav = navigator();
     nav.push(Route::Home {});
 
-    let storage = window().unwrap().local_storage().unwrap().unwrap();
-    storage.set("auth_token", &"").ok();
-    storage.set("refresh_token", &"").ok();
-    storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+    // Desktop has no preference persistence yet — see main.rs's startup
+    // effect.
+    #[cfg(not(feature = "desktop"))]
+    {
+        let storage = window().unwrap().local_storage().unwrap().unwrap();
+        storage.set("auth_token", &"").ok();
+        storage.set("refresh_token", &"").ok();
+        storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+    }
     state.auth_token.set(None);
     state.user_id.set(None);
     state.user_email.set(None);
@@ -54,10 +59,15 @@ pub fn LoginCMP() -> Element {
         spawn(async move {
             match login(form.email, form.password).await {
                 Ok(auth) => {
-                    let storage = window().unwrap().local_storage().unwrap().unwrap();
-                    storage.set("auth_token", &auth.access_token).ok();
-                    storage.set("refresh_token", &auth.refresh_token).ok();
-                    storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
+                    // Desktop has no preference persistence yet — see
+                    // main.rs's startup effect.
+                    #[cfg(not(feature = "desktop"))]
+                    {
+                        let storage = window().unwrap().local_storage().unwrap().unwrap();
+                        storage.set("auth_token", &auth.access_token).ok();
+                        storage.set("refresh_token", &auth.refresh_token).ok();
+                        storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
+                    }
                     state.auth_token.set(Some(auth.access_token));
                     state.user_id.set(Some(auth.user.id));
                     state.user_email.set(Some(auth.user.email));
