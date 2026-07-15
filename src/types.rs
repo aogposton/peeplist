@@ -4,6 +4,76 @@ use uuid::Uuid;
 
 fn default_drift() -> f64 { 2.0 }
 
+// Entity id 0 is reserved to always mean "yourself" (see memory
+// project_self_entity_convention). IDs became UUID strings in the local-first
+// migration, but the live Supabase project still assigns this row the
+// integer id 0 — the value here has to match what the SupabaseStorage
+// boundary stringifies that row's id to (see api/client.rs), not the plan's
+// eventual "self" sentinel, which only applies once a local vault (with its
+// own self.md file) exists.
+pub const SELF_ENTITY_ID: &str = "0";
+
+// Supabase's `bigint` id columns are unchanged (see api/client.rs) — these
+// helpers are the one place that reconciles that wire shape (JSON numbers)
+// with the app's UUID-ready `String` id fields, so every other file can just
+// treat ids as strings. Falls back to passing strings through untouched,
+// which is what a real UUID (once the local vault lands) will look like.
+fn de_flex_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdRepr {
+        Num(i64),
+        Str(String),
+    }
+    Ok(match IdRepr::deserialize(deserializer)? {
+        IdRepr::Num(n) => n.to_string(),
+        IdRepr::Str(s) => s,
+    })
+}
+
+fn de_flex_id_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IdRepr {
+        Num(i64),
+        Str(String),
+    }
+    Ok(match Option::<IdRepr>::deserialize(deserializer)? {
+        Some(IdRepr::Num(n)) => Some(n.to_string()),
+        Some(IdRepr::Str(s)) => Some(s),
+        None => None,
+    })
+}
+
+fn se_flex_id<S>(id: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match id.parse::<i64>() {
+        Ok(n) => serializer.serialize_i64(n),
+        Err(_) => serializer.serialize_str(id),
+    }
+}
+
+fn se_flex_id_opt<S>(id: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match id {
+        Some(s) => match s.parse::<i64>() {
+            Ok(n) => serializer.serialize_some(&n),
+            Err(_) => serializer.serialize_some(s),
+        },
+        None => serializer.serialize_none(),
+    }
+}
+
 // Freeform per-entity details collected in the "New Entity" modal. Stored in
 // entities.metadata (jsonb) — mirrors the same pattern used for
 // moments.metadata (tags/sort_index). Surfaced read-only in the Info panel.
@@ -24,9 +94,11 @@ pub struct EntityMetadata {
 // Entities
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EntityType {
-    pub id: i64,
+    #[serde(deserialize_with = "de_flex_id")]
+    pub id: String,
     pub name: String,
-    pub entity_type_id: Option<i64>,
+    #[serde(deserialize_with = "de_flex_id_opt", default)]
+    pub entity_type_id: Option<String>,
     // Server-generated on insert; never sent back on writes.
     #[serde(skip_serializing, default)]
     pub created_at: String,
@@ -42,15 +114,18 @@ pub struct EntityType {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EntityTypeType {
-    pub id: i64,
+    #[serde(deserialize_with = "de_flex_id")]
+    pub id: String,
     pub name: String,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NewEntityType {
     pub name: String,
-    pub entity_type_id: Option<i64>,
-    pub parent_entity_id: Option<i64>,
+    #[serde(serialize_with = "se_flex_id_opt")]
+    pub entity_type_id: Option<String>,
+    #[serde(serialize_with = "se_flex_id_opt")]
+    pub parent_entity_id: Option<String>,
     pub user_id: Option<Uuid>,
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
     pub metadata: Option<EntityMetadata>,
@@ -84,11 +159,16 @@ pub struct MomentForm {
 // Moments
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MomentType {
-    pub id: i64,
+    // deleteMoment/updateMoment PATCH this whole struct as the request body
+    // (not just the changed field), so id/entity_id/depends_on need both
+    // directions of the flex conversion, unlike the New*Type structs above.
+    #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
+    pub id: String,
     pub title: String,
     pub description: Option<String>,
     pub gravity: Option<i32>,
-    pub entity_id: i64,
+    #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
+    pub entity_id: String,
     pub moment_type_id: i64,
     pub due_at: Option<String>,
     pub completed_at: Option<String>,
@@ -100,8 +180,8 @@ pub struct MomentType {
     // Single taskwarrior-style dependency. The `moments` table only has room
     // for one (bare `depends_on bigint`, no join table) — a real multi-dependency
     // feature would need a `moment_dependencies` join table added later.
-    #[serde(default)]
-    pub depends_on: Option<i64>,
+    #[serde(deserialize_with = "de_flex_id_opt", serialize_with = "se_flex_id_opt", default)]
+    pub depends_on: Option<String>,
     // Freeform jsonb column, repurposed client-side for tags + manual sort
     // order rather than adding new schema. See MomentMetadata.
     #[serde(default)]
@@ -119,9 +199,11 @@ pub struct MomentMetadata {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct ReactionType {
-    pub id: i64,
+    #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
+    pub id: String,
     pub description: String,
-    pub moment_id: i64,
+    #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
+    pub moment_id: String,
     pub value: i32,
 }
 
@@ -129,7 +211,8 @@ pub struct ReactionType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NewReactionType {
     pub description: String,
-    pub moment_id: i64,
+    #[serde(serialize_with = "se_flex_id")]
+    pub moment_id: String,
     pub value: i32,
 }
 
@@ -138,7 +221,8 @@ pub struct NewMomentType {
     pub title: String,
     pub description: Option<String>,
     pub gravity: Option<i32>,
-    pub entity_id: i64,
+    #[serde(serialize_with = "se_flex_id")]
+    pub entity_id: String,
     pub moment_type_id: i64,
     pub deleted_at: Option<String>
 }
