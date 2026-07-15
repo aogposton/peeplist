@@ -7,9 +7,12 @@ use crate::api::{
     createEntity,
     getEntities,
     getEntityTypes,
+    update_entity_field,
 };
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
+use lumen_blocks::components::input::Input;
+use lumen_blocks::components::label::Label;
 
 fn stat_row(label: &str, value: &str) -> Element {
     rsx! {
@@ -19,6 +22,44 @@ fn stat_row(label: &str, value: &str) -> Element {
             span { class: "text-foreground font-medium", "{value}" }
         }
     }
+}
+
+// Distance: arbitrary units measuring how far a relationship has drifted.
+// Grows by 1 unit every `drift` days since the entity's last *completed*
+// task/promise (logging or completing a note doesn't count — see the
+// Distance/Drift spec). Falls back to the entity's created_at if it has
+// never had a completed task/promise. Never negative.
+// Every entity starts BASE_DISTANCE units away and grows further apart at
+// `drift` units/day since the entity was created (day 1 = 10, day 2 = 12,
+// day 3 = 14 for drift=2 — additive, not a ratio). Distance closes back up
+// when something happens: a completed task/promise, or a note that carries
+// a non-zero gravity (logged-but-never-"completed" events, like someone
+// bringing you flowers, still count). Closing amount is |gravity| scaled
+// down — GRAVITY_DISTANCE_DIVISOR is a first-draft tuning knob, not final.
+const BASE_DISTANCE: f64 = 10.0;
+const GRAVITY_DISTANCE_DIVISOR: f64 = 20.0;
+
+pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now: chrono::DateTime<chrono::Utc>) -> f64 {
+    let created = chrono::DateTime::parse_from_rfc3339(&entity.created_at)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc));
+    let Some(created) = created else { return BASE_DISTANCE; };
+
+    let days_elapsed = ((now - created).num_seconds() as f64 / 86400.0).max(0.0);
+    let drift = if entity.drift > 0.0 { entity.drift } else { 2.0 };
+    let grown = BASE_DISTANCE + drift * days_elapsed;
+
+    let closed: f64 = moments.iter()
+        .filter(|m| m.entity_id == entity.id)
+        .filter(|m| {
+            let completed_task_or_promise = (m.moment_type_id == 1i64 || m.moment_type_id == 2i64) && m.completed_at.is_some();
+            let noteworthy_note = m.moment_type_id == 3i64 && m.gravity.unwrap_or(0) != 0;
+            completed_task_or_promise || noteworthy_note
+        })
+        .map(|m| (m.gravity.unwrap_or(0).unsigned_abs() as f64) / GRAVITY_DISTANCE_DIVISOR)
+        .sum();
+
+    (grown - closed).max(0.0)
 }
 
 #[component]
@@ -260,6 +301,11 @@ pub fn ab_stats_cmp() -> Element {
         })
     };
 
+    let distance_label = entity.as_ref().map(|e| {
+        let d = compute_distance(e, &moments.read(), chrono::Utc::now());
+        format!("{d:.1} (drift {:.0}d/unit)", e.drift)
+    }).unwrap_or_else(|| "—".to_string());
+
     // Ranking: entities ordered by total moments logged, most active first.
     let (entity_rank, total_entities) = {
         let all_moments = moments.read();
@@ -304,6 +350,7 @@ pub fn ab_stats_cmp() -> Element {
                         {stat_row("Promises kept", &promises_kept.to_string())}
                         {stat_row("Promises pending", &promises_pending.to_string())}
                         {stat_row("Tasks with reactions", &tasks_with_reactions.to_string())}
+                        {stat_row("Distance", &distance_label)}
                     }
                 }
                 div {
@@ -325,7 +372,8 @@ pub fn ab_stats_cmp() -> Element {
 #[component]
 pub fn ab_info_cmp() -> Element {
     let state = use_context::<AppState>();
-    let current_entity = state.current_entity;
+    let mut current_entity = state.current_entity;
+    let mut entities = state.entities;
     let auth_token = state.auth_token;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
@@ -352,6 +400,10 @@ pub fn ab_info_cmp() -> Element {
         .map(|e| e.created_at.chars().take(10).collect::<String>())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "Unknown".to_string());
+    let drift_value = entity.as_ref().map(|e| e.drift).unwrap_or(2.0);
+
+    let meta = entity.as_ref().and_then(|e| e.metadata.clone()).unwrap_or_default();
+    let display_or_not_set = |s: &str| if s.trim().is_empty() { "Not set".to_string() } else { s.to_string() };
 
     rsx! {
         div {
@@ -377,6 +429,46 @@ pub fn ab_info_cmp() -> Element {
                         {stat_row("Name", &entity_name)}
                         {stat_row("Type", &type_name)}
                         {stat_row("Known since", &known_since)}
+                        if entity.is_some() {
+                            {stat_row("Relationship", &display_or_not_set(&meta.relationship))}
+                            {stat_row("How you met", &display_or_not_set(&meta.how_met))}
+                            {stat_row("Birthday", &display_or_not_set(&meta.birthday))}
+                            {stat_row("Location", &display_or_not_set(&meta.location))}
+                            {stat_row("Why they matter", &display_or_not_set(&meta.why))}
+                            div {
+                                class: "flex justify-between items-center text-sm py-1.5",
+                                span { class: "text-muted-foreground", "Drift (days/unit)" }
+                                input {
+                                    r#type: "number",
+                                    step: "0.5",
+                                    min: "0.1",
+                                    class: "w-20 rounded-md border border-input bg-background text-sm text-foreground px-2 py-1 text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                    value: "{drift_value}",
+                                    onchange: move |e| {
+                                        let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id) else { return; };
+                                        let Ok(new_drift) = e.value().parse::<f64>() else { return; };
+                                        let token = auth_token;
+                                        spawn(async move {
+                                            let token_val = token.read().clone().unwrap_or_default();
+                                            match update_entity_field(entity_id, "drift", serde_json::json!(new_drift), token_val).await {
+                                                Ok(_) => {
+                                                    let mut list = entities.write();
+                                                    if let Some(ent) = list.iter_mut().find(|x| x.id == entity_id) {
+                                                        ent.drift = new_drift;
+                                                    }
+                                                    if let Some(cur) = current_entity.write().as_mut() {
+                                                        if cur.id == entity_id {
+                                                            cur.drift = new_drift;
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => log::info!("Error updating drift: {}", err),
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -399,12 +491,20 @@ pub fn EntityModalCmp() -> Element {
         let token = auth_token;
         form.set(EntityForm::default());
         spawn(async move {
+            let metadata = EntityMetadata {
+                relationship: form_data.relationship.clone(),
+                how_met: form_data.meeting.clone(),
+                birthday: form_data.bday.clone(),
+                location: form_data.location.clone(),
+                why: form_data.why.clone(),
+            };
             let new_entity = NewEntityType {
                 name: form_data.name.clone(),
                 entity_type_id: form_data.entity_type_sel.parse::<i64>().ok(),
                 parent_entity_id: None,
                 user_id: None,
                 archived_at: None,
+                metadata: Some(metadata),
             };
     
             let token_val = token.read().clone().unwrap_or_default();
@@ -433,106 +533,103 @@ pub fn EntityModalCmp() -> Element {
     rsx! {
         if *entityModalTgl.read() {
             div {
-                class: "modal z-100",
+                class: "fixed inset-0 bg-black/40 z-100 flex items-center justify-center p-4",
                 onclick: move |_| entityModalTgl.set(false),
                 div {
-                    class: "modal-content",
+                    class: "w-full max-w-md rounded-lg border border-border bg-card shadow-lg",
                     onclick: move |e| e.stop_propagation(),
-                    span { onclick: move |_| entityModalTgl.set(false), class: "close", "×" }
-                    h1 {class:"text-3xl","New Entity"}
-                    hr {}
                     div {
-                        class: "flex items-center",
-                        label { "Type" }
-                        select {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().entity_type_sel}",
-                            oninput: move |e| {
-                                form.write().entity_type_sel = e.value();
-                            },
-                            for entity_type in entityTypes.iter() {
-                                option {
-                                    value: "{entity_type.id}",
-                                    "{entity_type.name}"
+                        class: "flex items-center justify-between h-14 px-4 border-b border-border",
+                        span { class: "text-lg font-semibold text-foreground", "New Entity" }
+                        button {
+                            class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                            onclick: move |_| entityModalTgl.set(false),
+                            "×"
+                        }
+                    }
+                    div {
+                        class: "flex flex-col gap-4 px-4 py-4 max-h-[70vh] overflow-y-auto",
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "Type" }
+                            select {
+                                class: "w-full h-10 rounded-md border border-input bg-background text-sm text-foreground px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                value: "{form.read().entity_type_sel}",
+                                oninput: move |e| {
+                                    form.write().entity_type_sel = e.value();
+                                },
+                                option { value: "", "Select a type..." }
+                                for entity_type in entityTypes.iter() {
+                                    option {
+                                        value: "{entity_type.id}",
+                                        "{entity_type.name}"
+                                    }
                                 }
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "Name" }
+                            Input {
+                                full_width: true,
+                                value: "{form.read().name}",
+                                on_input: move |e: Event<FormData>| form.write().name = e.value(),
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "Relationship to you" }
+                            Input {
+                                full_width: true,
+                                value: "{form.read().relationship}",
+                                on_input: move |e: Event<FormData>| form.write().relationship = e.value(),
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "How you met" }
+                            Input {
+                                full_width: true,
+                                value: "{form.read().meeting}",
+                                on_input: move |e: Event<FormData>| form.write().meeting = e.value(),
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "Birthday" }
+                            Input {
+                                full_width: true,
+                                value: "{form.read().bday}",
+                                on_input: move |e: Event<FormData>| form.write().bday = e.value(),
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "Their location" }
+                            Input {
+                                full_width: true,
+                                value: "{form.read().location}",
+                                on_input: move |e: Event<FormData>| form.write().location = e.value(),
+                            }
+                        }
+                        div {
+                            class: "flex flex-col gap-y-1.5",
+                            Label { "Why they matter" }
+                            Input {
+                                full_width: true,
+                                value: "{form.read().why}",
+                                on_input: move |e: Event<FormData>| form.write().why = e.value(),
                             }
                         }
                     }
                     div {
-                        class: "flex items-center",
-                        label { "Name" }
-                        input {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().name}",
-                            oninput: move |e| {
-                                form.write().name = e.value();
-                            },
+                        class: "px-4 py-3 border-t border-border",
+                        Button {
+                            variant: ButtonVariant::Primary,
+                            full_width: true,
+                            on_click: move |e| onsubmit(e),
+                            "Create Entity"
                         }
-                    }
-                    div {
-                        class: "flex items-center",
-                        label { "Relationship to you" }
-                        input {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().relationship}",
-                            oninput: move |e| {
-                                form.write().relationship = e.value();
-                            },
-                        }
-                    }
-    
-                    div {
-                        class: "flex items-center",
-                        label { "How you met" }
-                        input {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().meeting}",
-                            oninput: move |e| {
-                                form.write().meeting = e.value();
-                            },
-                        }
-                    }
-    
-                    div {
-                        class: "flex items-center",
-                        label { "Birthday" }
-                        input {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().bday}",
-                            oninput: move |e| {
-                                form.write().bday = e.value();
-                            },
-                        }
-                    }
-    
-                    div {
-                        class: "flex items-center",
-                        label { "Their location" }
-                        input {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().location}",
-                            oninput: move |e| {
-                                form.write().location = e.value();
-                            },
-                        }
-                    }
-    
-                    div {
-                        class: "flex items-center",
-                        label { "Why they matter" }
-                        input {
-                            class: "border my-2 mx-4",
-                            value: "{form.read().why}",
-                            oninput: move |e| {
-                                form.write().why = e.value();
-                            },
-                        }
-                    }
-                    a {
-                        onclick: move |e| onsubmit(e),
-                        class: "text-white my-2 px-10 py-2",
-                        style: "background-color:{HL};",
-                        "submit"
                     }
                 }
             }

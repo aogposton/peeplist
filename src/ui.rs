@@ -12,13 +12,14 @@ pub fn fa_trash() -> Element { rsx! { i { class: "fa-solid fa-trash" } } }
 #[component]
 pub fn fa_plus() -> Element { rsx! { i { class: "fa-solid fa-plus" } } }
 
-#[derive(Props, Clone, PartialEq)]
-pub struct ButtonProps {
-    pub label: Element,
-    pub btnclick: EventHandler<MouseEvent>,
-    #[props(optional)]
-    pub class: Option<String>,
-}
+#[component]
+pub fn fa_bolt() -> Element { rsx! { i { class: "fa-solid fa-bolt" } } }
+
+#[component]
+pub fn fa_inbox() -> Element { rsx! { i { class: "fa-solid fa-inbox" } } }
+
+#[component]
+pub fn fa_circle_nodes() -> Element { rsx! { i { class: "fa-solid fa-circle-nodes" } } }
 
 // ----- Slider
 #[derive(Props, Clone, PartialEq)]
@@ -41,26 +42,6 @@ pub fn gravity_select(props: GravitySelectProps) -> Element {
                     "{i}"
                 }
             }
-        }
-    }
-}
-
-#[component] pub fn button_cmp(props: ButtonProps) -> Element {
-    let mut is_hovering = use_signal(|| false);
-    let base_class = "w-full border px-4 py-2 rounded-md font-semibold transition-all cursor-pointer";
-    let hover_class = if *is_hovering.read() { "opacity-50" } else { "" };
-    let extra_class = props.class.clone().unwrap_or_default();
-
-    rsx! {
-        button {
-            class: "{BG} {base_class} {hover_class} {extra_class}",
-            onmouseenter: move |_| is_hovering.set(true),
-            onmouseleave: move |_| is_hovering.set(false),
-            onclick: move |e| {
-                clog!("btn clicked");
-                props.btnclick.call(e);
-            },
-            {props.label}
         }
     }
 }

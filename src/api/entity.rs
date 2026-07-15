@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use super::client::SupabaseClient;
 use crate::types::*;
 
@@ -26,6 +27,20 @@ pub async fn getEntities(token: String) -> Result<Vec<EntityType>, reqwest::Erro
     Ok(entities)
 }
 
+
+pub async fn update_entity_field(id: i64, field: &str, value: Value, token: String) -> Result<(), reqwest::Error> {
+    let payload = serde_json::json!({
+        field: value
+    });
+
+    SupabaseClient::new(token)
+        .patch("entities", id)
+        .json(&payload)
+        .send()
+        .await?;
+
+    Ok(())
+}
 
 pub async fn getEntityTypes(token: String) -> Result<Vec<EntityTypeType>, reqwest::Error> {
     let response = SupabaseClient::new(token)

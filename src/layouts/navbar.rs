@@ -17,7 +17,8 @@ use crate::components::{
     ab_history_cmp,
     ab_stats_cmp,
     ab_info_cmp,
-    peep_list_cmp,
+    views_list_cmp,
+    entity_list_cmp,
     tag_list_cmp,
     NotesSectionCmp,
 };
@@ -32,6 +33,8 @@ use crate::api::{
 use crate::types::{EntityType, MomentType, NewMomentType};
 use web_sys::window;
 use gloo_timers::future::TimeoutFuture;
+use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
+use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger};
 
 // Refresh the access token this long before it would otherwise expire via
 // inactivity/backend expiry, so a live session never silently dies underneath
@@ -48,7 +51,6 @@ const TOKEN_REFRESH_INTERVAL_MS: u32 = 50 * 60 * 1000;
 //     (width, height)
 // }
 const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
-const NAV_LINK_DESTRUCTIVE_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-destructive hover:bg-destructive/10 transition-colors cursor-pointer";
 
 #[component]
 pub fn Sidebar() -> Element {
@@ -62,15 +64,27 @@ pub fn Sidebar() -> Element {
                 "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform -translate-x-full transition-transform duration-200 bg-background border-r border-border"
             },
             div {
-                class:"h-10",
+                class:"h-1",
             }
             profile_cmp { }
             div {
-                class: "px-3 mt-8",
-                peep_list_cmp { }
+                class: "px-3 mt-1 pt-4 border-t border-border",
+                span {
+                    class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                    "Views"
+                }
+                views_list_cmp { }
             }
             div {
-                class: "px-3 mt-8",
+                class: "px-3 mt-6 pt-4 border-t border-border",
+                span {
+                    class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                    "Entities"
+                }
+                entity_list_cmp { }
+            }
+            div {
+                class: "px-3 mt-6 pt-4 border-t border-border",
                 span {
                     class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
                     "Tags"
@@ -84,9 +98,16 @@ pub fn Sidebar() -> Element {
 #[component]
 pub fn profile_cmp() -> Element {
     let state = use_context::<AppState>();
+    let user_email = state.user_email;
+    let initial = user_email.read().as_ref()
+        .and_then(|e| e.chars().next())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let display_name = user_email.read().clone().unwrap_or_else(|| "Account".to_string());
+
     rsx! {
         div {
-            class: "flex flex-col gap-y-1 px-3",
+            class: "px-3",
             if state.auth_token.read().is_none() {
                 a {
                     class: NAV_LINK_CLASS,
@@ -96,30 +117,39 @@ pub fn profile_cmp() -> Element {
                     },
                     "Login"
                 }
-            }
-            a {
-                class: NAV_LINK_CLASS,
-                onclick: move |_| {
-                    let nav = navigator();
-                    nav.push(Route::LoginCMP {});
-                },
-                "Profile"
-            }
-            a {
-                class: NAV_LINK_CLASS,
-                onclick: move |_| {
-                    let nav = navigator();
-                    nav.push(Route::LoginCMP {});
-                },
-                "Crisis View"
-            }
-            a {
-                class: NAV_LINK_DESTRUCTIVE_CLASS,
-                onclick: move |_| {
-                    let nav = navigator();
-                    nav.push(Route::Logout {});
-                },
-                "Logout"
+            } else {
+                div {
+                    class: "w-full sidebar-user-menu",
+                    Dropdown {
+                    DropdownTrigger {
+                        class: "w-full text-left",
+                        div {
+                            class: "flex items-center gap-2 rounded-md px-2 py-2 hover:bg-muted transition-colors cursor-pointer w-full",
+                            Avatar {
+                                class: "h-8 w-8 shrink-0",
+                                AvatarFallback { class: "text-sm", "{initial}" }
+                            }
+                            span {
+                                class: "text-sm font-medium text-foreground truncate",
+                                "{display_name}"
+                            }
+                        }
+                    }
+                    DropdownContent {
+                        align: "start",
+                        DropdownItem::<String> {
+                            value: "logout".to_string(),
+                            index: 0,
+                            destructive: true,
+                            on_select: move |_| {
+                                let nav = navigator();
+                                nav.push(Route::Logout {});
+                            },
+                            "Logout"
+                        }
+                    }
+                    }
+                }
             }
         }
     }
@@ -138,6 +168,7 @@ pub fn Navbar() -> Element {
     let current_entity = state.current_entity;
     let mut auth_token = state.auth_token;
     let mut user_id = state.user_id;
+    let mut user_email = state.user_email;
     let mut refresh_loop_started = use_signal(|| false);
     let moment = current_moment.read().clone();
 
@@ -153,7 +184,11 @@ pub fn Navbar() -> Element {
         };
 
         spawn(async move {
-            if let Err(e) = get_current_user(token).await {
+            match get_current_user(token).await {
+                Ok(user) => {
+                    user_email.set(Some(user.email));
+                }
+                Err(e) => {
                 clog!("Session check failed, logging out: {}", e);
                 if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
                     storage.set("auth_token", &"").ok();
@@ -161,7 +196,9 @@ pub fn Navbar() -> Element {
                 }
                 auth_token.set(None);
                 user_id.set(None);
+                user_email.set(None);
                 navigator().push(Route::LoginCMP {});
+                }
             }
         });
 
@@ -207,9 +244,9 @@ pub fn Navbar() -> Element {
     //
     let header_title = match current_view.read().clone() {
         Inbox => "".to_string(),
-        SELF => "".to_string(),
         Entity => "".to_string(),
         Priority => "".to_string(),
+        Graph => "".to_string(),
     };
 
     rsx! {
@@ -267,15 +304,27 @@ pub fn Navbar() -> Element {
                 div {
                     class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-border bg-background transform translate-x-0 transition-transform duration-200",
                     div {
-                        class:"h-10",
+                        class:"h-1",
                     }
                     profile_cmp { }
                     div {
-                        class: "px-3 mt-8",
-                        peep_list_cmp { }
+                        class: "px-3 mt-1 pt-4 border-t border-border",
+                        span {
+                            class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                            "Views"
+                        }
+                        views_list_cmp { }
                     }
                     div {
-                        class: "px-3 mt-8",
+                        class: "px-3 mt-6 pt-4 border-t border-border",
+                        span {
+                            class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
+                            "Entities"
+                        }
+                        entity_list_cmp { }
+                    }
+                    div {
+                        class: "px-3 mt-6 pt-4 border-t border-border",
                         span {
                             class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
                             "Tags"
