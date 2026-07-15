@@ -230,6 +230,9 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
 
     let mut set_sort_mode = move |mode: SortMode| {
         sort_mode.set(mode);
+        // Desktop has no preference persistence yet — see main.rs's startup
+        // effect.
+        #[cfg(not(feature = "desktop"))]
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
             storage.set("sort_mode", mode.as_storage_str()).ok();
         }
