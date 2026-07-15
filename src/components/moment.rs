@@ -14,6 +14,7 @@ use lumen_blocks::components::dropdown::{
 use lumen_blocks::components::collapsible::{Collapsible, CollapsibleTrigger, CollapsibleContent};
 use lumen_blocks::components::label::{Label, LabelSize};
 use web_sys::window;
+use crate::quick_capture::{self, TokenKind};
 
 #[component]
 pub fn CheckboxCmp(props: CheckboxProps) -> Element {
@@ -359,8 +360,11 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                                     spawn(async move {
                                         let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                         for (idx, m) in order.iter().enumerate() {
-                                            let tags = m.metadata.as_ref().map(|md| md.tags.clone()).unwrap_or_default();
-                                            let new_meta = MomentMetadata { tags, sort_index: Some(idx as f64) };
+                                            // Reorder only ever touches sort_index — preserve everything
+                                            // else already on this moment's metadata (tags, priority, ...)
+                                            // rather than constructing a blank one from scratch.
+                                            let mut new_meta = m.metadata.clone().unwrap_or_default();
+                                            new_meta.sort_index = Some(idx as f64);
                                             if storage.update_moment_field(m.id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
                                                 let mut list = moments.write();
                                                 if let Some(existing) = list.iter_mut().find(|x| x.id == m.id) {
@@ -617,7 +621,15 @@ pub fn MomentInputCmp() -> Element {
         }
     });
 
+    // Taskwarrior-style quick capture (see quick_capture.rs): the title
+    // field itself carries "priority:H", "due:tomorrow", "@Jane", etc, and
+    // submit_moment parses those back out instead of taking form.title
+    // literally. An @-mention, when present, overrides the entity dropdown.
     let mut submit_moment = move || {
+        let raw_title = title.read().clone();
+        let entities_snapshot = entities.read().clone();
+        let parsed = quick_capture::parse(&raw_title, &entities_snapshot);
+
         let form_data = form.read().clone();
 
         let mut reset_form = MomentForm::default();
@@ -631,13 +643,15 @@ pub fn MomentInputCmp() -> Element {
         }
 
         form.set(reset_form);
+        title.set(String::new());
+        let entity_id = parsed.entity_id.clone().unwrap_or(form_data.entity_sel.clone());
         let token = auth_token;
                         let vault = active_vault;
 
         spawn(async move {
             let new_moment = NewMomentType {
-                title: form_data.title.clone(),
-                entity_id: form_data.entity_sel.clone(),
+                title: parsed.title.clone(),
+                entity_id,
                 description: Some(form_data.description.clone()),
                 gravity: Some(1),
                 moment_type_id: 1,
@@ -645,7 +659,32 @@ pub fn MomentInputCmp() -> Element {
             };
             let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
             match storage.create_moment(new_moment).await {
-                Ok(created_moment) => moments.write().insert(0,created_moment),
+                Ok(created_moment) => {
+                    let created_id = created_moment.id.clone();
+                    moments.write().insert(0, created_moment);
+                    if parsed.has_metadata() {
+                        let meta = MomentMetadata {
+                            tags: parsed.tags_add.clone(),
+                            sort_index: None,
+                            priority: parsed.priority.clone(),
+                            project: parsed.project.clone(),
+                            scheduled_at: parsed.scheduled_at.clone(),
+                            until_at: parsed.until_at.clone(),
+                        };
+                        if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
+                            if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
+                                m.metadata = Some(meta);
+                            }
+                        }
+                    }
+                    if let Some(due) = parsed.due_at.clone() {
+                        if storage.update_moment_field(created_id.clone(), "due_at", serde_json::json!(Some(due.clone()))).await.is_ok() {
+                            if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
+                                m.due_at = Some(due);
+                            }
+                        }
+                    }
+                }
                 Err(e) => clog!("Error: {}", e),
             }
         });
@@ -657,19 +696,14 @@ pub fn MomentInputCmp() -> Element {
             class: "mx-4 my-2 rounded-xl border border-border bg-muted/20 shadow-sm p-4",
             div {
                 class: "flex items-center gap-2",
-                onkeypress: move |e| {
-                    if e.key() == Key::Enter {
-                        submit_moment();
-                    }
-                },
                 div {
                     class: "flex-1",
-                    Input {
-                        full_width: true,
-                        name: "task_title",
-                        placeholder: "Title",
-                        value: "{form.read().title}",
-                        on_input: move |e: Event<FormData>| form.write().title = e.value(),
+                    QuickCaptureInput {
+                        value: title.read().clone(),
+                        placeholder: "Title  ·  try @name, priority:H, due:tomorrow, +tag".to_string(),
+                        entities: entities.read().clone(),
+                        on_input: move |v: String| title.set(v),
+                        on_submit: move |_| submit_moment(),
                     }
                 }
                 Dropdown {
@@ -717,6 +751,138 @@ pub fn MomentInputCmp() -> Element {
 }
 
 
+#[derive(Props, Clone, PartialEq)]
+pub struct QuickCaptureInputProps {
+    pub value: String,
+    pub placeholder: String,
+    pub entities: Vec<EntityType>,
+    pub on_input: EventHandler<String>,
+    pub on_submit: EventHandler<()>,
+}
+
+// The title input for MomentInputCmp, with live taskwarrior-style syntax
+// highlighting and an @-mention entity chooser. Built as a colored overlay
+// div stacked on top of a real <input> whose own text is transparent (only
+// its caret shows) — a plain <input> can't render multi-colored text, and a
+// contenteditable div would need its own from-scratch cursor/selection
+// handling, so this "invisible input + decorative backdrop" trick is the
+// standard lightweight way to fake a syntax-highlighted text field.
+//
+// The @-mention dropdown is driven purely by trailing_mention_query(), i.e.
+// "is the last word of the string a live @fragment" — not real cursor
+// position. That's deliberate: quick capture is typed left-to-right at the
+// end of the field, and avoiding DOM selection APIs sidesteps the
+// web-vs-desktop web_sys split (see clog!/window() gating elsewhere in this
+// file) entirely.
+fn apply_selected_mention(value: &str, mention_start: usize, matches: &[EntityType], idx: usize, on_input: EventHandler<String>) {
+    if let Some(entity) = matches.get(idx) {
+        on_input.call(quick_capture::apply_mention(value, mention_start, &entity.name));
+    }
+}
+
+#[component]
+pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
+    let mut highlighted = use_signal(|| 0usize);
+    let value = props.value.clone();
+    let on_input = props.on_input;
+    let on_submit = props.on_submit;
+
+    let tokens = quick_capture::tokenize(&value, &props.entities);
+
+    let mention = quick_capture::trailing_mention_query(&value);
+    let matches: Vec<EntityType> = match &mention {
+        Some(m) => {
+            let q_lower = m.query.to_lowercase();
+            let mut list: Vec<EntityType> = props.entities.iter()
+                .filter(|e| !e.name.is_empty() && e.name.to_lowercase().contains(&q_lower))
+                .cloned()
+                .collect();
+            list.sort_by_key(|e| (!e.name.to_lowercase().starts_with(&q_lower), e.name.to_lowercase()));
+            list.truncate(8);
+            list
+        }
+        None => Vec::new(),
+    };
+    let mention_start = mention.map(|m| m.start).unwrap_or(0);
+    let dropdown_open = !matches.is_empty();
+    if dropdown_open && *highlighted.read() >= matches.len() {
+        highlighted.set(0);
+    }
+
+    rsx! {
+        div {
+            class: "relative flex-1",
+            input {
+                r#type: "text",
+                name: "task_title",
+                class: "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                style: "color: transparent; caret-color: {BaseFont};",
+                placeholder: "{props.placeholder}",
+                value: "{value}",
+                oninput: move |e| on_input.call(e.value()),
+                onkeydown: {
+                    let value = value.clone();
+                    let matches = matches.clone();
+                    move |e: Event<KeyboardData>| {
+                        if dropdown_open {
+                            match e.key() {
+                                Key::ArrowDown => {
+                                    e.prevent_default();
+                                    let next = (*highlighted.read() + 1) % matches.len();
+                                    highlighted.set(next);
+                                }
+                                Key::ArrowUp => {
+                                    e.prevent_default();
+                                    let h = *highlighted.read();
+                                    highlighted.set(if h == 0 { matches.len() - 1 } else { h - 1 });
+                                }
+                                Key::Enter | Key::Tab => {
+                                    e.prevent_default();
+                                    apply_selected_mention(&value, mention_start, &matches, *highlighted.read(), on_input);
+                                }
+                                _ => {}
+                            }
+                        } else if e.key() == Key::Enter {
+                            on_submit.call(());
+                        }
+                    }
+                },
+            }
+            div {
+                class: "absolute inset-0 flex items-center pointer-events-none px-3 text-sm whitespace-pre overflow-hidden",
+                for (i, token) in tokens.iter().enumerate() {
+                    span {
+                        key: "{i}",
+                        style: if token.kind.is_recognized() { format!("color: {HL}; font-weight: 600;") } else { format!("color: {BaseFont};") },
+                        "{token.text}"
+                    }
+                }
+            }
+            if dropdown_open {
+                div {
+                    class: "absolute left-0 right-0 top-full mt-1 z-20 rounded-md border border-border bg-background shadow-md overflow-hidden",
+                    for (i, entity) in matches.iter().enumerate() {
+                        div {
+                            key: "{entity.id}",
+                            class: if i == *highlighted.read() { "px-3 py-1.5 text-sm cursor-pointer bg-muted" } else { "px-3 py-1.5 text-sm cursor-pointer" },
+                            onmousedown: {
+                                let value = value.clone();
+                                let matches = matches.clone();
+                                move |e: Event<MouseData>| {
+                                    e.prevent_default();
+                                    apply_selected_mention(&value, mention_start, &matches, i, on_input);
+                                }
+                            },
+                            "{entity.name}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
 #[component]
 pub fn ab_task_cmp() -> Element {
     let state = use_context::<AppState>();
@@ -757,8 +923,13 @@ pub fn ab_task_cmp() -> Element {
         let id = id_for_tags.clone();
         let token = auth_token;
                         let vault = active_vault;
-        let sort_index = moment_sig.read().metadata.as_ref().and_then(|m| m.sort_index);
-        let new_meta = MomentMetadata { tags: new_tags.clone(), sort_index };
+        // moment_sig is a snapshot taken once when the panel opened and
+        // never updated by any field-patch handler (same staleness class
+        // fixed for depends_on above) — read the *current* metadata live by
+        // id instead, so saving tags can't clobber a priority/project/
+        // scheduled/until edit made earlier in this same panel session.
+        let mut new_meta = moments.read().iter().find(|m| m.id == id).and_then(|m| m.metadata.clone()).unwrap_or_default();
+        new_meta.tags = new_tags.clone();
         moment_tags.set(new_tags);
         spawn(async move {
             let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
@@ -798,6 +969,12 @@ pub fn ab_task_cmp() -> Element {
     let blocking_count = moments.read().iter()
         .filter(|m| m.depends_on == Some(id.clone()) && m.completed_at.is_none())
         .count();
+
+    // Taskwarrior-style attributes, part 2 (priority/project/scheduled/
+    // until) — same live-by-id read as current_depends_on above, for the
+    // same reason: the moment snapshot taken at panel-open time never
+    // updates as fields get edited within the same open session.
+    let current_metadata = moments.read().iter().find(|m| m.id == id).and_then(|m| m.metadata.clone()).unwrap_or_default();
 
     rsx! {
         div {
@@ -989,116 +1166,238 @@ pub fn ab_task_cmp() -> Element {
                     }
                 }
 
+                // Taskwarrior-style attributes, buried here on purpose so the
+                // main panel (and the list view, which never shows any of
+                // this) stays uncluttered — priority/project/scheduled/until
+                // plus the pre-existing tags and depends-on pickers, moved in
+                // from their own top-level sections. recur and real
+                // enforcement of scheduled/until are explicitly not built yet
+                // — see DESIGN_PROGRESS.md.
                 div {
-                    class: "rounded-lg border border-border bg-background p-3",
-                    div {
-                        class: "text-sm font-medium text-foreground mb-2",
-                        "Tags"
-                    }
-                    if !moment_tags.read().is_empty() {
-                        div {
-                            class: "flex flex-wrap gap-1.5 mb-2",
-                            for tag in moment_tags.read().iter() {
-                                span {
-                                    class: "inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground",
-                                    "#{tag}"
-                                    button {
-                                        class: "text-muted-foreground hover:text-destructive cursor-pointer leading-none",
-                                        onclick: {
-                                            let tag = tag.clone();
-                                            let mut save_tags = save_tags.clone();
-                                            move |_| {
-                                                let mut updated = moment_tags.read().clone();
-                                                updated.retain(|t| t != &tag);
-                                                save_tags(updated);
+                    class: "rounded-lg border border-border bg-background overflow-hidden",
+                    Collapsible {
+                        CollapsibleTrigger {
+                            class: "text-sm font-medium text-foreground hover:no-underline hover:bg-muted/50",
+                            "Advanced"
+                        }
+                        CollapsibleContent {
+                            div {
+                                class: "flex flex-col gap-4 p-3 border-t border-border",
+
+                                div {
+                                    class: "flex flex-col gap-y-1.5",
+                                    Label { size: LabelSize::Small, "Priority" }
+                                    select {
+                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                        oninput: {
+                                            let id = id.clone();
+                                            move |e| {
+                                                let id = id.clone();
+                                                let token = auth_token;
+                                                let vault = active_vault;
+                                                let val = e.value();
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    patch_moment_metadata(&storage, moments, id, |m| {
+                                                        m.priority = if val.is_empty() { None } else { Some(val) };
+                                                    }).await;
+                                                });
                                             }
                                         },
-                                        "×"
+                                        option { value: "", selected: current_metadata.priority.is_none(), "None" }
+                                        option { value: "H", selected: current_metadata.priority.as_deref() == Some("H"), "High" }
+                                        option { value: "M", selected: current_metadata.priority.as_deref() == Some("M"), "Medium" }
+                                        option { value: "L", selected: current_metadata.priority.as_deref() == Some("L"), "Low" }
                                     }
                                 }
-                            }
-                        }
-                    }
-                    div {
-                        class: "flex items-center gap-2",
-                        Input {
-                            size: InputSize::Small,
-                            placeholder: "Add tag...",
-                            value: "{tag_input.read()}",
-                            on_input: move |e: Event<FormData>| tag_input.set(e.value()),
-                        }
-                        Button {
-                            variant: ButtonVariant::Secondary,
-                            size: ButtonSize::Small,
-                            on_click: {
-                                let mut save_tags = save_tags.clone();
-                                move |_| {
-                                    let new_tag = tag_input.read().trim().to_string();
-                                    if new_tag.is_empty() {
-                                        return;
-                                    }
-                                    let mut updated = moment_tags.read().clone();
-                                    if !updated.contains(&new_tag) {
-                                        updated.push(new_tag);
-                                        save_tags(updated);
-                                    }
-                                    tag_input.set(String::new());
-                                }
-                            },
-                            "Add"
-                        }
-                    }
-                }
 
-                div {
-                    class: "rounded-lg border border-border bg-background p-3",
-                    div {
-                        class: "text-sm font-medium text-foreground mb-2",
-                        "Depends on"
-                    }
-                    if is_blocked {
-                        div {
-                            class: "flex items-center gap-1.5 mb-2 text-xs text-destructive",
-                            span { class: "h-1.5 w-1.5 rounded-full bg-destructive shrink-0" }
-                            "Blocked by \"{blocked_on.as_ref().map(|d| d.title.clone()).unwrap_or_default()}\""
-                        }
-                    }
-                    if blocking_count > 0 {
-                        div {
-                            class: "mb-2 text-xs text-muted-foreground",
-                            "Blocking {blocking_count} other open moment(s)"
-                        }
-                    }
-                    select {
-                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        oninput: {
-                            let id = id.clone();
-                            move |e| {
-                                let val = e.value();
-                                let new_dep: Option<String> = if val.is_empty() { None } else { Some(val) };
-                                let id = id.clone();
-                                let token = auth_token;
-                        let vault = active_vault;
-                                spawn(async move {
-                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                    match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(new_dep)).await {
-                                        Ok(_) => {
-                                            let mut list = moments.write();
-                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                m.depends_on = new_dep;
+                                div {
+                                    class: "flex flex-col gap-y-1.5",
+                                    Label { size: LabelSize::Small, "Project" }
+                                    Input {
+                                        full_width: true,
+                                        placeholder: "e.g. Home.Garden",
+                                        value: "{current_metadata.project.clone().unwrap_or_default()}",
+                                        on_change: {
+                                            let id = id.clone();
+                                            move |e: Event<FormData>| {
+                                                let id = id.clone();
+                                                let token = auth_token;
+                                                let vault = active_vault;
+                                                let val = e.value();
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    patch_moment_metadata(&storage, moments, id, |m| {
+                                                        m.project = if val.is_empty() { None } else { Some(val) };
+                                                    }).await;
+                                                });
                                             }
                                         }
-                                        Err(e) => log::info!("Error updating depends_on: {}", e),
                                     }
-                                });
-                            }
-                        },
-                        option { value: "", selected: current_depends_on.is_none(), "None" }
-                        for candidate in dependency_candidates.iter() {
-                            option {
-                                value: "{candidate.id}",
-                                selected: current_depends_on == Some(candidate.id.clone()),
-                                "{candidate.title}"
+                                }
+
+                                div {
+                                    class: "flex flex-col gap-y-1.5",
+                                    Label { size: LabelSize::Small, "Scheduled" }
+                                    Input {
+                                        input_type: "datetime-local",
+                                        size: InputSize::Medium,
+                                        value: current_metadata.scheduled_at.clone().unwrap_or_default().chars().take(16).collect::<String>(),
+                                        on_change: {
+                                            let id = id.clone();
+                                            move |e: Event<FormData>| {
+                                                let id = id.clone();
+                                                let token = auth_token;
+                                                let vault = active_vault;
+                                                let val = e.value();
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    patch_moment_metadata(&storage, moments, id, |m| {
+                                                        m.scheduled_at = if val.is_empty() { None } else { Some(val) };
+                                                    }).await;
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div {
+                                    class: "flex flex-col gap-y-1.5",
+                                    Label { size: LabelSize::Small, "Until" }
+                                    Input {
+                                        input_type: "datetime-local",
+                                        size: InputSize::Medium,
+                                        value: current_metadata.until_at.clone().unwrap_or_default().chars().take(16).collect::<String>(),
+                                        on_change: {
+                                            let id = id.clone();
+                                            move |e: Event<FormData>| {
+                                                let id = id.clone();
+                                                let token = auth_token;
+                                                let vault = active_vault;
+                                                let val = e.value();
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    patch_moment_metadata(&storage, moments, id, |m| {
+                                                        m.until_at = if val.is_empty() { None } else { Some(val) };
+                                                    }).await;
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div {
+                                    div {
+                                        class: "text-sm font-medium text-foreground mb-2",
+                                        "Tags"
+                                    }
+                                    if !moment_tags.read().is_empty() {
+                                        div {
+                                            class: "flex flex-wrap gap-1.5 mb-2",
+                                            for tag in moment_tags.read().iter() {
+                                                span {
+                                                    class: "inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground",
+                                                    "#{tag}"
+                                                    button {
+                                                        class: "text-muted-foreground hover:text-destructive cursor-pointer leading-none",
+                                                        onclick: {
+                                                            let tag = tag.clone();
+                                                            let mut save_tags = save_tags.clone();
+                                                            move |_| {
+                                                                let mut updated = moment_tags.read().clone();
+                                                                updated.retain(|t| t != &tag);
+                                                                save_tags(updated);
+                                                            }
+                                                        },
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        class: "flex items-center gap-2",
+                                        Input {
+                                            size: InputSize::Small,
+                                            placeholder: "Add tag...",
+                                            value: "{tag_input.read()}",
+                                            on_input: move |e: Event<FormData>| tag_input.set(e.value()),
+                                        }
+                                        Button {
+                                            variant: ButtonVariant::Secondary,
+                                            size: ButtonSize::Small,
+                                            on_click: {
+                                                let mut save_tags = save_tags.clone();
+                                                move |_| {
+                                                    let new_tag = tag_input.read().trim().to_string();
+                                                    if new_tag.is_empty() {
+                                                        return;
+                                                    }
+                                                    let mut updated = moment_tags.read().clone();
+                                                    if !updated.contains(&new_tag) {
+                                                        updated.push(new_tag);
+                                                        save_tags(updated);
+                                                    }
+                                                    tag_input.set(String::new());
+                                                }
+                                            },
+                                            "Add"
+                                        }
+                                    }
+                                }
+
+                                div {
+                                    div {
+                                        class: "text-sm font-medium text-foreground mb-2",
+                                        "Depends on"
+                                    }
+                                    if is_blocked {
+                                        div {
+                                            class: "flex items-center gap-1.5 mb-2 text-xs text-destructive",
+                                            span { class: "h-1.5 w-1.5 rounded-full bg-destructive shrink-0" }
+                                            "Blocked by \"{blocked_on.as_ref().map(|d| d.title.clone()).unwrap_or_default()}\""
+                                        }
+                                    }
+                                    if blocking_count > 0 {
+                                        div {
+                                            class: "mb-2 text-xs text-muted-foreground",
+                                            "Blocking {blocking_count} other open moment(s)"
+                                        }
+                                    }
+                                    select {
+                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                        oninput: {
+                                            let id = id.clone();
+                                            move |e| {
+                                                let val = e.value();
+                                                let new_dep: Option<String> = if val.is_empty() { None } else { Some(val) };
+                                                let id = id.clone();
+                                                let token = auth_token;
+                                let vault = active_vault;
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(new_dep)).await {
+                                                        Ok(_) => {
+                                                            let mut list = moments.write();
+                                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                                m.depends_on = new_dep;
+                                                            }
+                                                        }
+                                                        Err(e) => log::info!("Error updating depends_on: {}", e),
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        option { value: "", selected: current_depends_on.is_none(), "None" }
+                                        for candidate in dependency_candidates.iter() {
+                                            option {
+                                                value: "{candidate.id}",
+                                                selected: current_depends_on == Some(candidate.id.clone()),
+                                                "{candidate.title}"
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -1248,6 +1547,30 @@ pub fn ab_task_cmp() -> Element {
                     "Delete"
                 }
             }
+        }
+    }
+}
+
+// Shared read-modify-write for the metadata jsonb blob (see MomentMetadata —
+// tags/priority/project/scheduled_at/until_at all live there, not as real
+// DB columns, so patching any one of them means loading the *current* full
+// blob, mutating just the one field, and PATCHing "metadata" as a whole).
+// Reads live off `moments` by id rather than any snapshot, matching the
+// pattern already fixed for depends_on/tags above — an `impl Trait` mutator
+// closure only works as a real fn, not a stored closure, so this is a
+// module-level fn rather than another per-field-duplicated closure.
+async fn patch_moment_metadata(
+    storage: &ActiveStorage,
+    mut moments: Signal<Vec<MomentType>>,
+    id: String,
+    mutate: impl FnOnce(&mut MomentMetadata),
+) {
+    let mut new_meta = moments.read().iter().find(|m| m.id == id).and_then(|m| m.metadata.clone()).unwrap_or_default();
+    mutate(&mut new_meta);
+    if storage.update_moment_field(id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
+        let mut list = moments.write();
+        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+            m.metadata = Some(new_meta);
         }
     }
 }

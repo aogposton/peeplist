@@ -188,12 +188,29 @@ pub struct MomentType {
     pub metadata: Option<MomentMetadata>,
 }
 
+// Taskwarrior-style attributes, part 2 (see DESIGN_PROGRESS.md — the user
+// wants "everything taskwarrior has"). Deliberately not new MomentType/DB
+// columns: like tags/sort_index below, these ride the existing metadata
+// jsonb blob, so no Supabase schema migration is needed. `recur` and real
+// enforcement of `scheduled`/`until` (taskwarrior hides tasks before their
+// scheduled date and auto-deletes them after `until`) are explicitly out of
+// scope for now — these fields are storable and editable, not yet acted on.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct MomentMetadata {
     #[serde(default)]
     pub tags: Vec<String>,
     #[serde(default)]
     pub sort_index: Option<f64>,
+    // "H" / "M" / "L", taskwarrior's own convention — not an enum, so an
+    // unrecognized value round-trips harmlessly instead of failing to parse.
+    #[serde(default)]
+    pub priority: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub scheduled_at: Option<String>,
+    #[serde(default)]
+    pub until_at: Option<String>,
 }
 
 
