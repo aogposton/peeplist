@@ -15,22 +15,21 @@ use lumen_blocks::components::label::Label;
 
 pub fn Logout() -> Element {
     let mut state = use_context::<AppState>();
-    let mut loginform = use_signal(LoginForm::default);
 
-    use_effect(move || {
-        spawn(async move {
-        });
-    });
-
+    // Logging out lands you back on the app (now on the Local vault), never
+    // on a dead-end login screen — see the vault switcher's "Remove" action
+    // in navbar.rs, which is the primary way this gets triggered now.
     let nav = navigator();
-    nav.push(Route::LoginCMP {});
+    nav.push(Route::Home {});
 
     let storage = window().unwrap().local_storage().unwrap().unwrap();
     storage.set("auth_token", &"").ok();
     storage.set("refresh_token", &"").ok();
+    storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
     state.auth_token.set(None);
     state.user_id.set(None);
     state.user_email.set(None);
+    state.active_vault.set(VaultKind::Local);
 
     rsx! {
 
@@ -58,9 +57,14 @@ pub fn LoginCMP() -> Element {
                     let storage = window().unwrap().local_storage().unwrap().unwrap();
                     storage.set("auth_token", &auth.access_token).ok();
                     storage.set("refresh_token", &auth.refresh_token).ok();
+                    storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
                     state.auth_token.set(Some(auth.access_token));
                     state.user_id.set(Some(auth.user.id));
                     state.user_email.set(Some(auth.user.email));
+                    // The whole point of logging in here is adding the Synced
+                    // vault (see the vault switcher's "+ Add a vault") — switch
+                    // straight to it rather than leaving Local selected.
+                    state.active_vault.set(VaultKind::Synced);
                     let nav = navigator();
                     nav.push(Route::Home {});
                 }
@@ -78,9 +82,21 @@ pub fn LoginCMP() -> Element {
             class: "flex justify-center items-center w-full h-screen bg-background",
             div {
                 class: "w-full max-w-sm p-8 flex flex-col gap-y-5 rounded-lg border border-border bg-card shadow-sm",
-                span {
-                    class: "text-2xl font-semibold text-center text-foreground",
-                    "Login"
+                div {
+                    class: "flex items-center justify-between",
+                    span {
+                        class: "text-2xl font-semibold text-foreground",
+                        "Add Synced vault"
+                    }
+                    a {
+                        class: "text-sm text-muted-foreground hover:text-foreground cursor-pointer",
+                        onclick: move |_| { navigator().push(Route::Home {}); },
+                        "Cancel"
+                    }
+                }
+                p {
+                    class: "text-sm text-muted-foreground -mt-2",
+                    "Log in to sync this device with your account. Peeplist works fully offline without one."
                 }
                 div {
                     class: "flex flex-col gap-y-1.5",

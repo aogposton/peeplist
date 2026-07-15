@@ -26,13 +26,14 @@ use crate::components::{
 use crate::api::{
     get_current_user,
     refresh_access_token,
+    VaultKind,
 };
 
 use crate::types::{EntityType, MomentType, NewMomentType};
 use web_sys::window;
 use gloo_timers::future::TimeoutFuture;
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
-use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger};
+use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger, DropdownSeparator};
 
 // Refresh the access token this long before it would otherwise expire via
 // inactivity/backend expiry, so a live session never silently dies underneath
@@ -48,8 +49,6 @@ const TOKEN_REFRESH_INTERVAL_MS: u32 = 50 * 60 * 1000;
 //     let height = w.inner_height().unwrap().as_f64().unwrap();
 //     (width, height)
 // }
-const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
-
 #[component]
 pub fn Sidebar() -> Element {
     let state = use_context::<AppState>();
@@ -64,7 +63,7 @@ pub fn Sidebar() -> Element {
             div {
                 class:"h-1",
             }
-            profile_cmp { }
+            vault_switcher_cmp { }
             div {
                 class: "px-3 mt-1 pt-4 border-t border-border",
                 span {
@@ -93,32 +92,87 @@ pub fn Sidebar() -> Element {
     }
 }
 
+// One entry in the vault switcher's dropdown. Deliberately list-shaped (a
+// Vec built fresh on every render) rather than hardcoded menu items, even
+// though today it only ever holds "Local" plus optionally "Synced" — see
+// memory reference_local_first_pivot_plan. Extending to a real open-ended
+// multi-vault list later is then just "populate this Vec from a stored
+// registry instead," not a UI rewrite.
+struct VaultEntry {
+    kind: VaultKind,
+    label: String,
+    // Local is the app's one-and-only local vault right now (no multi-vault
+    // support yet), so it's never removable. Synced is removable — "remove"
+    // just means log out, there's nothing to delete server-side here.
+    removable: bool,
+}
+
 #[component]
-pub fn profile_cmp() -> Element {
+pub fn vault_switcher_cmp() -> Element {
     let state = use_context::<AppState>();
-    let user_email = state.user_email;
-    let initial = user_email.read().as_ref()
-        .and_then(|e| e.chars().next())
+    let mut auth_token = state.auth_token;
+    let mut user_id = state.user_id;
+    let mut user_email = state.user_email;
+    let mut active_vault = state.active_vault;
+    let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
+
+    let entries: Vec<VaultEntry> = {
+        let mut v = vec![VaultEntry { kind: VaultKind::Local, label: "Local".to_string(), removable: false }];
+        if let Some(email) = user_email.read().clone() {
+            v.push(VaultEntry { kind: VaultKind::Synced, label: email, removable: true });
+        }
+        v
+    };
+    let has_synced = user_email.read().is_some();
+
+    // `active_vault` defaults to Synced app-wide (see AppState in main.rs —
+    // deliberate, so an already-logged-in session doesn't regress to an
+    // empty Local vault). That means the raw signal can say "Synced" even
+    // on a first-ever, never-logged-in visit. Mirror exactly the fallback
+    // ActiveStorage::for_vault itself already applies (Synced only counts
+    // if there's actually a token) so the switcher never claims to be on a
+    // vault that isn't in its own list.
+    let current = match *active_vault.read() {
+        VaultKind::Synced if auth_token.read().is_some() => VaultKind::Synced,
+        _ => VaultKind::Local,
+    };
+    let current_label = entries.iter().find(|e| e.kind == current)
+        .map(|e| e.label.clone())
+        .unwrap_or_else(|| "Local".to_string());
+    let initial = current_label.chars().next()
         .map(|c| c.to_uppercase().to_string())
         .unwrap_or_else(|| "?".to_string());
-    let display_name = user_email.read().clone().unwrap_or_else(|| "Account".to_string());
+
+    let mut select_vault = move |kind: VaultKind| {
+        active_vault.set(kind);
+        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+            storage.set("active_vault", kind.as_storage_str()).ok();
+        }
+    };
+
+    // "Removing" the Synced vault is just logging out — there's one account,
+    // so there's nothing else to delete. Falls back to Local if Synced was
+    // the active vault, so the switcher never points at a vault that no
+    // longer exists.
+    let mut remove_synced = move || {
+        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+            storage.set("auth_token", "").ok();
+            storage.set("refresh_token", "").ok();
+        }
+        auth_token.set(None);
+        user_id.set(None);
+        user_email.set(None);
+        if *active_vault.read() == VaultKind::Synced {
+            select_vault(VaultKind::Local);
+        }
+    };
 
     rsx! {
         div {
             class: "px-3",
-            if state.auth_token.read().is_none() {
-                a {
-                    class: NAV_LINK_CLASS,
-                    onclick: move |_| {
-                        let nav = navigator();
-                        nav.push(Route::LoginCMP {});
-                    },
-                    "Login"
-                }
-            } else {
-                div {
-                    class: "w-full sidebar-user-menu",
-                    Dropdown {
+            div {
+                class: "w-full sidebar-vault-switcher",
+                Dropdown {
                     DropdownTrigger {
                         class: "w-full text-left",
                         div {
@@ -129,23 +183,69 @@ pub fn profile_cmp() -> Element {
                             }
                             span {
                                 class: "text-sm font-medium text-foreground truncate",
-                                "{display_name}"
+                                "{current_label}"
                             }
                         }
                     }
                     DropdownContent {
                         align: "start",
-                        DropdownItem::<String> {
-                            value: "logout".to_string(),
-                            index: 0,
-                            destructive: true,
-                            on_select: move |_| {
-                                let nav = navigator();
-                                nav.push(Route::Logout {});
-                            },
-                            "Logout"
+                        for (idx, entry) in entries.iter().enumerate() {
+                            {
+                                let kind = entry.kind;
+                                let is_current = kind == current;
+                                let removable = entry.removable;
+                                let label = entry.label.clone();
+                                rsx! {
+                                    DropdownItem::<String> {
+                                        value: label.clone(),
+                                        index: idx,
+                                        on_select: move |_| select_vault(kind),
+                                        div {
+                                            class: "flex items-center justify-between gap-2 w-full",
+                                            span {
+                                                class: "truncate",
+                                                if is_current { "✓ " } else { "" }
+                                                "{label}"
+                                            }
+                                            if removable {
+                                                if *confirming_removal_of.read() == Some(kind) {
+                                                    span {
+                                                        class: "text-xs font-medium text-destructive hover:underline px-1 shrink-0",
+                                                        onclick: move |e| {
+                                                            e.stop_propagation();
+                                                            remove_synced();
+                                                            confirming_removal_of.set(None);
+                                                        },
+                                                        "Remove"
+                                                    }
+                                                } else {
+                                                    span {
+                                                        class: "text-muted-foreground hover:text-foreground px-1 shrink-0",
+                                                        title: "Vault settings",
+                                                        onclick: move |e| {
+                                                            e.stop_propagation();
+                                                            confirming_removal_of.set(Some(kind));
+                                                        },
+                                                        "⋯"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
-                    }
+                        if !has_synced {
+                            DropdownSeparator {}
+                            DropdownItem::<String> {
+                                value: "add".to_string(),
+                                index: entries.len(),
+                                on_select: move |_| {
+                                    navigator().push(Route::LoginCMP {});
+                                },
+                                "+ Add a vault"
+                            }
+                        }
                     }
                 }
             }
@@ -167,6 +267,7 @@ pub fn Navbar() -> Element {
     let mut auth_token = state.auth_token;
     let mut user_id = state.user_id;
     let mut user_email = state.user_email;
+    let mut active_vault = state.active_vault;
     let mut refresh_loop_started = use_signal(|| false);
     let moment = current_moment.read().clone();
 
@@ -174,8 +275,10 @@ pub fn Navbar() -> Element {
     // localStorage is still actually accepted by Supabase. A token can die
     // server-side (expiry, revocation) with no client-side signal, which
     // previously left the app showing an empty "logged in" shell. If the
-    // token is dead, log the user out for real (clear storage + state) and
-    // send them to the login screen instead of failing silently.
+    // token is dead, log the user out for real (clear storage + state) —
+    // but land back on the (now-Local) app, not a dead-end login screen.
+    // Login is opt-in now (see the vault switcher's "+ Add a vault"), never
+    // something a bad cached token can strand you behind.
     use_effect(move || {
         let Some(token) = auth_token.read().clone() else {
             return;
@@ -191,11 +294,12 @@ pub fn Navbar() -> Element {
                 if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
                     storage.set("auth_token", &"").ok();
                     storage.set("refresh_token", &"").ok();
+                    storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
                 }
                 auth_token.set(None);
                 user_id.set(None);
                 user_email.set(None);
-                navigator().push(Route::LoginCMP {});
+                active_vault.set(VaultKind::Local);
                 }
             }
         });
@@ -224,8 +328,11 @@ pub fn Navbar() -> Element {
                             clog!("Token refresh failed, logging out: {}", e);
                             storage.set("auth_token", &"").ok();
                             storage.set("refresh_token", &"").ok();
+                            storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
                             auth_token.set(None);
                             user_id.set(None);
+                            user_email.set(None);
+                            active_vault.set(VaultKind::Local);
                             break;
                         }
                     }
@@ -304,7 +411,7 @@ pub fn Navbar() -> Element {
                     div {
                         class:"h-1",
                     }
-                    profile_cmp { }
+                    vault_switcher_cmp { }
                     div {
                         class: "px-3 mt-1 pt-4 border-t border-border",
                         span {
