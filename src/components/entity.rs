@@ -376,10 +376,12 @@ pub fn ab_info_cmp() -> Element {
     let mut entity_types = use_signal(|| vec![]);
 
     use_effect(move || {
-        let token = auth_token;
-        let vault = active_vault;
+        // Read synchronously so the effect actually reruns on vault switch —
+        // see the matching comment in views/home.rs's fetch effect.
+        let vault = *active_vault.read();
+        let token = auth_token.read().clone();
         spawn(async move {
-            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let storage = ActiveStorage::for_vault(vault, token);
             match storage.get_entity_types().await {
                 Ok(data) => entity_types.set(data),
                 Err(e) => clog!("Error fetching entity types: {}", e),
@@ -520,10 +522,12 @@ pub fn EntityModalCmp() -> Element {
     };
 
     use_effect(move || {
-        let token = auth_token;
-        let vault = active_vault;
+        // Read synchronously so the effect actually reruns on vault switch —
+        // see the matching comment in views/home.rs's fetch effect.
+        let vault = *active_vault.read();
+        let token = auth_token.read().clone();
         spawn(async move {
-            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let storage = ActiveStorage::for_vault(vault, token);
             match storage.get_entity_types().await {
                 Ok(data) => entityTypes.set(data),
                 Err(e) => clog!("Error fetching entities: {}",e),
