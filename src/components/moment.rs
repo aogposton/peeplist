@@ -554,7 +554,7 @@ pub fn MomentInputCmp() -> Element {
             selected_entity.set(Some(entity.name));
         }else{
             selected_entity.set(Some("Self".to_string()));
-            f.entity_sel = SELF_ENTITY_ID.to_string();
+            f.entity_sel = active_vault.read().effective(&auth_token.read()).self_entity_id().to_string();
         }
 
 
@@ -567,7 +567,7 @@ pub fn MomentInputCmp() -> Element {
             selected_entity.set(Some(entity.name));
         }else{
             selected_entity.set(Some("Self".to_string()));
-            form.write().entity_sel = SELF_ENTITY_ID.to_string();
+            form.write().entity_sel = active_vault.read().effective(&auth_token.read()).self_entity_id().to_string();
         }
     });
 
@@ -638,7 +638,10 @@ pub fn MomentInputCmp() -> Element {
                     }
                     DropdownContent {
                         align: "end",
-                        for entity in entities.iter() {
+                        // Self is already the default option (the trigger
+                        // label above) — omit it here so it isn't offered
+                        // twice.
+                        for entity in entities.iter().filter(|e| !is_self_entity(&e.id)) {
                             DropdownItem::<String> {
                                 value:  "{entity.id}".to_string(),
                                 index: 0,

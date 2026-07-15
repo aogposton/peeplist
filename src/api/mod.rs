@@ -4,9 +4,10 @@ pub mod moment;
 pub mod auth;
 pub mod storage;
 pub mod vault_format;
+pub mod local;
 
 pub use auth::{login, get_current_user, refresh_access_token};
-pub use storage::{ActiveStorage, VaultKind, StorageError};
+pub use storage::{ActiveStorage, VaultKind, StorageError, is_self_entity};
 
 // The `entities`/`moments` tables still have `bigint` FK columns
 // (entity_id, depends_on, entity_type_id, parent_entity_id) even though the

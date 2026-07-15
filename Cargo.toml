@@ -19,7 +19,7 @@ tracing = "0.1.44"
 chrono = { version = "0.4", features = ["serde"] }
 web-sys = { version = "0.3", features = ["console", "Window", "Storage"] }
 dotenv = "0.15.0"
-uuid = { version = "1.23.2", features = ["serde"] }
+uuid = { version = "1.23.2", features = ["serde", "v4", "js"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 serde_json = "1"
 futures = "0.3.32"
