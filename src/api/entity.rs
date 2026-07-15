@@ -47,7 +47,18 @@ pub async fn getEntityTypes(token: String) -> Result<Vec<EntityTypeType>, reqwes
         .get("entity_types")
         .send()
         .await?;
-    
+
     let result = response.json::<Vec<EntityTypeType>>().await?;
     Ok(result)
+}
+
+// No delete-entity path exists anywhere in the UI yet (see storage.rs's
+// ActiveStorage::delete_entity) — this just closes the gap at the API layer.
+pub async fn deleteEntity(id: String, token: String) -> Result<(), reqwest::Error> {
+    SupabaseClient::new(token)
+        .delete("entities", &id)
+        .send()
+        .await?;
+
+    Ok(())
 }

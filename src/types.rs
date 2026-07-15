@@ -159,9 +159,9 @@ pub struct MomentForm {
 // Moments
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct MomentType {
-    // deleteMoment/updateMoment PATCH this whole struct as the request body
-    // (not just the changed field), so id/entity_id/depends_on need both
-    // directions of the flex conversion, unlike the New*Type structs above.
+    // deleteMoment PATCHes this whole struct as the request body (not just
+    // the changed field), so id/entity_id/depends_on need both directions of
+    // the flex conversion, unlike the New*Type structs above.
     #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
     pub id: String,
     pub title: String,

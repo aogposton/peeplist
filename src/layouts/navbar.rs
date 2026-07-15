@@ -24,8 +24,6 @@ use crate::components::{
 };
 
 use crate::api::{
-    createEntity,
-    createMoment,
     get_current_user,
     refresh_access_token,
 };

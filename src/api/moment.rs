@@ -64,18 +64,6 @@ pub async fn update_moment_field( id: String, field: &str, value: Value, token: 
     Ok(())
 }
 
-pub async fn updateMoment(moment: MomentType, token: String) -> Result<MomentType, reqwest::Error> {
-    let response = SupabaseClient::new(token)
-        .patch("moments", &moment.id)
-        .header("Prefer", "return=representation")
-        .json(&moment)
-        .send()
-        .await?;
-
-    let mut moments: Vec<MomentType> = response.json().await?;
-    Ok(moments.remove(0))
-}
-
 pub async fn getMoments(token: String) -> Result<Vec<MomentType>, reqwest::Error> {
     // Without an explicit order, Postgres/PostgREST returns rows in unspecified
     // (effectively random-looking) order. id.asc gives a stable baseline; the

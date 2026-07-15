@@ -3,12 +3,7 @@ use crate::types::*;
 use crate::theme::*;
 use crate::AppState;
 use crate::ABView;
-use crate::api::{
-    createEntity,
-    getEntities,
-    getEntityTypes,
-    update_entity_field,
-};
+use crate::api::ActiveStorage;
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
 use lumen_blocks::components::input::Input;
@@ -375,15 +370,17 @@ pub fn ab_info_cmp() -> Element {
     let mut current_entity = state.current_entity;
     let mut entities = state.entities;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
     let mut entity_types = use_signal(|| vec![]);
 
     use_effect(move || {
         let token = auth_token;
+        let vault = active_vault;
         spawn(async move {
-            let token_val = token.read().clone().unwrap_or_default();
-            match getEntityTypes(token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.get_entity_types().await {
                 Ok(data) => entity_types.set(data),
                 Err(e) => clog!("Error fetching entity types: {}", e),
             }
@@ -448,9 +445,10 @@ pub fn ab_info_cmp() -> Element {
                                         let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id.clone()) else { return; };
                                         let Ok(new_drift) = e.value().parse::<f64>() else { return; };
                                         let token = auth_token;
+                                        let vault = active_vault;
                                         spawn(async move {
-                                            let token_val = token.read().clone().unwrap_or_default();
-                                            match update_entity_field(entity_id.clone(), "drift", serde_json::json!(new_drift), token_val).await {
+                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                            match storage.update_entity_field(entity_id.clone(), "drift", serde_json::json!(new_drift)).await {
                                                 Ok(_) => {
                                                     let mut list = entities.write();
                                                     if let Some(ent) = list.iter_mut().find(|x| x.id == entity_id) {
@@ -482,13 +480,15 @@ pub fn EntityModalCmp() -> Element {
     let mut entityModalTgl = state.entityModalTgl;
     let mut entities = state.entities;
     let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
     let mut entityTypes = use_signal(||vec![]);
     let mut form = use_signal(EntityForm::default);
-    
-    
+
+
     let mut onsubmit = move |_| {
         let form_data = form.read().clone();
         let token = auth_token;
+        let vault = active_vault;
         form.set(EntityForm::default());
         spawn(async move {
             let metadata = EntityMetadata {
@@ -506,9 +506,9 @@ pub fn EntityModalCmp() -> Element {
                 archived_at: None,
                 metadata: Some(metadata),
             };
-    
-            let token_val = token.read().clone().unwrap_or_default();
-            match createEntity(new_entity, token_val).await {
+
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.create_entity(new_entity).await {
                 Ok(created) => {
                     entities.write().insert(0, created);
                 }
@@ -518,12 +518,13 @@ pub fn EntityModalCmp() -> Element {
             }
         });
     };
-    
+
     use_effect(move || {
         let token = auth_token;
+        let vault = active_vault;
         spawn(async move {
-            let token_val = token.read().clone().unwrap_or_default();
-            match getEntityTypes(token_val).await {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.get_entity_types().await {
                 Ok(data) => entityTypes.set(data),
                 Err(e) => clog!("Error fetching entities: {}",e),
             }
