@@ -1,6 +1,4 @@
-//! The components module contains all shared components for our app. Components are the building blocks of dioxus apps.
-//! They can be used to defined common UI elements like buttons, forms, and modals. In this template, we define a Hero
-//! component and an Echo component for fullstack apps to be used in our app.
+//! Shared UI components for the app.
 
 mod moment;
 pub use moment::MomentCmp;
@@ -12,7 +10,8 @@ pub use moment::ab_task_cmp;
 pub use moment::PriorityViewCmp;
 
 mod sidebar;
-pub use sidebar::peep_list_cmp;
+pub use sidebar::views_list_cmp;
+pub use sidebar::entity_list_cmp;
 pub use sidebar::tag_list_cmp;
 
 mod entity;
@@ -21,5 +20,8 @@ pub use entity::entity_view_cmp;
 pub use entity::ab_history_cmp;
 pub use entity::ab_stats_cmp;
 pub use entity::ab_info_cmp;
+
+mod graph;
+pub use graph::GraphViewCmp;
 
 pub mod context_menu;

@@ -45,13 +45,16 @@ const MAIN_CSS: Asset = asset!("/assets/styling/main.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 const DX_COMPONENTS_THEME_CSS: Asset = asset!("/assets/dx-components-theme.css");
 const FA_JS: Asset = asset!("/assets/ae47c6a44d.js");
+// Vendored locally (not a CDN reference) — same convention as FA_JS above.
+// Used by the Graph View for force-directed layout (see src/components/graph.rs).
+const D3_JS: Asset = asset!("/assets/d3.v7.min.js");
 
 #[derive(Clone, PartialEq)]
 pub enum View {
     Entity,
     Inbox,
-    SELF,
     Priority,
+    Graph,
 
 }
 
@@ -93,8 +96,8 @@ impl fmt::Display for View {
         match self {
             View::Inbox   => write!(f, "Inbox"),
             View::Entity => write!(f, "Entity"),
-            View::SELF => write!(f, "Self"),
             View::Priority => write!(f, "Priority"),
+            View::Graph => write!(f, "Graph"),
         }
     }
 }
@@ -113,6 +116,7 @@ pub struct AppState {
     pub activity_bar_view: Signal<ABView>,
     pub auth_token: Signal<Option<String>>,
     pub user_id: Signal<Option<String>>,
+    pub user_email: Signal<Option<String>>,
     pub backdropTgl: Signal<bool>,
     pub tag_filter: Signal<Option<String>>,
     pub sort_mode: Signal<SortMode>,
@@ -138,6 +142,7 @@ fn App() -> Element {
         current_moment: Signal::new(None::<MomentType>),
         auth_token: Signal::new(None::<String>),
         user_id: Signal::new(None::<String>),
+        user_email: Signal::new(None::<String>),
         backdropTgl: Signal::new(false),
         tag_filter: Signal::new(None::<String>),
         sort_mode: Signal::new(SortMode::Default),
@@ -173,6 +178,7 @@ fn App() -> Element {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { rel: "stylesheet", href: DX_COMPONENTS_THEME_CSS }
         document::Script { src: FA_JS }
+        document::Script { src: D3_JS }
 
         meta {
             name:"viewport",

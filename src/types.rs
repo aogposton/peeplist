@@ -2,6 +2,25 @@ use serde::{Deserialize, Serialize};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
+fn default_drift() -> f64 { 2.0 }
+
+// Freeform per-entity details collected in the "New Entity" modal. Stored in
+// entities.metadata (jsonb) — mirrors the same pattern used for
+// moments.metadata (tags/sort_index). Surfaced read-only in the Info panel.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct EntityMetadata {
+    #[serde(default)]
+    pub relationship: String,
+    #[serde(default)]
+    pub how_met: String,
+    #[serde(default)]
+    pub birthday: String,
+    #[serde(default)]
+    pub location: String,
+    #[serde(default)]
+    pub why: String,
+}
+
 // Entities
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct EntityType {
@@ -11,6 +30,14 @@ pub struct EntityType {
     // Server-generated on insert; never sent back on writes.
     #[serde(skip_serializing, default)]
     pub created_at: String,
+    // Days per +1 unit of distance from inactivity (see Distance/Drift spec).
+    // Defaults to 2.0 client-side so this degrades gracefully before the
+    // `entities.drift` column exists in the DB.
+    #[serde(default = "default_drift")]
+    pub drift: f64,
+    // Degrades gracefully (None) before entities.metadata exists in the DB.
+    #[serde(default)]
+    pub metadata: Option<EntityMetadata>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -26,6 +53,7 @@ pub struct NewEntityType {
     pub parent_entity_id: Option<i64>,
     pub user_id: Option<Uuid>,
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub metadata: Option<EntityMetadata>,
 }
 
 #[derive(Clone, Default)]

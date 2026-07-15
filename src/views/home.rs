@@ -10,6 +10,7 @@ use crate::components::{
     CompletedSectionCmp,
     entity_view_cmp,
     PriorityViewCmp,
+    GraphViewCmp,
 };
 
 use crate::api::{
@@ -75,7 +76,7 @@ pub fn Home() -> Element {
                         CompletedSectionCmp { moments: visible }
                     }
                 },
-                Entity | SELF => {
+                Entity => {
                     let visible: Vec<MomentType> = moments.read().iter()
                         .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.entity_id == e.id))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
@@ -98,6 +99,9 @@ pub fn Home() -> Element {
                         p { class: "text-sm text-muted-foreground mb-4", "Open tasks and promises across everyone, ranked by urgency." }
                     }
                     PriorityViewCmp { }
+                },
+                Graph => rsx! {
+                    GraphViewCmp { }
                 }
             }
         }
