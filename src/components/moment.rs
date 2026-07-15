@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use crate::AppState;
 use crate::ABView;
 use crate::SortMode;
+use crate::UrgencyWeights;
 use crate::theme::*;
 use crate::ui::*;
 use crate::types::*;
@@ -1606,57 +1607,6 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
     }
 }
 
-// Taskwarrior-esque urgency score, highest = most worth doing next.
-// due: ramps up to +12 as the due date approaches, maxes out once overdue.
-// gravity: the user's own -100..100 importance dial, scaled to -5..+5.
-// age: tiny nudge for things that have been sitting around, caps at +2 after 30 days.
-// blocked: a moment waiting on an unfinished dependency is heavily deprioritized (-8).
-// blocking: a moment that's itself blocking other open work gets a bonus (+8),
-// since finishing it unblocks something else.
-fn compute_urgency(m: &MomentType, all_moments: &[MomentType], now: chrono::DateTime<chrono::Utc>) -> f64 {
-    let due_score = m.due_at.as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| {
-            let days = (dt.with_timezone(&chrono::Utc) - now).num_seconds() as f64 / 86400.0;
-            if days <= 0.0 {
-                12.0
-            } else if days <= 14.0 {
-                12.0 * (1.0 - days / 14.0)
-            } else {
-                0.0
-            }
-        })
-        .unwrap_or(0.0);
-
-    let gravity_score = (m.gravity.unwrap_or(0) as f64 / 100.0) * 5.0;
-
-    let age_score = chrono::DateTime::parse_from_rfc3339(&m.created_at).ok()
-        .map(|dt| {
-            let days = (now - dt.with_timezone(&chrono::Utc)).num_seconds() as f64 / 86400.0;
-            (days / 30.0).clamp(0.0, 1.0) * 2.0
-        })
-        .unwrap_or(0.0);
-
-    let blocked_penalty = match m.depends_on.as_deref() {
-        Some(dep_id) => {
-            let dep_done = all_moments.iter()
-                .find(|x| x.id == dep_id)
-                .map(|x| x.completed_at.is_some())
-                .unwrap_or(true);
-            if dep_done { 0.0 } else { -8.0 }
-        }
-        None => 0.0,
-    };
-
-    let blocking_bonus = if all_moments.iter().any(|x| x.depends_on.as_deref() == Some(m.id.as_str()) && x.completed_at.is_none()) {
-        8.0
-    } else {
-        0.0
-    };
-
-    due_score + gravity_score + age_score + blocked_penalty + blocking_bonus
-}
-
 #[component]
 pub fn PriorityViewCmp() -> Element {
     let state = use_context::<AppState>();
@@ -1666,14 +1616,15 @@ pub fn PriorityViewCmp() -> Element {
     let mut activity_bar_view = state.activity_bar_view;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
+    let weights = state.urgency_weights.read().clone();
 
     let now = chrono::Utc::now();
     let all = moments.read().clone();
-    let mut ranked: Vec<(MomentType, f64)> = all.iter()
+    let mut ranked: Vec<(MomentType, crate::urgency::UrgencyBreakdown)> = all.iter()
         .filter(|m| m.moment_type_id != 3i64 && m.completed_at.is_none())
-        .map(|m| (m.clone(), compute_urgency(m, &all, now)))
+        .map(|m| (m.clone(), crate::urgency::compute_urgency(m, &all, now, &weights)))
         .collect();
-    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| b.1.total().partial_cmp(&a.1.total()).unwrap_or(std::cmp::Ordering::Equal));
 
     let entity_name = move |entity_id: &str| entities.read().iter()
         .find(|e| e.id == entity_id)
@@ -1689,7 +1640,7 @@ pub fn PriorityViewCmp() -> Element {
                     "Nothing open right now."
                 }
             } else {
-                for (m, score) in ranked.iter() {
+                for (m, breakdown) in ranked.iter() {
                     div {
                         key: "{m.id}",
                         class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
@@ -1709,7 +1660,116 @@ pub fn PriorityViewCmp() -> Element {
                         }
                         span {
                             class: "text-xs font-semibold shrink-0 px-2 py-0.5 rounded-full border border-border text-muted-foreground",
-                            "{score:.1}"
+                            title: "{breakdown.describe()}",
+                            "{breakdown.total():.1}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// One (label, field-getter, field-setter) triple per UrgencyWeights field,
+// driving both the settings form below and its persistence — adding a new
+// weight later means adding one entry here, not touching the rendering or
+// save logic.
+fn weight_fields() -> Vec<(&'static str, &'static str, fn(&UrgencyWeights) -> f64, fn(&mut UrgencyWeights, f64))> {
+    vec![
+        ("Due date", "Ramps up to this value as a due date approaches, maxing out once overdue.", |w| w.due, |w, v| w.due = v),
+        ("Priority: High", "Flat bonus when a task's priority is set to High.", |w| w.priority_high, |w, v| w.priority_high = v),
+        ("Priority: Medium", "Flat bonus when a task's priority is set to Medium.", |w| w.priority_medium, |w, v| w.priority_medium = v),
+        ("Priority: Low", "Flat bonus when a task's priority is set to Low.", |w| w.priority_low, |w, v| w.priority_low = v),
+        ("Has a project", "Flat bonus when a task has a project assigned.", |w| w.project, |w, v| w.project = v),
+        ("Scheduled (active)", "Flat bonus once a task's scheduled date has arrived.", |w| w.scheduled, |w, v| w.scheduled = v),
+        ("Gravity", "Scales the task's own -100..100 importance dial.", |w| w.gravity, |w, v| w.gravity = v),
+        ("Age", "Ramps up the longer a task has sat open, capping at 30 days.", |w| w.age, |w, v| w.age = v),
+        ("Blocked", "Applied when waiting on an unfinished dependency — usually negative.", |w| w.blocked, |w, v| w.blocked = v),
+        ("Blocking", "Applied when finishing this would unblock other open work.", |w| w.blocking, |w, v| w.blocking = v),
+        ("Tags", "Applied per tag, capped at 3 tags.", |w| w.tags, |w, v| w.tags = v),
+    ]
+}
+
+// Trigger button + modal for editing the Priority view's ranking weights
+// (see src/urgency.rs). Self-contained: owns its own open/closed state, so
+// it can be dropped in next to the Priority header with no plumbing.
+// Changes apply and persist immediately per field — no separate Save step,
+// consistent with how every other per-field edit in this app already works.
+#[component]
+pub fn UrgencySettingsCmp() -> Element {
+    let state = use_context::<AppState>();
+    let mut weights = state.urgency_weights;
+    let mut open = use_signal(|| false);
+
+    let mut persist = move |w: UrgencyWeights| {
+        #[cfg(not(feature = "desktop"))]
+        if let Some(storage) = window().and_then(|win| win.local_storage().ok().flatten()) {
+            storage.set("urgency_weights", &w.as_storage_string()).ok();
+        }
+        weights.set(w);
+    };
+
+    rsx! {
+        button {
+            class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-sm",
+            title: "Adjust priority ranking weights",
+            onclick: move |_| open.set(true),
+            "⚙"
+        }
+        if *open.read() {
+            div {
+                class: "fixed inset-0 bg-black/40 z-100 flex items-center justify-center p-4",
+                onclick: move |_| open.set(false),
+                div {
+                    class: "w-full max-w-lg rounded-lg border border-border bg-card shadow-lg",
+                    onclick: move |e| e.stop_propagation(),
+                    div {
+                        class: "flex items-center justify-between h-14 px-4 border-b border-border",
+                        span { class: "text-lg font-semibold text-foreground", "Priority ranking weights" }
+                        button {
+                            class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                            onclick: move |_| open.set(false),
+                            "×"
+                        }
+                    }
+                    div {
+                        class: "flex flex-col gap-3 px-4 py-4 max-h-[70vh] overflow-y-auto",
+                        p {
+                            class: "text-xs text-muted-foreground -mt-1 mb-1",
+                            "Each row adds (or subtracts, for negative weights) to a task's score when that factor applies. Set a weight to 0 to ignore it entirely."
+                        }
+                        for (label, help, getter, setter) in weight_fields() {
+                            div {
+                                key: "{label}",
+                                class: "flex items-center justify-between gap-3",
+                                div {
+                                    class: "flex flex-col min-w-0",
+                                    span { class: "text-sm text-foreground", "{label}" }
+                                    span { class: "text-xs text-muted-foreground", "{help}" }
+                                }
+                                input {
+                                    r#type: "number",
+                                    step: "0.5",
+                                    class: "w-20 h-9 shrink-0 rounded-md border border-input bg-background text-sm text-foreground px-2 text-right focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+                                    value: "{getter(&weights.read())}",
+                                    oninput: move |e| {
+                                        if let Ok(v) = e.value().parse::<f64>() {
+                                            let mut w = weights.read().clone();
+                                            setter(&mut w, v);
+                                            persist(w);
+                                        }
+                                    },
+                                }
+                            }
+                        }
+                    }
+                    div {
+                        class: "px-4 py-3 border-t border-border",
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            full_width: true,
+                            on_click: move |_| persist(UrgencyWeights::default()),
+                            "Reset to defaults"
                         }
                     }
                 }

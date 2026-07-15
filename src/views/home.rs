@@ -10,6 +10,7 @@ use crate::components::{
     CompletedSectionCmp,
     entity_view_cmp,
     PriorityViewCmp,
+    UrgencySettingsCmp,
     GraphViewCmp,
 };
 
@@ -96,9 +97,12 @@ pub fn Home() -> Element {
                 },
                 Priority => rsx! {
                     div {
-                        class: "px-4 pt-4",
-                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Priority" }
-                        p { class: "text-sm text-muted-foreground mb-4", "Open tasks and promises across everyone, ranked by urgency." }
+                        class: "px-4 pt-4 flex items-start justify-between gap-3",
+                        div {
+                            h1 { class: "text-2xl font-semibold text-foreground mb-1", "Priority" }
+                            p { class: "text-sm text-muted-foreground mb-4", "Open tasks and promises across everyone, ranked by urgency." }
+                        }
+                        UrgencySettingsCmp { }
                     }
                     PriorityViewCmp { }
                 },

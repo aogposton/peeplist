@@ -31,6 +31,9 @@ mod api;
 mod theme;
 mod ui;
 mod quick_capture;
+mod urgency;
+
+pub use urgency::UrgencyWeights;
 
 
 #[derive(Debug, Clone, Routable, PartialEq)]
@@ -138,6 +141,10 @@ pub struct AppState {
     // already falls back to Local when logged out, so this matches today's
     // behavior in both the logged-in and logged-out cases.
     pub active_vault: Signal<VaultKind>,
+    // See src/urgency.rs — the weights driving the Priority view's ranking,
+    // user-editable via UrgencySettingsCmp. Persisted the same way as
+    // sort_mode below (localStorage on web; no persistence yet on desktop).
+    pub urgency_weights: Signal<UrgencyWeights>,
 }
 
 fn main() {
@@ -165,6 +172,7 @@ fn App() -> Element {
         tag_filter: Signal::new(None::<String>),
         sort_mode: Signal::new(SortMode::Default),
         active_vault: Signal::new(VaultKind::Synced),
+        urgency_weights: Signal::new(UrgencyWeights::default()),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -198,6 +206,10 @@ fn App() -> Element {
 
             if let Some(vault) = storage.get_item("active_vault").unwrap() {
                 state.active_vault.set(VaultKind::from_storage_str(&vault));
+            }
+
+            if let Some(weights) = storage.get_item("urgency_weights").unwrap() {
+                state.urgency_weights.set(UrgencyWeights::from_storage_string(&weights));
             }
         }
     });

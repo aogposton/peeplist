@@ -8,6 +8,7 @@ pub use moment::CompletedSectionCmp;
 pub use moment::NotesSectionCmp;
 pub use moment::ab_task_cmp;
 pub use moment::PriorityViewCmp;
+pub use moment::UrgencySettingsCmp;
 
 mod sidebar;
 pub use sidebar::views_list_cmp;
