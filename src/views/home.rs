@@ -35,10 +35,16 @@ pub fn Home() -> Element {
     };
 
     use_effect(move || {
-        let token = auth_token;
-        let vault = active_vault;
+        // Read both synchronously so Dioxus tracks them as effect
+        // dependencies — reading them only inside spawn()'s async block (as
+        // this used to) means the effect never reruns on its own, since
+        // that read happens on a separate scheduled task, not during this
+        // closure's tracked execution. That's why switching vaults used to
+        // need a manual page refresh to actually take effect.
+        let vault = *active_vault.read();
+        let token = auth_token.read().clone();
         spawn(async move {
-            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let storage = ActiveStorage::for_vault(vault, token);
             match storage.get_moments().await {
                 Ok(data) => moments.set(data),
                 Err(e) => log::info!("Error fetching moments: {}", e),
