@@ -53,7 +53,7 @@ pub fn CheckboxCmp(props: CheckboxProps) -> Element {
 pub fn NotesSectionCmp(props: MomentListProps) -> Element {
     let mut show_menu = use_signal(|| false);
     let mut menu_coords = use_signal(|| (0.0, 0.0));
-    let mut last_moment_right_clicked_id = use_signal(|| 0);
+    let mut last_moment_right_clicked_id = use_signal(String::new);
     let state = use_context::<AppState>();
     let mut moments = state.moments;
     let auth_token = state.auth_token;
@@ -64,7 +64,7 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
         let note_type = mType;
         spawn(async move {
             let token_val = token.read().clone().unwrap_or_default();
-            match update_moment_field(id, "moment_type_id", serde_json::json!(Some(note_type.clone())), token_val).await {
+            match update_moment_field(id.clone(), "moment_type_id", serde_json::json!(Some(note_type.clone())), token_val).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -92,7 +92,7 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
                         for moment in props.moments.iter() {
                             if  moment.moment_type_id == 3i64 {
                                 {
-                                    let moment_id = moment.id;
+                                    let moment_id = moment.id.clone();
                                     rsx! {
                                         MomentCmp {
                                             moment: moment.clone(),
@@ -100,7 +100,7 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
                                             oncontextmenu: move |evt: MouseEvent| {
                                                 evt.prevent_default();
                                                 let coords = evt.client_coordinates();
-                                                last_moment_right_clicked_id.set(moment_id);
+                                                last_moment_right_clicked_id.set(moment_id.clone());
                                                 menu_coords.set((coords.x, coords.y));
                                                 show_menu.set(true);
                                             },
@@ -215,9 +215,9 @@ pub fn moment_history_cmp() -> Element {
 pub fn MomentListCmp(props: MomentListProps) -> Element {
     let mut show_menu = use_signal(|| false);
     let mut menu_coords = use_signal(|| (0.0, 0.0));
-    let mut last_moment_right_clicked_id = use_signal(|| 0);
+    let mut last_moment_right_clicked_id = use_signal(String::new);
     let mut last_moment_right_clicked_type = use_signal(|| 0);
-    let mut dragged_id = use_signal(|| None::<i64>);
+    let mut dragged_id = use_signal(|| None::<String>);
     let state = use_context::<AppState>();
     let mut moments = state.moments;
     let mut sort_mode = state.sort_mode;
@@ -238,7 +238,7 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
         let note_type = mType;
         spawn(async move {
                 let token_val = token.read().clone().unwrap_or_default();
-                match update_moment_field(id,"moment_type_id",serde_json::json!(Some(note_type.clone())), token_val).await {
+                match update_moment_field(id.clone(),"moment_type_id",serde_json::json!(Some(note_type.clone())), token_val).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -255,8 +255,13 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
     let mut display_list: Vec<MomentType> = moments_list.clone().into_iter()
         .filter(|m| !m.completed_at.is_some() && m.moment_type_id != 3i64)
         .collect();
+    // Fallback ordering when no sort_index is set yet: parses as a number since
+    // ids are still Supabase bigints stringified to decimal text (see
+    // types.rs's de_flex_id) — degrades to insertion order once real UUIDs
+    // (post local-vault migration) make this unparseable.
+    let id_as_f64 = |id: &str| id.parse::<f64>().unwrap_or(0.0);
     match current_sort_mode {
-        SortMode::Default => display_list.sort_by_key(|m| m.id),
+        SortMode::Default => display_list.sort_by(|a, b| id_as_f64(&a.id).partial_cmp(&id_as_f64(&b.id)).unwrap_or(std::cmp::Ordering::Equal)),
         SortMode::DueDate => display_list.sort_by(|a, b| {
             match (&a.due_at, &b.due_at) {
                 (Some(x), Some(y)) => x.cmp(y),
@@ -266,8 +271,8 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
             }
         }),
         SortMode::Custom => display_list.sort_by(|a, b| {
-            let ax = a.metadata.as_ref().and_then(|m| m.sort_index).unwrap_or(a.id as f64);
-            let bx = b.metadata.as_ref().and_then(|m| m.sort_index).unwrap_or(b.id as f64);
+            let ax = a.metadata.as_ref().and_then(|m| m.sort_index).unwrap_or_else(|| id_as_f64(&a.id));
+            let bx = b.metadata.as_ref().and_then(|m| m.sort_index).unwrap_or_else(|| id_as_f64(&b.id));
             ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal)
         }),
     }
@@ -305,45 +310,51 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
             for moment in display_list.iter() {
                 {
                     let moment = moment.clone();
-                    let target_id = moment.id;
+                    let target_id = moment.id.clone();
                     let list_snapshot = display_list.clone();
                     rsx! {
                         div {
                             key: "{target_id}",
                             draggable: is_custom,
                             class: if is_custom { "cursor-move" } else { "" },
-                            ondragstart: move |_| dragged_id.set(Some(target_id)),
+                            ondragstart: {
+                                let target_id = target_id.clone();
+                                move |_| dragged_id.set(Some(target_id.clone()))
+                            },
                             ondragover: move |e| e.prevent_default(),
-                            ondrop: move |e| {
-                                e.prevent_default();
-                                let Some(from_id) = *dragged_id.read() else { return; };
-                                if from_id == target_id { return; }
-                                let mut order = list_snapshot.clone();
-                                let Some(from_pos) = order.iter().position(|m| m.id == from_id) else { return; };
-                                let dragged_item = order.remove(from_pos);
-                                let to_pos = order.iter().position(|m| m.id == target_id).unwrap_or(order.len());
-                                order.insert(to_pos, dragged_item);
-                                let token = auth_token;
-                                spawn(async move {
-                                    let token_val = token.read().clone().unwrap_or_default();
-                                    for (idx, m) in order.iter().enumerate() {
-                                        let tags = m.metadata.as_ref().map(|md| md.tags.clone()).unwrap_or_default();
-                                        let new_meta = MomentMetadata { tags, sort_index: Some(idx as f64) };
-                                        if update_moment_field(m.id, "metadata", serde_json::json!(new_meta), token_val.clone()).await.is_ok() {
-                                            let mut list = moments.write();
-                                            if let Some(existing) = list.iter_mut().find(|x| x.id == m.id) {
-                                                existing.metadata = Some(new_meta);
+                            ondrop: {
+                                let target_id = target_id.clone();
+                                move |e| {
+                                    e.prevent_default();
+                                    let Some(from_id) = dragged_id.read().clone() else { return; };
+                                    if from_id == target_id { return; }
+                                    let mut order = list_snapshot.clone();
+                                    let Some(from_pos) = order.iter().position(|m| m.id == from_id) else { return; };
+                                    let dragged_item = order.remove(from_pos);
+                                    let to_pos = order.iter().position(|m| m.id == target_id).unwrap_or(order.len());
+                                    order.insert(to_pos, dragged_item);
+                                    let token = auth_token;
+                                    spawn(async move {
+                                        let token_val = token.read().clone().unwrap_or_default();
+                                        for (idx, m) in order.iter().enumerate() {
+                                            let tags = m.metadata.as_ref().map(|md| md.tags.clone()).unwrap_or_default();
+                                            let new_meta = MomentMetadata { tags, sort_index: Some(idx as f64) };
+                                            if update_moment_field(m.id.clone(), "metadata", serde_json::json!(new_meta), token_val.clone()).await.is_ok() {
+                                                let mut list = moments.write();
+                                                if let Some(existing) = list.iter_mut().find(|x| x.id == m.id) {
+                                                    existing.metadata = Some(new_meta);
+                                                }
                                             }
                                         }
-                                    }
-                                });
+                                    });
+                                }
                             },
                             MomentCmp {
                                 moment: moment.clone(),
                                 oncontextmenu: move |evt: MouseEvent| {
                                     evt.prevent_default();
                                     let coords = evt.client_coordinates();
-                                    last_moment_right_clicked_id.set(moment.id);
+                                    last_moment_right_clicked_id.set(moment.id.clone());
                                     last_moment_right_clicked_type.set(moment.moment_type_id);
                                     menu_coords.set((coords.x, coords.y));
                                     show_menu.set(true);
@@ -531,24 +542,24 @@ pub fn MomentInputCmp() -> Element {
         let mut f = MomentForm::default();
 
         if let Some(entity) = current_entity.read().clone() {
-            f.entity_sel = entity.id.to_string();
+            f.entity_sel = entity.id.clone();
             selected_entity.set(Some(entity.name));
         }else{
             selected_entity.set(Some("Self".to_string()));
-            f.entity_sel = "0".to_string();
+            f.entity_sel = SELF_ENTITY_ID.to_string();
         }
-        
+
 
         f
     });
 
     use_effect(move || {
         if let Some(entity) = current_entity.read().clone() {
-            form.write().entity_sel = entity.id.to_string();
+            form.write().entity_sel = entity.id.clone();
             selected_entity.set(Some(entity.name));
         }else{
             selected_entity.set(Some("Self".to_string()));
-            form.write().entity_sel = "0".to_string();
+            form.write().entity_sel = SELF_ENTITY_ID.to_string();
         }
     });
 
@@ -559,7 +570,7 @@ pub fn MomentInputCmp() -> Element {
 
         if let Some(entity) = current_entity.read().clone() {
             selected_entity.set(Some(entity.name));
-            reset_form.entity_sel = entity.id.to_string();
+            reset_form.entity_sel = entity.id.clone();
         }else{
             // selected_entity.set("Self".to_string());
             reset_form.entity_sel = form_data.entity_sel.clone();
@@ -571,7 +582,7 @@ pub fn MomentInputCmp() -> Element {
         spawn(async move {
             let new_moment = NewMomentType {
                 title: form_data.title.clone(),
-                entity_id: form_data.entity_sel.parse::<i64>().ok().expect("oops"),
+                entity_id: form_data.entity_sel.clone(),
                 description: Some(form_data.description.clone()),
                 gravity: Some(1),
                 moment_type_id: 1,
@@ -660,7 +671,7 @@ pub fn ab_task_cmp() -> Element {
     let moment = current_moment.read().clone().unwrap();
     let moment_sig = use_signal(|| moment.clone());
     let mut reactions = use_signal(|| moment.reactions.clone().unwrap_or_default());
-    let id = moment.id;
+    let id = moment.id.clone();
     let description = moment.description;
     let title = moment.title;
     let gravity = moment.gravity.unwrap_or(0);
@@ -676,15 +687,22 @@ pub fn ab_task_cmp() -> Element {
     let mut tag_input = use_signal(|| String::new());
     let mut moment_tags = use_signal(|| moment.metadata.clone().unwrap_or_default().tags);
 
+    // Every closure below that touches `id` gets its own clone made right
+    // before the closure literal (not just inside the closure body) — `id`
+    // is a String (not Copy), and a `move` closure takes full ownership of
+    // whatever outer variable it references, so without a dedicated clone
+    // per closure only the first one in source order would compile; the
+    // rest would find `id` already moved away.
+    let id_for_tags = id.clone();
     let mut save_tags = move |new_tags: Vec<String>| {
-        let id = id;
+        let id = id_for_tags.clone();
         let token = auth_token;
         let sort_index = moment_sig.read().metadata.as_ref().and_then(|m| m.sort_index);
         let new_meta = MomentMetadata { tags: new_tags.clone(), sort_index };
         moment_tags.set(new_tags);
         spawn(async move {
             let token_val = token.read().clone().unwrap_or_default();
-            match update_moment_field(id, "metadata", serde_json::json!(new_meta), token_val).await {
+            match update_moment_field(id.clone(), "metadata", serde_json::json!(new_meta), token_val).await {
                 Ok(_) => {
                     let mut list = moments.write();
                     if let Some(m) = list.iter_mut().find(|m| m.id == id) {
@@ -697,17 +715,17 @@ pub fn ab_task_cmp() -> Element {
     };
 
     // Taskwarrior-style single dependency (see MomentType::depends_on).
-    let entity_id = moment.entity_id;
+    let entity_id = moment.entity_id.clone();
     let dependency_candidates: Vec<MomentType> = moments.read().iter()
         .filter(|m| m.entity_id == entity_id && m.id != id && m.completed_at.is_none())
         .cloned()
         .collect();
-    let blocked_on = moment.depends_on.and_then(|dep_id| {
+    let blocked_on = moment.depends_on.clone().and_then(|dep_id| {
         moments.read().iter().find(|m| m.id == dep_id).cloned()
     });
     let is_blocked = blocked_on.as_ref().is_some_and(|dep| dep.completed_at.is_none());
     let blocking_count = moments.read().iter()
-        .filter(|m| m.depends_on == Some(id) && m.completed_at.is_none())
+        .filter(|m| m.depends_on == Some(id.clone()) && m.completed_at.is_none())
         .count();
 
     rsx! {
@@ -738,22 +756,25 @@ pub fn ab_task_cmp() -> Element {
                         class: "flex items-center gap-3",
                         CheckboxCmp {
                             checked: moment.completed_at.clone().is_some(),
-                            on_change: move |checked| {
-                                let id = id;
-                                let token = auth_token;
-                                spawn(async move {
-                                    let completed_at = if checked { Some(chrono::Utc::now().to_rfc3339()) } else { None };
-                                    let token_val = token.read().clone().unwrap_or_default();
-                                    match update_moment_field(id, "completed_at", serde_json::json!(completed_at), token_val).await {
-                                        Ok(_) => {
-                                            let mut list = moments.write();
-                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                m.completed_at = completed_at;
+                            on_change: {
+                                let id = id.clone();
+                                move |checked| {
+                                    let id = id.clone();
+                                    let token = auth_token;
+                                    spawn(async move {
+                                        let completed_at = if checked { Some(chrono::Utc::now().to_rfc3339()) } else { None };
+                                        let token_val = token.read().clone().unwrap_or_default();
+                                        match update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at), token_val).await {
+                                            Ok(_) => {
+                                                let mut list = moments.write();
+                                                if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                    m.completed_at = completed_at;
+                                                }
                                             }
+                                            Err(e) => clog!("Error updating moment: {}", e),
                                         }
-                                        Err(e) => clog!("Error updating moment: {}", e),
-                                    }
-                                });
+                                    });
+                                }
                             }
                         }
                         Input {
@@ -761,21 +782,24 @@ pub fn ab_task_cmp() -> Element {
                             size: InputSize::Medium,
                             class: Some("min-w-[12rem]".to_string()),
                             value: due_at.clone().unwrap_or_default().chars().take(16).collect::<String>(),
-                            on_change: move |e: Event<FormData>| {
-                                let id = id;
-                                let token = auth_token;
-                                spawn(async move {
-                                    let token_val = token.read().clone().unwrap_or_default();
-                                    match update_moment_field(id, "due_at", serde_json::json!(Some(e.value())), token_val).await {
-                                        Ok(_) => {
-                                            let mut list = moments.write();
-                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                m.due_at = Some(e.value());
+                            on_change: {
+                                let id = id.clone();
+                                move |e: Event<FormData>| {
+                                    let id = id.clone();
+                                    let token = auth_token;
+                                    spawn(async move {
+                                        let token_val = token.read().clone().unwrap_or_default();
+                                        match update_moment_field(id.clone(), "due_at", serde_json::json!(Some(e.value())), token_val).await {
+                                            Ok(_) => {
+                                                let mut list = moments.write();
+                                                if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                    m.due_at = Some(e.value());
+                                                }
                                             }
+                                            Err(e) => log::info!("Error updating moment: {}", e),
                                         }
-                                        Err(e) => log::info!("Error updating moment: {}", e),
-                                    }
-                                });
+                                    });
+                                }
                             }
                         }
                     }
@@ -784,21 +808,24 @@ pub fn ab_task_cmp() -> Element {
                 input {
                     class: "text-xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1",
                     value: "{title}",
-                    oninput: move |e| {
-                        let id = id;
-                        let token = auth_token;
-                        spawn(async move {
-                            let token_val = token.read().clone().unwrap_or_default();
-                            match update_moment_field(id, "title", serde_json::json!(e.value()), token_val).await {
-                                Ok(_) => {
-                                    let mut list = moments.write();
-                                    if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                        m.title = e.value();
+                    oninput: {
+                        let id = id.clone();
+                        move |e| {
+                            let id = id.clone();
+                            let token = auth_token;
+                            spawn(async move {
+                                let token_val = token.read().clone().unwrap_or_default();
+                                match update_moment_field(id.clone(), "title", serde_json::json!(e.value()), token_val).await {
+                                    Ok(_) => {
+                                        let mut list = moments.write();
+                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                            m.title = e.value();
+                                        }
                                     }
+                                    Err(e) => log::info!("Error updating moment: {}", e),
                                 }
-                                Err(e) => log::info!("Error updating moment: {}", e),
-                            }
-                        });
+                            });
+                        }
                     }
                 }
 
@@ -806,21 +833,24 @@ pub fn ab_task_cmp() -> Element {
                     class: "w-full min-h-32 rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y",
                     placeholder: "Add a description...",
                     value: "{description.clone().unwrap_or_default()}",
-                    oninput: move |e| {
-                        let id = id;
-                        let token = auth_token;
-                        spawn(async move {
-                            let token_val = token.read().clone().unwrap_or_default();
-                            match update_moment_field(id, "description", serde_json::json!(e.value()), token_val).await {
-                                Ok(_) => {
-                                    let mut list = moments.write();
-                                    if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                        m.description = Some(e.value());
+                    oninput: {
+                        let id = id.clone();
+                        move |e| {
+                            let id = id.clone();
+                            let token = auth_token;
+                            spawn(async move {
+                                let token_val = token.read().clone().unwrap_or_default();
+                                match update_moment_field(id.clone(), "description", serde_json::json!(e.value()), token_val).await {
+                                    Ok(_) => {
+                                        let mut list = moments.write();
+                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                            m.description = Some(e.value());
+                                        }
                                     }
+                                    Err(e) => log::info!("Error updating moment: {}", e),
                                 }
-                                Err(e) => log::info!("Error updating moment: {}", e),
-                            }
-                        });
+                            });
+                        }
                     }
                 }
 
@@ -829,21 +859,24 @@ pub fn ab_task_cmp() -> Element {
                     Label { size: LabelSize::Small, "Gravity" }
                     gravity_select {
                         ival: gravity,
-                        onchange: move |e: i32| {
-                            let id = id;
-                            let token = auth_token;
-                            spawn(async move {
-                                let token_val = token.read().clone().unwrap_or_default();
-                                match update_moment_field(id, "gravity", serde_json::json!(Some(e)), token_val).await {
-                                    Ok(_) => {
-                                        let mut list = moments.write();
-                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                            m.gravity = Some(e);
+                        onchange: {
+                            let id = id.clone();
+                            move |e: i32| {
+                                let id = id.clone();
+                                let token = auth_token;
+                                spawn(async move {
+                                    let token_val = token.read().clone().unwrap_or_default();
+                                    match update_moment_field(id.clone(), "gravity", serde_json::json!(Some(e)), token_val).await {
+                                        Ok(_) => {
+                                            let mut list = moments.write();
+                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                m.gravity = Some(e);
+                                            }
                                         }
+                                        Err(e) => log::info!("Error updating moment: {}", e),
                                     }
-                                    Err(e) => log::info!("Error updating moment: {}", e),
-                                }
-                            });
+                                });
+                            }
                         }
                     }
                 }
@@ -865,6 +898,7 @@ pub fn ab_task_cmp() -> Element {
                                         class: "text-muted-foreground hover:text-destructive cursor-pointer leading-none",
                                         onclick: {
                                             let tag = tag.clone();
+                                            let mut save_tags = save_tags.clone();
                                             move |_| {
                                                 let mut updated = moment_tags.read().clone();
                                                 updated.retain(|t| t != &tag);
@@ -888,17 +922,20 @@ pub fn ab_task_cmp() -> Element {
                         Button {
                             variant: ButtonVariant::Secondary,
                             size: ButtonSize::Small,
-                            on_click: move |_| {
-                                let new_tag = tag_input.read().trim().to_string();
-                                if new_tag.is_empty() {
-                                    return;
+                            on_click: {
+                                let mut save_tags = save_tags.clone();
+                                move |_| {
+                                    let new_tag = tag_input.read().trim().to_string();
+                                    if new_tag.is_empty() {
+                                        return;
+                                    }
+                                    let mut updated = moment_tags.read().clone();
+                                    if !updated.contains(&new_tag) {
+                                        updated.push(new_tag);
+                                        save_tags(updated);
+                                    }
+                                    tag_input.set(String::new());
                                 }
-                                let mut updated = moment_tags.read().clone();
-                                if !updated.contains(&new_tag) {
-                                    updated.push(new_tag);
-                                    save_tags(updated);
-                                }
-                                tag_input.set(String::new());
                             },
                             "Add"
                         }
@@ -926,29 +963,32 @@ pub fn ab_task_cmp() -> Element {
                     }
                     select {
                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                        oninput: move |e| {
-                            let val = e.value();
-                            let new_dep: Option<i64> = if val.is_empty() { None } else { val.parse().ok() };
-                            let id = id;
-                            let token = auth_token;
-                            spawn(async move {
-                                let token_val = token.read().clone().unwrap_or_default();
-                                match update_moment_field(id, "depends_on", serde_json::json!(new_dep), token_val).await {
-                                    Ok(_) => {
-                                        let mut list = moments.write();
-                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                            m.depends_on = new_dep;
+                        oninput: {
+                            let id = id.clone();
+                            move |e| {
+                                let val = e.value();
+                                let new_dep: Option<String> = if val.is_empty() { None } else { Some(val) };
+                                let id = id.clone();
+                                let token = auth_token;
+                                spawn(async move {
+                                    let token_val = token.read().clone().unwrap_or_default();
+                                    match update_moment_field(id.clone(), "depends_on", serde_json::json!(new_dep), token_val).await {
+                                        Ok(_) => {
+                                            let mut list = moments.write();
+                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                m.depends_on = new_dep;
+                                            }
                                         }
+                                        Err(e) => log::info!("Error updating depends_on: {}", e),
                                     }
-                                    Err(e) => log::info!("Error updating depends_on: {}", e),
-                                }
-                            });
+                                });
+                            }
                         },
                         option { value: "", selected: moment.depends_on.is_none(), "None" }
                         for candidate in dependency_candidates.iter() {
                             option {
                                 value: "{candidate.id}",
-                                selected: moment.depends_on == Some(candidate.id),
+                                selected: moment.depends_on == Some(candidate.id.clone()),
                                 "{candidate.title}"
                             }
                         }
@@ -983,36 +1023,39 @@ pub fn ab_task_cmp() -> Element {
                             Button {
                                 variant: ButtonVariant::Secondary,
                                 full_width: true,
-                                on_click: move |_| {
-                                    let id = id;
-                                    let token = auth_token;
-                                    spawn(async move {
-                                        let completed_at = Some(chrono::Utc::now().to_rfc3339());
-                                        let new_reaction = NewReactionType {
-                                            moment_id: id,
-                                            description: ReactionForm.read().description.clone(),
-                                            value: ReactionForm.read().value,
-                                        };
-                                        let token_val = token.read().clone().unwrap_or_default();
-                                        let (complete_result, reaction_result) = futures::join!(
-                                            update_moment_field(id, "completed_at", serde_json::json!(completed_at), token_val.clone()),
-                                            createReaction(new_reaction, token_val)
-                                        );
-                                        let new_r = reaction_result.expect("hello?");
-                                        // update the signal so UI reacts
-                                        reactions.write().push(new_r.clone());
-                                        let mut list = moments.write();
-                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                            m.completed_at = completed_at;
-                                            if let Some(r) = &mut m.reactions {
-                                                r.push(new_r);
-                                            } else {
-                                                m.reactions = Some(vec![new_r]);
+                                on_click: {
+                                    let id = id.clone();
+                                    move |_| {
+                                        let id = id.clone();
+                                        let token = auth_token;
+                                        spawn(async move {
+                                            let completed_at = Some(chrono::Utc::now().to_rfc3339());
+                                            let new_reaction = NewReactionType {
+                                                moment_id: id.clone(),
+                                                description: ReactionForm.read().description.clone(),
+                                                value: ReactionForm.read().value,
+                                            };
+                                            let token_val = token.read().clone().unwrap_or_default();
+                                            let (complete_result, reaction_result) = futures::join!(
+                                                update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at), token_val.clone()),
+                                                createReaction(new_reaction, token_val)
+                                            );
+                                            let new_r = reaction_result.expect("hello?");
+                                            // update the signal so UI reacts
+                                            reactions.write().push(new_r.clone());
+                                            let mut list = moments.write();
+                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                m.completed_at = completed_at;
+                                                if let Some(r) = &mut m.reactions {
+                                                    r.push(new_r);
+                                                } else {
+                                                    m.reactions = Some(vec![new_r]);
+                                                }
                                             }
-                                        }
-                                        activity_bar_tgl.set(false);
-                                        backdropTgl.set(false);
-                                    });
+                                            activity_bar_tgl.set(false);
+                                            backdropTgl.set(false);
+                                        });
+                                    }
                                 },
                                 "Complete with reaction"
                             }
@@ -1030,25 +1073,30 @@ pub fn ab_task_cmp() -> Element {
                                     }
                                     button {
                                         class: "h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors cursor-pointer shrink-0",
-                                        onclick: move |_| {
-                                            let reaction_id = reaction.id;
+                                        onclick: {
+                                            let id = id.clone();
                                             let reaction = reaction.clone();
-                                            let token = auth_token;
-                                            spawn(async move {
-                                                let token_val = token.read().clone().unwrap_or_default();
-                                                match deleteReaction(reaction, token_val).await {
-                                                    Ok(_) => {
-                                                        // update signal — drives the UI
-                                                        reactions.write().retain(|r| r.id != reaction_id);
-                                                        // keep moments in sync
-                                                        let mut list = moments.write();
-                                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                            m.reactions.as_mut().map(|v| v.retain(|r| r.id != reaction_id));
+                                            move |_| {
+                                                let id = id.clone();
+                                                let reaction_id = reaction.id.clone();
+                                                let reaction = reaction.clone();
+                                                let token = auth_token;
+                                                spawn(async move {
+                                                    let token_val = token.read().clone().unwrap_or_default();
+                                                    match deleteReaction(reaction, token_val).await {
+                                                        Ok(_) => {
+                                                            // update signal — drives the UI
+                                                            reactions.write().retain(|r| r.id != reaction_id);
+                                                            // keep moments in sync
+                                                            let mut list = moments.write();
+                                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                                m.reactions.as_mut().map(|v| v.retain(|r| r.id != reaction_id));
+                                                            }
                                                         }
+                                                        Err(e) => log::info!("Error deleting reaction: {}", e),
                                                     }
-                                                    Err(e) => log::info!("Error deleting reaction: {}", e),
-                                                }
-                                            });
+                                                });
+                                            }
                                         },
                                         fa_trash {}
                                     }
@@ -1119,7 +1167,7 @@ fn compute_urgency(m: &MomentType, all_moments: &[MomentType], now: chrono::Date
         })
         .unwrap_or(0.0);
 
-    let blocked_penalty = match m.depends_on {
+    let blocked_penalty = match m.depends_on.as_deref() {
         Some(dep_id) => {
             let dep_done = all_moments.iter()
                 .find(|x| x.id == dep_id)
@@ -1130,7 +1178,7 @@ fn compute_urgency(m: &MomentType, all_moments: &[MomentType], now: chrono::Date
         None => 0.0,
     };
 
-    let blocking_bonus = if all_moments.iter().any(|x| x.depends_on == Some(m.id) && x.completed_at.is_none()) {
+    let blocking_bonus = if all_moments.iter().any(|x| x.depends_on.as_deref() == Some(m.id.as_str()) && x.completed_at.is_none()) {
         8.0
     } else {
         0.0
@@ -1157,7 +1205,7 @@ pub fn PriorityViewCmp() -> Element {
         .collect();
     ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    let entity_name = move |entity_id: i64| entities.read().iter()
+    let entity_name = move |entity_id: &str| entities.read().iter()
         .find(|e| e.id == entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
@@ -1187,7 +1235,7 @@ pub fn PriorityViewCmp() -> Element {
                         div {
                             class: "flex flex-col min-w-0",
                             span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                            span { class: "text-xs text-muted-foreground", "{entity_name(m.entity_id)}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
                         }
                         span {
                             class: "text-xs font-semibold shrink-0 px-2 py-0.5 rounded-full border border-border text-muted-foreground",

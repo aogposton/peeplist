@@ -28,13 +28,13 @@ pub async fn getEntities(token: String) -> Result<Vec<EntityType>, reqwest::Erro
 }
 
 
-pub async fn update_entity_field(id: i64, field: &str, value: Value, token: String) -> Result<(), reqwest::Error> {
+pub async fn update_entity_field(id: String, field: &str, value: Value, token: String) -> Result<(), reqwest::Error> {
     let payload = serde_json::json!({
-        field: value
+        field: super::coerce_fk_value(field, value)
     });
 
     SupabaseClient::new(token)
-        .patch("entities", id)
+        .patch("entities", &id)
         .json(&payload)
         .send()
         .await?;

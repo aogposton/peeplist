@@ -6,3 +6,24 @@ pub mod auth;
 pub use entity::{ getEntities, createEntity, getEntityTypes, update_entity_field};
 pub use moment::{deleteReaction, createReaction, deleteMoment, update_moment_field, getMoments, createMoment, updateMoment,};
 pub use auth::{login, get_current_user, refresh_access_token};
+
+// The `entities`/`moments` tables still have `bigint` FK columns
+// (entity_id, depends_on, entity_type_id, parent_entity_id) even though the
+// app's ids are now Strings app-wide (see types.rs's de_flex_id/se_flex_id).
+// update_moment_field/update_entity_field build their PATCH payload from a
+// raw serde_json::Value passed in by call sites, so — unlike the typed
+// struct fields, which have serialize_with — this is the one spot that has
+// to coerce a stringified FK id back into a JSON number before it hits a
+// still-bigint column.
+pub(crate) fn coerce_fk_value(field: &str, value: serde_json::Value) -> serde_json::Value {
+    const FK_FIELDS: &[&str] = &["entity_id", "depends_on", "entity_type_id", "parent_entity_id"];
+    if !FK_FIELDS.contains(&field) {
+        return value;
+    }
+    match value {
+        serde_json::Value::String(s) => s.parse::<i64>()
+            .map(serde_json::Value::from)
+            .unwrap_or(serde_json::Value::String(s)),
+        other => other,
+    }
+}

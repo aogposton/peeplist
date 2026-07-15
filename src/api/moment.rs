@@ -7,7 +7,7 @@ use crate::types::*;
 
 pub async fn deleteReaction(mut reaction: ReactionType,token: String) -> Result<(), reqwest::Error> {
     let response = SupabaseClient::new(token)
-        .delete("reactions", reaction.id)
+        .delete("reactions", &reaction.id)
         .json(&reaction)
         .send()
         .await?;
@@ -19,7 +19,7 @@ pub async fn deleteMoment(mut moment: MomentType,token: String) -> Result<(), re
     moment.deleted_at = Some(chrono::Utc::now().to_string());
 
     let response = SupabaseClient::new(token)
-        .patch("moments", moment.id)
+        .patch("moments", &moment.id)
         .json(&moment)
         .send()
         .await?;
@@ -50,13 +50,13 @@ pub async fn createReaction(reaction: NewReactionType,token: String) -> Result<R
     Ok(created.into_iter().next().unwrap())
 }
 
-pub async fn update_moment_field( id: i64, field: &str, value: Value, token: String) -> Result<(), reqwest::Error> {
+pub async fn update_moment_field( id: String, field: &str, value: Value, token: String) -> Result<(), reqwest::Error> {
     let payload = serde_json::json!({
-        field: value
+        field: super::coerce_fk_value(field, value)
     });
 
     let response = SupabaseClient::new(token)
-        .patch("moments", id)
+        .patch("moments", &id)
         .json(&payload)
         .send()
         .await?;
@@ -66,7 +66,7 @@ pub async fn update_moment_field( id: i64, field: &str, value: Value, token: Str
 
 pub async fn updateMoment(moment: MomentType, token: String) -> Result<MomentType, reqwest::Error> {
     let response = SupabaseClient::new(token)
-        .patch("moments", moment.id)
+        .patch("moments", &moment.id)
         .header("Prefer", "return=representation")
         .json(&moment)
         .send()

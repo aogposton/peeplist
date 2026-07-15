@@ -53,7 +53,7 @@ impl SupabaseClient {
             .header("Content-Type", "application/json")
     }
 
-    pub fn patch(&self, table: &str, id: i64) -> RequestBuilder {
+    pub fn patch(&self, table: &str, id: &str) -> RequestBuilder {
         self.client
             .patch(format!("{}/rest/v1/{}?id=eq.{}", self.url, table, id))
             .header("apikey",self.anon_key.clone())
@@ -61,7 +61,7 @@ impl SupabaseClient {
             .header("Content-Type", "application/json")
     }
 
-    pub fn delete(&self, table: &str, id: i64) -> RequestBuilder {
+    pub fn delete(&self, table: &str, id: &str) -> RequestBuilder {
         self.client
             .delete(format!("{}/rest/v1/{}?id=eq.{}", self.url, table, id))
             .header("apikey",self.anon_key.clone())

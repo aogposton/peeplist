@@ -164,7 +164,7 @@ pub fn ab_history_cmp() -> Element {
 
     let entity = current_entity.read().clone();
     let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
-    let entity_id = entity.as_ref().map(|e| e.id);
+    let entity_id = entity.as_ref().map(|e| e.id.clone());
 
     // Chronological "story" order: a moment's place in the timeline is when it
     // happened — its completion — not when it was created. Notes never complete,
@@ -174,7 +174,7 @@ pub fn ab_history_cmp() -> Element {
     let timeline_key = |m: &MomentType| m.completed_at.clone().unwrap_or_else(|| m.created_at.clone());
 
     let mut entity_moments = moments.read().iter()
-        .filter(|m| Some(m.entity_id) == entity_id)
+        .filter(|m| Some(m.entity_id.clone()) == entity_id)
         .cloned()
         .collect::<Vec<_>>();
     entity_moments.sort_by(|a, b| timeline_key(a).cmp(&timeline_key(b)));
@@ -287,12 +287,12 @@ pub fn ab_stats_cmp() -> Element {
 
     let entity = current_entity.read().clone();
     let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
-    let entity_id = entity.as_ref().map(|e| e.id);
+    let entity_id = entity.as_ref().map(|e| e.id.clone());
 
     // Promises kept/pending and reaction coverage, scoped to this entity's moments.
     let (promises_kept, promises_pending, tasks_with_reactions) = {
         let all = moments.read();
-        let for_entity = all.iter().filter(|m| Some(m.entity_id) == entity_id);
+        let for_entity = all.iter().filter(|m| Some(m.entity_id.clone()) == entity_id);
         for_entity.fold((0usize, 0usize, 0usize), |(kept, pending, reacted), m| {
             let kept = kept + (m.moment_type_id == 2i64 && m.completed_at.is_some()) as usize;
             let pending = pending + (m.moment_type_id == 2i64 && m.completed_at.is_none()) as usize;
@@ -310,8 +310,8 @@ pub fn ab_stats_cmp() -> Element {
     let (entity_rank, total_entities) = {
         let all_moments = moments.read();
         let all_entities = entities.read();
-        let mut counts: Vec<(i64, usize)> = all_entities.iter()
-            .map(|e| (e.id, all_moments.iter().filter(|m| m.entity_id == e.id).count()))
+        let mut counts: Vec<(String, usize)> = all_entities.iter()
+            .map(|e| (e.id.clone(), all_moments.iter().filter(|m| m.entity_id == e.id).count()))
             .collect();
         counts.sort_by(|a, b| b.1.cmp(&a.1));
         let rank = entity_id.and_then(|id| counts.iter().position(|(eid, _)| *eid == id)).map(|pos| pos + 1);
@@ -393,7 +393,7 @@ pub fn ab_info_cmp() -> Element {
     let entity = current_entity.read().clone();
     let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
     let type_name = entity.as_ref()
-        .and_then(|e| e.entity_type_id)
+        .and_then(|e| e.entity_type_id.clone())
         .and_then(|type_id| entity_types.read().iter().find(|t| t.id == type_id).map(|t| t.name.clone()))
         .unwrap_or_else(|| "Not set".to_string());
     let known_since = entity.as_ref()
@@ -445,12 +445,12 @@ pub fn ab_info_cmp() -> Element {
                                     class: "w-20 rounded-md border border-input bg-background text-sm text-foreground px-2 py-1 text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                     value: "{drift_value}",
                                     onchange: move |e| {
-                                        let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id) else { return; };
+                                        let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id.clone()) else { return; };
                                         let Ok(new_drift) = e.value().parse::<f64>() else { return; };
                                         let token = auth_token;
                                         spawn(async move {
                                             let token_val = token.read().clone().unwrap_or_default();
-                                            match update_entity_field(entity_id, "drift", serde_json::json!(new_drift), token_val).await {
+                                            match update_entity_field(entity_id.clone(), "drift", serde_json::json!(new_drift), token_val).await {
                                                 Ok(_) => {
                                                     let mut list = entities.write();
                                                     if let Some(ent) = list.iter_mut().find(|x| x.id == entity_id) {
@@ -500,7 +500,7 @@ pub fn EntityModalCmp() -> Element {
             };
             let new_entity = NewEntityType {
                 name: form_data.name.clone(),
-                entity_type_id: form_data.entity_type_sel.parse::<i64>().ok(),
+                entity_type_id: if form_data.entity_type_sel.is_empty() { None } else { Some(form_data.entity_type_sel.clone()) },
                 parent_entity_id: None,
                 user_id: None,
                 archived_at: None,

@@ -14,9 +14,9 @@ use super::entity::compute_distance;
 // live and Dioxus-native (wheel + drag update a transform on a wrapping
 // <g>) — no d3.zoom() involved, d3 is scoped to layout only.
 //
-// Entity id 0 is reserved to always mean "yourself" (see memory
-// project_self_entity_convention) — the center "You" node already
-// represents that, so it's excluded from the orbiting entities.
+// The center "You" node already represents SELF_ENTITY_ID (see
+// crate::types::SELF_ENTITY_ID / memory project_self_entity_convention), so
+// it's excluded from the orbiting entities.
 const CANVAS_SIZE: f64 = 600.0;
 const CENTER: f64 = CANVAS_SIZE / 2.0;
 const MIN_RADIUS: f64 = 70.0;
@@ -24,17 +24,16 @@ const MAX_RADIUS: f64 = 260.0;
 const DISTANCE_CAP: f64 = 8.0;
 const MIN_ZOOM: f64 = 0.3;
 const MAX_ZOOM: f64 = 3.0;
-const SELF_ENTITY_ID: i64 = 0;
 
 #[derive(serde::Serialize, Clone)]
 struct GraphNodeIn {
-    id: i64,
+    id: String,
     target_radius: f64,
 }
 
 #[derive(serde::Deserialize, Clone)]
 struct GraphNodeOut {
-    id: i64,
+    id: String,
     x: f64,
     y: f64,
 }
@@ -93,7 +92,7 @@ pub fn GraphViewCmp() -> Element {
             let nodes_in: Vec<GraphNodeIn> = entity_list.iter().map(|e| {
                 let distance = compute_distance(e, &moment_list, now);
                 let radius = MIN_RADIUS + distance.min(DISTANCE_CAP) / DISTANCE_CAP * (MAX_RADIUS - MIN_RADIUS);
-                GraphNodeIn { id: e.id, target_radius: radius }
+                GraphNodeIn { id: e.id.clone(), target_radius: radius }
             }).collect();
 
             let eval = document::eval(LAYOUT_SCRIPT);
@@ -181,17 +180,20 @@ pub fn GraphViewCmp() -> Element {
                         }
                         for node in positions.read().iter() {
                             {
-                                let node_id = node.id;
+                                let node_id = node.id.clone();
                                 let (nx, ny) = (node.x, node.y);
                                 let name = entity_lookup.iter().find(|e| e.id == node_id).map(|e| e.name.clone()).unwrap_or_default();
                                 rsx! {
                                     g {
                                         key: "{node_id}",
                                         class: "cursor-pointer",
-                                        onclick: move |_| {
-                                            if let Some(e) = entities.read().iter().find(|e| e.id == node_id).cloned() {
-                                                current_entity.set(Some(e));
-                                                currentView.set(View::Entity);
+                                        onclick: {
+                                            let node_id = node_id.clone();
+                                            move |_| {
+                                                if let Some(e) = entities.read().iter().find(|e| e.id == node_id).cloned() {
+                                                    current_entity.set(Some(e));
+                                                    currentView.set(View::Entity);
+                                                }
                                             }
                                         },
                                         circle {
