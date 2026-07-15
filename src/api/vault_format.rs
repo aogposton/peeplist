@@ -107,6 +107,14 @@ pub struct MomentEntry {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub due_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scheduled_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub until_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub completed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub depends_on: Option<String>,
@@ -169,10 +177,7 @@ fn entry_to_reaction(entry: &ReactionEntry, moment_id: &str) -> ReactionType {
 }
 
 fn moment_to_entry(m: &MomentType) -> MomentEntry {
-    let (tags, sort_index) = match &m.metadata {
-        Some(meta) => (meta.tags.clone(), meta.sort_index),
-        None => (vec![], None),
-    };
+    let meta = m.metadata.clone().unwrap_or_default();
     MomentEntry {
         id: m.id.clone(),
         kind: moment_type_str(m.moment_type_id).to_string(),
@@ -180,10 +185,14 @@ fn moment_to_entry(m: &MomentType) -> MomentEntry {
         description: m.description.clone().filter(|d| !d.is_empty()),
         gravity: m.gravity,
         due_at: m.due_at.clone(),
+        scheduled_at: meta.scheduled_at,
+        until_at: meta.until_at,
+        priority: meta.priority,
+        project: meta.project,
         completed_at: m.completed_at.clone(),
         depends_on: m.depends_on.clone(),
-        tags,
-        sort_index,
+        tags: meta.tags,
+        sort_index: meta.sort_index,
         created_at: m.created_at.clone(),
         reactions: m.reactions.as_deref().unwrap_or(&[]).iter().map(reaction_to_entry).collect(),
     }
@@ -193,14 +202,15 @@ fn moment_to_entry(m: &MomentType) -> MomentEntry {
 // filtered out and appended to trash.yaml instead), so `deleted_at` is
 // always None for anything round-tripped through this format.
 fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentType {
-    let metadata = if entry.tags.is_empty() && entry.sort_index.is_none() {
-        None
-    } else {
-        Some(MomentMetadata {
-            tags: entry.tags.clone(),
-            sort_index: entry.sort_index,
-        })
+    let meta = MomentMetadata {
+        tags: entry.tags.clone(),
+        sort_index: entry.sort_index,
+        priority: entry.priority.clone(),
+        project: entry.project.clone(),
+        scheduled_at: entry.scheduled_at.clone(),
+        until_at: entry.until_at.clone(),
     };
+    let metadata = if meta == MomentMetadata::default() { None } else { Some(meta) };
     let reactions = entry.reactions.iter().map(|r| entry_to_reaction(r, &entry.id)).collect::<Vec<_>>();
     MomentType {
         id: entry.id.clone(),
@@ -372,7 +382,7 @@ mod tests {
             reactions: None,
             created_at: "2026-06-01T00:00:00Z".to_string(),
             depends_on: None,
-            metadata: Some(MomentMetadata { tags: vec!["wedding".to_string()], sort_index: None }),
+            metadata: Some(MomentMetadata { tags: vec!["wedding".to_string()], ..Default::default() }),
         }
     }
 
@@ -436,6 +446,29 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_taskwarrior_style_attributes() {
+        let entity = sample_entity();
+        let mut with_attrs = task(&entity.id);
+        with_attrs.metadata = Some(MomentMetadata {
+            tags: vec!["wedding".to_string()],
+            sort_index: Some(2.0),
+            priority: Some("H".to_string()),
+            project: Some("Home.Garden".to_string()),
+            scheduled_at: Some("2026-08-01T00:00:00Z".to_string()),
+            until_at: Some("2026-09-01T00:00:00Z".to_string()),
+        });
+
+        let rendered = render_entity_file(&entity, &[with_attrs.clone()], "");
+        assert!(rendered.contains("priority: H"));
+        assert!(rendered.contains("project: Home.Garden"));
+        assert!(rendered.contains("scheduled_at:"));
+        assert!(rendered.contains("until_at:"));
+
+        let parsed = parse_entity_file(&rendered).expect("valid round-trip");
+        assert_eq!(parsed.moments[0], with_attrs);
+    }
+
+    #[test]
     fn preserves_freeform_body_on_rewrite() {
         let entity = sample_entity();
         let body = "Some personal notes about Jane.\n\nMore notes.\n";
@@ -478,6 +511,10 @@ mod tests {
         assert!(!rendered.contains("due_at:"));
         assert!(!rendered.contains("tags:"));
         assert!(!rendered.contains("reactions:"));
+        assert!(!rendered.contains("priority:"));
+        assert!(!rendered.contains("project:"));
+        assert!(!rendered.contains("scheduled_at:"));
+        assert!(!rendered.contains("until_at:"));
 
         let parsed = parse_entity_file(&rendered).unwrap();
         assert_eq!(parsed.entity.entity_type_id, None);

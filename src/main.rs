@@ -30,6 +30,7 @@ mod layouts;
 mod api;
 mod theme;
 mod ui;
+mod quick_capture;
 
 
 #[derive(Debug, Clone, Routable, PartialEq)]
