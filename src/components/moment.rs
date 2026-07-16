@@ -894,7 +894,13 @@ pub fn ab_task_cmp() -> Element {
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
 
-    let moment = current_moment.read().clone().unwrap();
+    // Every call site that opens this panel sets current_moment in the same
+    // handler, so this shouldn't be reachable — but that's a convention, not
+    // something the type system enforces, so fail to an empty panel instead
+    // of panicking if a future change ever breaks it.
+    let Some(moment) = current_moment.read().clone() else {
+        return rsx! {};
+    };
     let moment_sig = use_signal(|| moment.clone());
     let mut reactions = use_signal(|| moment.reactions.clone().unwrap_or_default());
     let id = moment.id.clone();
