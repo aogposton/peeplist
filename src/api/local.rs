@@ -11,12 +11,14 @@
 
 use crate::types::*;
 use crate::api::storage::StorageError;
-use crate::api::vault_format::{self, ParsedEntityFile, LOCAL_SELF_ENTITY_ID};
+use crate::api::vault_format::{self, ParsedEntityFile, TrashEntry, VaultMeta, LOCAL_SELF_ENTITY_ID, VAULT_SCHEMA_VERSION};
 use serde_json::Value;
 use uuid::Uuid;
 use web_sys::Storage;
 
 const KEY_PREFIX: &str = "peeplist_vault:entity:";
+const TRASH_KEY: &str = "peeplist_vault:trash";
+const VAULT_META_KEY: &str = "peeplist_vault:meta";
 
 // A first-pass default list — get_entity_types() below adds to this
 // whatever type names are actually in use across the vault, per §1d ("the
@@ -105,15 +107,64 @@ impl LocalStorage {
         self.save(storage, &self_entity, &[], "")
     }
 
+    // Same idempotent-open pattern as ensure_self_entity: writes
+    // .peeplist/vault.yaml's in-storage equivalent on first access. Only
+    // one schema version exists today, so the compatibility check is a
+    // no-op in practice — it's here so a future version bump has
+    // somewhere to actually land instead of silently misparsing an old
+    // vault.
+    fn ensure_vault_meta(&self, storage: &Storage) -> Result<(), StorageError> {
+        if let Some(raw) = storage.get_item(VAULT_META_KEY).ok().flatten() {
+            if let Ok(meta) = vault_format::parse_vault_meta(&raw) {
+                if meta.schema_version > VAULT_SCHEMA_VERSION {
+                    log::warn!(
+                        "vault schema version {} is newer than this app build supports ({}) — proceeding, but some data may not round-trip correctly",
+                        meta.schema_version, VAULT_SCHEMA_VERSION
+                    );
+                }
+                return Ok(());
+            }
+        }
+        let meta = VaultMeta {
+            schema_version: VAULT_SCHEMA_VERSION,
+            created_at: now(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let rendered = vault_format::render_vault_meta(&meta).map_err(|e| StorageError::Local(e.to_string()))?;
+        storage
+            .set_item(VAULT_META_KEY, &rendered)
+            .map_err(|_| StorageError::Local("failed to write vault metadata".to_string()))
+    }
+
+    fn load_trash(&self, storage: &Storage) -> Vec<TrashEntry> {
+        storage
+            .get_item(TRASH_KEY)
+            .ok()
+            .flatten()
+            .and_then(|raw| vault_format::parse_trash(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn append_trash(&self, storage: &Storage, entry: TrashEntry) -> Result<(), StorageError> {
+        let mut entries = self.load_trash(storage);
+        entries.push(entry);
+        let rendered = vault_format::render_trash(&entries).map_err(|e| StorageError::Local(e.to_string()))?;
+        storage
+            .set_item(TRASH_KEY, &rendered)
+            .map_err(|_| StorageError::Local("failed to write to trash".to_string()))
+    }
+
     pub async fn get_moments(&self) -> Result<Vec<MomentType>, StorageError> {
         let storage = local_storage()?;
         self.ensure_self_entity(&storage)?;
+        self.ensure_vault_meta(&storage)?;
         Ok(self.all(&storage).into_iter().flat_map(|f| f.moments).collect())
     }
 
     pub async fn get_entities(&self) -> Result<Vec<EntityType>, StorageError> {
         let storage = local_storage()?;
         self.ensure_self_entity(&storage)?;
+        self.ensure_vault_meta(&storage)?;
         Ok(self.all(&storage).into_iter().map(|f| f.entity).collect())
     }
 
@@ -213,23 +264,34 @@ impl LocalStorage {
         self.save(&storage, &file.entity, &file.moments, &file.body)
     }
 
-    // Hard delete for this first pass — no .peeplist/trash.yaml wiring yet
-    // (that's real scope on its own: another localStorage key, another
-    // shape to keep consistent). §1d's own reasoning for trash.yaml
-    // ("non-destructive, no recovery UI needed yet") means the difference
-    // is invisible to the user either way today; revisit if/when a
-    // recovery UI is ever actually wanted.
+    // Soft delete: the record is appended to the trash log (see
+    // vault_format::TrashEntry) before being removed from the visible
+    // file, consistent with the product's "never actually throw your
+    // data away" stance — no recovery UI reads this back yet, but the
+    // record isn't gone.
     pub async fn delete_moment(&self, moment: MomentType) -> Result<(), StorageError> {
         let storage = local_storage()?;
         let mut file = self
             .load(&storage, &moment.entity_id)
             .ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {}", moment.entity_id)))?;
+        if let Some(m) = file.moments.iter().find(|m| m.id == moment.id) {
+            let entry = vault_format::moment_to_entry(m);
+            self.append_trash(&storage, TrashEntry::Moment {
+                entity_id: moment.entity_id.clone(),
+                moment: entry,
+                deleted_at: now(),
+            })?;
+        }
         file.moments.retain(|m| m.id != moment.id);
         self.save(&storage, &file.entity, &file.moments, &file.body)
     }
 
     pub async fn delete_entity(&self, id: String) -> Result<(), StorageError> {
         let storage = local_storage()?;
+        if let Some(file) = self.load(&storage, &id) {
+            let doc = vault_format::entity_to_doc(&file.entity, &file.moments);
+            self.append_trash(&storage, TrashEntry::Entity { entity: doc, deleted_at: now() })?;
+        }
         storage
             .remove_item(&entity_key(&id))
             .map_err(|_| StorageError::Local("failed to remove from localStorage".to_string()))

@@ -176,7 +176,7 @@ fn entry_to_reaction(entry: &ReactionEntry, moment_id: &str) -> ReactionType {
     }
 }
 
-fn moment_to_entry(m: &MomentType) -> MomentEntry {
+pub(crate) fn moment_to_entry(m: &MomentType) -> MomentEntry {
     let meta = m.metadata.clone().unwrap_or_default();
     MomentEntry {
         id: m.id.clone(),
@@ -229,7 +229,7 @@ fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentType {
     }
 }
 
-fn entity_to_doc(entity: &EntityType, moments: &[MomentType]) -> EntityDoc {
+pub(crate) fn entity_to_doc(entity: &EntityType, moments: &[MomentType]) -> EntityDoc {
     let meta = entity.metadata.clone().unwrap_or_default();
     EntityDoc {
         id: entity.id.clone(),
@@ -345,6 +345,25 @@ pub struct VaultMeta {
 pub enum TrashEntry {
     Moment { entity_id: String, moment: MomentEntry, deleted_at: String },
     Entity { entity: EntityDoc, deleted_at: String },
+}
+
+pub fn render_vault_meta(meta: &VaultMeta) -> Result<String, VaultFormatError> {
+    Ok(serde_norway::to_string(meta)?)
+}
+
+pub fn parse_vault_meta(content: &str) -> Result<VaultMeta, VaultFormatError> {
+    Ok(serde_norway::from_str(content)?)
+}
+
+pub fn render_trash(entries: &[TrashEntry]) -> Result<String, VaultFormatError> {
+    Ok(serde_norway::to_string(entries)?)
+}
+
+pub fn parse_trash(content: &str) -> Result<Vec<TrashEntry>, VaultFormatError> {
+    if content.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(serde_norway::from_str(content)?)
 }
 
 #[cfg(test)]
