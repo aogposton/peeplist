@@ -1454,12 +1454,28 @@ pub fn ab_task_cmp() -> Element {
                                                 storage.update_moment_field(id.clone(), "completed_at", serde_json::json!(completed_at)),
                                                 storage.create_reaction(new_reaction)
                                             );
-                                            let new_r = reaction_result.expect("hello?");
-                                            // update the signal so UI reacts
+
+                                            let new_r = match reaction_result {
+                                                Ok(r) => r,
+                                                Err(e) => {
+                                                    clog!("Error creating reaction: {}", e);
+                                                    return;
+                                                }
+                                            };
+                                            let completed_ok = complete_result.is_ok();
+                                            if let Err(e) = complete_result {
+                                                clog!("Error marking moment complete: {}", e);
+                                                // Reaction was saved even though completion wasn't —
+                                                // still reflect the reaction so it isn't silently
+                                                // lost, but leave completed_at untouched below.
+                                            }
+
                                             reactions.write().push(new_r.clone());
                                             let mut list = moments.write();
                                             if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                m.completed_at = completed_at;
+                                                if completed_ok {
+                                                    m.completed_at = completed_at;
+                                                }
                                                 if let Some(r) = &mut m.reactions {
                                                     r.push(new_r);
                                                 } else {
