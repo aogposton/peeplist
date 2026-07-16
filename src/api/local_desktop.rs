@@ -6,17 +6,16 @@
 // LocalStorage (src/api/local.rs) stores under one key per entity, so
 // "export your data" is a literal file copy either way.
 //
-// Deliberately minimal, matching the same scope as the web slice: no
-// `.peeplist/trash.yaml` wiring (deletes are hard deletes, see local.rs's
-// matching comment), no vault-path configuration UI (hardcoded default
-// root only). Lookups scan `people/*.md` and parse each file's frontmatter
-// rather than trusting the filename, since §1d's own filename convention
-// is explicit that the slug is a creation-time hint, not the source of
-// truth — the id inside the file is.
+// Deliberately minimal otherwise: no vault-path configuration UI
+// (hardcoded default root only). Lookups scan `people/*.md` and parse
+// each file's frontmatter rather than trusting the filename, since §1d's
+// own filename convention is explicit that the slug is a creation-time
+// hint, not the source of truth — the id inside the file is. Deletes are
+// soft (trash.yaml at the vault root, see local.rs's matching comment).
 
 use crate::types::*;
 use crate::api::storage::StorageError;
-use crate::api::vault_format::{self, ParsedEntityFile, LOCAL_SELF_ENTITY_ID, SELF_FILENAME};
+use crate::api::vault_format::{self, ParsedEntityFile, TrashEntry, VaultMeta, LOCAL_SELF_ENTITY_ID, SELF_FILENAME, VAULT_SCHEMA_VERSION};
 use serde_json::Value;
 use uuid::Uuid;
 use std::fs;
@@ -39,6 +38,14 @@ fn people_dir() -> Result<PathBuf, StorageError> {
 
 fn self_path() -> Result<PathBuf, StorageError> {
     Ok(vault_root()?.join(SELF_FILENAME))
+}
+
+fn trash_path() -> Result<PathBuf, StorageError> {
+    Ok(vault_root()?.join("trash.yaml"))
+}
+
+fn vault_meta_path() -> Result<PathBuf, StorageError> {
+    Ok(vault_root()?.join("vault.yaml"))
 }
 
 fn now() -> String {
@@ -140,13 +147,58 @@ impl LocalStorage {
         self.save(&p, &self_entity, &[], "")
     }
 
+    // See local.rs's identical helper — only one schema version exists
+    // today, so the compatibility check is a no-op in practice, but it's
+    // here so a future version bump has somewhere to land.
+    fn ensure_vault_meta(&self) -> Result<(), StorageError> {
+        let p = vault_meta_path()?;
+        if let Ok(raw) = fs::read_to_string(&p) {
+            if let Ok(meta) = vault_format::parse_vault_meta(&raw) {
+                if meta.schema_version > VAULT_SCHEMA_VERSION {
+                    log::warn!(
+                        "vault schema version {} is newer than this app build supports ({}) — proceeding, but some data may not round-trip correctly",
+                        meta.schema_version, VAULT_SCHEMA_VERSION
+                    );
+                }
+                return Ok(());
+            }
+        }
+        let meta = VaultMeta {
+            schema_version: VAULT_SCHEMA_VERSION,
+            created_at: now(),
+            app_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+        let rendered = vault_format::render_vault_meta(&meta).map_err(|e| StorageError::Local(e.to_string()))?;
+        fs::write(&p, rendered).map_err(|e| StorageError::Local(e.to_string()))
+    }
+
+    fn load_trash(&self) -> Vec<TrashEntry> {
+        trash_path()
+            .ok()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|raw| vault_format::parse_trash(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn append_trash(&self, entry: TrashEntry) -> Result<(), StorageError> {
+        let mut entries = self.load_trash();
+        entries.push(entry);
+        let rendered = vault_format::render_trash(&entries).map_err(|e| StorageError::Local(e.to_string()))?;
+        let p = trash_path()?;
+        let tmp = p.with_extension("yaml.tmp");
+        fs::write(&tmp, rendered).map_err(|e| StorageError::Local(e.to_string()))?;
+        fs::rename(&tmp, &p).map_err(|e| StorageError::Local(e.to_string()))
+    }
+
     pub async fn get_moments(&self) -> Result<Vec<MomentType>, StorageError> {
         self.ensure_self_entity()?;
+        self.ensure_vault_meta()?;
         Ok(self.all()?.into_iter().flat_map(|f| f.moments).collect())
     }
 
     pub async fn get_entities(&self) -> Result<Vec<EntityType>, StorageError> {
         self.ensure_self_entity()?;
+        self.ensure_vault_meta()?;
         Ok(self.all()?.into_iter().map(|f| f.entity).collect())
     }
 
@@ -242,17 +294,28 @@ impl LocalStorage {
         self.save(&path, &file.entity, &file.moments, &file.body)
     }
 
-    // Hard delete for now — see local.rs's matching comment.
+    // Soft delete — see local.rs's matching comment. Record goes to
+    // trash.yaml before the file is touched.
     pub async fn delete_moment(&self, moment: MomentType) -> Result<(), StorageError> {
         let (path, mut file) = self
             .find(&moment.entity_id)?
             .ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {}", moment.entity_id)))?;
+        if let Some(m) = file.moments.iter().find(|m| m.id == moment.id) {
+            let entry = vault_format::moment_to_entry(m);
+            self.append_trash(TrashEntry::Moment {
+                entity_id: moment.entity_id.clone(),
+                moment: entry,
+                deleted_at: now(),
+            })?;
+        }
         file.moments.retain(|m| m.id != moment.id);
         self.save(&path, &file.entity, &file.moments, &file.body)
     }
 
     pub async fn delete_entity(&self, id: String) -> Result<(), StorageError> {
-        let (path, _) = self.find(&id)?.ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {id}")))?;
+        let (path, file) = self.find(&id)?.ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {id}")))?;
+        let doc = vault_format::entity_to_doc(&file.entity, &file.moments);
+        self.append_trash(TrashEntry::Entity { entity: doc, deleted_at: now() })?;
         fs::remove_file(&path).map_err(|e| StorageError::Local(e.to_string()))
     }
 
