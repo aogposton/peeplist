@@ -4,6 +4,41 @@ use std::env;
 use super::client::SupabaseClient;
 use crate::types::*;
 
+// Self-service account creation — closes the gap flagged in the local-first
+// pivot plan (Phase 1f, deliberately deferred until now): before this,
+// only an account created by hand directly in Supabase could ever log in.
+// Supabase's own /auth/v1/signup returns a full session (same shape as
+// login) when the project auto-confirms email, or just a bare user object
+// with no tokens when email confirmation is required — SignupOutcome
+// distinguishes the two so the caller can log straight in or tell the user
+// to check their inbox, without needing to know which mode this project is
+// configured in ahead of time.
+pub enum SignupOutcome {
+    LoggedIn(LoginResponse),
+    NeedsConfirmation,
+}
+
+pub async fn signup(email: String, password: String) -> Result<SignupOutcome, String> {
+    let response = SupabaseClient::new("".to_string())
+        .auth_post("signup")
+        .json(&LoginRequest { email, password })
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    let text = response.text().await.map_err(|e| e.to_string())?;
+
+    if !status.is_success() {
+        return Err(format!("Signup failed ({}): {}", status, text));
+    }
+
+    match serde_json::from_str::<LoginResponse>(&text) {
+        Ok(session) => Ok(SignupOutcome::LoggedIn(session)),
+        Err(_) => Ok(SignupOutcome::NeedsConfirmation),
+    }
+}
+
 pub async fn login(email: String, password: String) -> Result<LoginResponse, String> {
     let response = SupabaseClient::new("".to_string())
         .auth_post("token?grant_type=password")
