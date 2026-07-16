@@ -373,11 +373,21 @@ pub fn ab_info_cmp() -> Element {
     let state = use_context::<AppState>();
     let mut current_entity = state.current_entity;
     let mut entities = state.entities;
+    let mut moments = state.moments;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
     let mut entity_types = use_signal(|| vec![]);
+    let mut confirming_delete = use_signal(|| false);
+
+    use_effect(move || {
+        // Reset the confirm step whenever a different entity's Info panel
+        // is shown, so a stale "click again to confirm" doesn't carry over
+        // and let a mis-click delete the wrong person.
+        let _ = current_entity.read().as_ref().map(|e| e.id.clone());
+        confirming_delete.set(false);
+    });
 
     use_effect(move || {
         // Read synchronously so the effect actually reruns on vault switch —
@@ -407,6 +417,10 @@ pub fn ab_info_cmp() -> Element {
 
     let meta = entity.as_ref().and_then(|e| e.metadata.clone()).unwrap_or_default();
     let display_or_not_set = |s: &str| if s.trim().is_empty() { "Not set".to_string() } else { s.to_string() };
+    // Self isn't deletable — there's no "unselect yourself" concept in this
+    // app's model, and every un-attributed moment defaults to Self, so
+    // removing it would just get silently recreated on next capture anyway.
+    let is_deletable = entity.as_ref().map(|e| !is_self_entity(&e.id)).unwrap_or(false);
 
     rsx! {
         div {
@@ -472,6 +486,44 @@ pub fn ab_info_cmp() -> Element {
                                     }
                                 }
                             }
+                        }
+                    }
+                }
+                if is_deletable {
+                    div {
+                        class: "rounded-lg border border-destructive/40 p-4 flex items-center justify-between gap-3",
+                        div {
+                            span { class: "text-sm font-medium text-foreground", "Delete this person" }
+                            p {
+                                class: "text-xs text-muted-foreground mt-0.5",
+                                "Removes them from your vault. Their history goes to trash, not erased outright."
+                            }
+                        }
+                        Button {
+                            variant: ButtonVariant::Destructive,
+                            on_click: move |_| {
+                                if !*confirming_delete.read() {
+                                    confirming_delete.set(true);
+                                    return;
+                                }
+                                let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id.clone()) else { return; };
+                                let token = auth_token;
+                                let vault = active_vault;
+                                spawn(async move {
+                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    match storage.delete_entity(entity_id.clone()).await {
+                                        Ok(()) => {
+                                            entities.write().retain(|e| e.id != entity_id);
+                                            moments.write().retain(|m| m.entity_id != entity_id);
+                                            current_entity.set(None);
+                                            activity_bar_tgl.set(false);
+                                            backdropTgl.set(false);
+                                        }
+                                        Err(e) => clog!("Error deleting entity: {}", e),
+                                    }
+                                });
+                            },
+                            if *confirming_delete.read() { "Click again to confirm" } else { "Delete" }
                         }
                     }
                 }
