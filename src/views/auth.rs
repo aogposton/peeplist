@@ -47,6 +47,12 @@ pub fn LoginCMP() -> Element {
     let mut state = use_context::<AppState>();
     let mut loginform = use_signal(LoginForm::default);
     let mut error = use_signal(|| None::<String>);
+    // No self-service signup existed before this — only an account created
+    // by hand directly in Supabase could ever log in (see the local-first
+    // pivot plan's Phase 1f, deliberately deferred until now). One form,
+    // toggled between the two modes, rather than a separate route/page.
+    let mut is_signup = use_signal(|| false);
+    let mut needs_confirmation = use_signal(|| false);
 
     use_effect(move || {
         if state.auth_token.read().is_some() {
@@ -54,35 +60,48 @@ pub fn LoginCMP() -> Element {
         }
     });
 
+    let mut log_in_session = move |auth: LoginResponse| {
+        // Desktop has no preference persistence yet — see main.rs's
+        // startup effect.
+        #[cfg(not(feature = "desktop"))]
+        {
+            if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                storage.set("auth_token", &auth.access_token).ok();
+                storage.set("refresh_token", &auth.refresh_token).ok();
+                storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
+            }
+        }
+        state.auth_token.set(Some(auth.access_token));
+        state.user_id.set(Some(auth.user.id));
+        state.user_email.set(Some(auth.user.email));
+        // The whole point of logging in here is adding the Synced vault
+        // (see the vault switcher's "+ Add a vault") — switch straight to
+        // it rather than leaving Local selected.
+        state.active_vault.set(VaultKind::Synced);
+        navigator().push(Route::Home {});
+    };
+
     let mut submitform = move || {
         let form = loginform.read().clone();
         error.set(None);
+        needs_confirmation.set(false);
         spawn(async move {
-            match login(form.email, form.password).await {
-                Ok(auth) => {
-                    // Desktop has no preference persistence yet — see
-                    // main.rs's startup effect.
-                    #[cfg(not(feature = "desktop"))]
-                    {
-                        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                            storage.set("auth_token", &auth.access_token).ok();
-                            storage.set("refresh_token", &auth.refresh_token).ok();
-                            storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
-                        }
+            if *is_signup.read() {
+                match signup(form.email, form.password).await {
+                    Ok(SignupOutcome::LoggedIn(auth)) => log_in_session(auth),
+                    Ok(SignupOutcome::NeedsConfirmation) => needs_confirmation.set(true),
+                    Err(e) => {
+                        clog!("{:?}", e);
+                        error.set(Some("Couldn't create that account — the email may already be in use, or the password may be too short.".to_string()));
                     }
-                    state.auth_token.set(Some(auth.access_token));
-                    state.user_id.set(Some(auth.user.id));
-                    state.user_email.set(Some(auth.user.email));
-                    // The whole point of logging in here is adding the Synced
-                    // vault (see the vault switcher's "+ Add a vault") — switch
-                    // straight to it rather than leaving Local selected.
-                    state.active_vault.set(VaultKind::Synced);
-                    let nav = navigator();
-                    nav.push(Route::Home {});
                 }
-                Err(e) => {
-                    clog!("{:?}", e);
-                    error.set(Some("Incorrect email or password.".to_string()));
+            } else {
+                match login(form.email, form.password).await {
+                    Ok(auth) => log_in_session(auth),
+                    Err(e) => {
+                        clog!("{:?}", e);
+                        error.set(Some("Incorrect email or password.".to_string()));
+                    }
                 }
             }
         });
@@ -98,7 +117,7 @@ pub fn LoginCMP() -> Element {
                     class: "flex items-center justify-between",
                     span {
                         class: "text-2xl font-semibold text-foreground",
-                        "Add Synced vault"
+                        if *is_signup.read() { "Create Synced vault" } else { "Add Synced vault" }
                     }
                     a {
                         class: "text-sm text-muted-foreground hover:text-foreground cursor-pointer",
@@ -109,6 +128,12 @@ pub fn LoginCMP() -> Element {
                 p {
                     class: "text-sm text-muted-foreground -mt-2",
                     "Log in to sync this device with your account. Peeplist works fully offline without one."
+                }
+                if *needs_confirmation.read() {
+                    div {
+                        class: "text-sm text-foreground rounded-md border border-border p-3",
+                        "Check your email to confirm your account, then log in below."
+                    }
                 }
                 div {
                     class: "flex flex-col gap-y-1.5",
@@ -148,7 +173,17 @@ pub fn LoginCMP() -> Element {
                     variant: ButtonVariant::Primary,
                     full_width: true,
                     on_click: move |_| submitform(),
-                    "Login"
+                    if *is_signup.read() { "Create account" } else { "Login" }
+                }
+                a {
+                    class: "text-sm text-center text-muted-foreground hover:text-foreground cursor-pointer",
+                    onclick: move |_| {
+                        let next = !*is_signup.read();
+                        is_signup.set(next);
+                        error.set(None);
+                        needs_confirmation.set(false);
+                    },
+                    if *is_signup.read() { "Already have an account? Log in" } else { "Don't have an account? Sign up" }
                 }
             }
         }

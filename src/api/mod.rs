@@ -14,7 +14,7 @@ pub mod local_desktop;
 #[cfg(not(feature = "desktop"))]
 pub mod local;
 
-pub use auth::{login, get_current_user, refresh_access_token};
+pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_token};
 pub use storage::{ActiveStorage, VaultKind, StorageError, is_self_entity};
 
 // The `entities`/`moments` tables still have `bigint` FK columns

@@ -37,6 +37,11 @@ slug = "0.1"
 # (~/Documents/Peeplist/ or platform equivalent). See src/api/local_desktop.rs.
 directories = { version = "5", optional = true }
 
+[[bin]]
+name = "pltask"
+path = "src/bin/pltask.rs"
+required-features = ["desktop"]
+
 [features]
 default = ["web"]
 # The feature that are only required for the web = ["dioxus/web"] build target should be optional and only enabled in the web = ["dioxus/web"] feature
