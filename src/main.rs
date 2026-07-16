@@ -188,28 +188,36 @@ fn App() -> Element {
         // just starts fresh on defaults every launch.
         #[cfg(not(feature = "desktop"))]
         {
-            let storage = web_sys::window().unwrap()
-                .local_storage().unwrap().unwrap();
+            // localStorage can legitimately be unavailable (locked-down
+            // managed browsers, some privacy modes, storage-partitioned
+            // iframe embeds) — that used to be an unconditional unwrap
+            // chain here, which panicked the whole app before it ever
+            // rendered. The local-first pitch is "just works, no
+            // friction" — a hard crash on storage access is the one
+            // thing that can't happen, so this now degrades to
+            // in-memory defaults (same as the desktop build already
+            // does, per the comment above) instead of panicking.
+            let storage = web_sys::window()
+                .and_then(|w| w.local_storage().ok().flatten());
 
-            match storage.get_item("auth_token").unwrap() {
-                Some(token) => {
+            if let Some(storage) = storage {
+                if let Ok(Some(token)) = storage.get_item("auth_token") {
                     state.auth_token.set(Some(token));
                 }
-                None => {
-                    // navigator().push(Route::Login {});
+
+                if let Ok(Some(mode)) = storage.get_item("sort_mode") {
+                    state.sort_mode.set(SortMode::from_storage_str(&mode));
                 }
-            }
 
-            if let Some(mode) = storage.get_item("sort_mode").unwrap() {
-                state.sort_mode.set(SortMode::from_storage_str(&mode));
-            }
+                if let Ok(Some(vault)) = storage.get_item("active_vault") {
+                    state.active_vault.set(VaultKind::from_storage_str(&vault));
+                }
 
-            if let Some(vault) = storage.get_item("active_vault").unwrap() {
-                state.active_vault.set(VaultKind::from_storage_str(&vault));
-            }
-
-            if let Some(weights) = storage.get_item("urgency_weights").unwrap() {
-                state.urgency_weights.set(UrgencyWeights::from_storage_string(&weights));
+                if let Ok(Some(weights)) = storage.get_item("urgency_weights") {
+                    state.urgency_weights.set(UrgencyWeights::from_storage_string(&weights));
+                }
+            } else {
+                clog!("localStorage unavailable — starting with in-memory defaults");
             }
         }
     });

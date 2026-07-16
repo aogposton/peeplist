@@ -7,7 +7,7 @@ use crate::View::*;
 use crate::types::*;
 use crate::ui::*;
 use crate::api::*;
-use web_sys::{window, Storage};
+use web_sys::window;
 use lumen_blocks::components::input::{Input, InputVariant};
 use lumen_blocks::components::button::{Button, ButtonVariant};
 use lumen_blocks::components::label::Label;
@@ -26,10 +26,11 @@ pub fn Logout() -> Element {
     // effect.
     #[cfg(not(feature = "desktop"))]
     {
-        let storage = window().unwrap().local_storage().unwrap().unwrap();
-        storage.set("auth_token", &"").ok();
-        storage.set("refresh_token", &"").ok();
-        storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+            storage.set("auth_token", &"").ok();
+            storage.set("refresh_token", &"").ok();
+            storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+        }
     }
     state.auth_token.set(None);
     state.user_id.set(None);
@@ -63,10 +64,11 @@ pub fn LoginCMP() -> Element {
                     // main.rs's startup effect.
                     #[cfg(not(feature = "desktop"))]
                     {
-                        let storage = window().unwrap().local_storage().unwrap().unwrap();
-                        storage.set("auth_token", &auth.access_token).ok();
-                        storage.set("refresh_token", &auth.refresh_token).ok();
-                        storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
+                        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                            storage.set("auth_token", &auth.access_token).ok();
+                            storage.set("refresh_token", &auth.refresh_token).ok();
+                            storage.set("active_vault", VaultKind::Synced.as_storage_str()).ok();
+                        }
                     }
                     state.auth_token.set(Some(auth.access_token));
                     state.user_id.set(Some(auth.user.id));
