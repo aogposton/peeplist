@@ -12,6 +12,8 @@ use crate::components::{
     PriorityViewCmp,
     UrgencySettingsCmp,
     GraphViewCmp,
+    DistanceViewCmp,
+    DueViewCmp,
 };
 
 use crate::api::ActiveStorage;
@@ -108,6 +110,22 @@ pub fn Home() -> Element {
                 },
                 Graph => rsx! {
                     GraphViewCmp { }
+                },
+                Distance => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Distance" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Everyone you're tracking, ranked by how far you've drifted." }
+                    }
+                    DistanceViewCmp { }
+                },
+                Due => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Due" }
+                        p { class: "text-sm text-muted-foreground mb-4", "What's overdue, due today, or coming up this week." }
+                    }
+                    DueViewCmp { }
                 }
             }
         }

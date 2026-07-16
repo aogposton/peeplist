@@ -68,7 +68,8 @@ pub enum View {
     Inbox,
     Priority,
     Graph,
-
+    Distance,
+    Due,
 }
 
 #[derive(Clone, PartialEq)]
@@ -111,6 +112,8 @@ impl fmt::Display for View {
             View::Entity => write!(f, "Entity"),
             View::Priority => write!(f, "Priority"),
             View::Graph => write!(f, "Graph"),
+            View::Distance => write!(f, "Distance"),
+            View::Due => write!(f, "Due"),
         }
     }
 }

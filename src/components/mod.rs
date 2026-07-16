@@ -8,6 +8,7 @@ pub use moment::CompletedSectionCmp;
 pub use moment::NotesSectionCmp;
 pub use moment::ab_task_cmp;
 pub use moment::PriorityViewCmp;
+pub use moment::DueViewCmp;
 pub use moment::UrgencySettingsCmp;
 
 mod sidebar;
@@ -21,6 +22,7 @@ pub use entity::entity_view_cmp;
 pub use entity::ab_history_cmp;
 pub use entity::ab_stats_cmp;
 pub use entity::ab_info_cmp;
+pub use entity::DistanceViewCmp;
 
 mod graph;
 pub use graph::GraphViewCmp;

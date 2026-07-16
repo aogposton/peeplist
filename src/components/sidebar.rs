@@ -39,6 +39,24 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    currentView.set(View::Due);
+                },
+                fa_calendar { }
+                span { "Due" }
+            }
+            a {
+                class: NAV_LINK_ICON_CLASS,
+                onclick: move |_| {
+                    current_entity.set(None);
+                    currentView.set(View::Distance);
+                },
+                fa_compass { }
+                span { "Distance" }
+            }
+            a {
+                class: NAV_LINK_ICON_CLASS,
+                onclick: move |_| {
+                    current_entity.set(None);
                     currentView.set(View::Graph);
                 },
                 fa_circle_nodes { }
