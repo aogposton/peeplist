@@ -1629,6 +1629,108 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
     }
 }
 
+// Distinct from Priority: this answers "what does my week look like" (the
+// literal calendar shape of what's due), not "what should I do next" (a
+// composite urgency score). Same underlying due_at field, different
+// operation — grouping by date instead of ranking by a formula.
+#[component]
+pub fn DueViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut current_moment = state.current_moment;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    let now = chrono::Utc::now();
+    let today = now.date_naive();
+
+    let mut due: Vec<MomentType> = moments.read().iter()
+        .filter(|m| m.completed_at.is_none() && m.due_at.is_some())
+        .cloned()
+        .collect();
+    due.sort_by(|a, b| a.due_at.cmp(&b.due_at));
+
+    let bucket_of = |m: &MomentType| -> &'static str {
+        let Some(due_at) = m.due_at.as_ref() else { return "Later"; };
+        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(due_at) else { return "Later"; };
+        let due_date = parsed.with_timezone(&chrono::Utc).date_naive();
+        let days = (due_date - today).num_days();
+        match days {
+            d if d < 0 => "Overdue",
+            0 => "Today",
+            1..=6 => "This week",
+            _ => "Later",
+        }
+    };
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 flex flex-col gap-4",
+            if due.is_empty() {
+                div {
+                    class: "rounded-lg border border-border bg-background text-sm text-muted-foreground text-center py-8",
+                    "Nothing with a due date right now."
+                }
+            } else {
+                for bucket in ["Overdue", "Today", "This week", "Later"] {
+                    {
+                        let items: Vec<MomentType> = due.iter().filter(|m| bucket_of(m) == bucket).cloned().collect();
+                        rsx! {
+                            if !items.is_empty() {
+                                div {
+                                    key: "{bucket}",
+                                    div {
+                                        class: if bucket == "Overdue" {
+                                            "text-xs font-semibold uppercase tracking-wide text-destructive mb-1.5 px-1"
+                                        } else {
+                                            "text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 px-1"
+                                        },
+                                        "{bucket}"
+                                    }
+                                    div {
+                                        class: "rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+                                        for m in items.iter() {
+                                            div {
+                                                key: "{m.id}",
+                                                class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                                                onclick: {
+                                                    let m = m.clone();
+                                                    move |_| {
+                                                        current_moment.set(Some(m.clone()));
+                                                        activity_bar_view.set(ABView::Task);
+                                                        backdropTgl.set(true);
+                                                        activity_bar_tgl.set(true);
+                                                    }
+                                                },
+                                                div {
+                                                    class: "flex flex-col min-w-0",
+                                                    span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                                                    span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                                                }
+                                                span {
+                                                    class: "text-xs text-muted-foreground shrink-0",
+                                                    "{m.due_at.as_deref().unwrap_or(\"\").chars().take(10).collect::<String>()}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn PriorityViewCmp() -> Element {
     let state = use_context::<AppState>();

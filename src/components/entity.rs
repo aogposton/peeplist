@@ -3,6 +3,7 @@ use crate::types::*;
 use crate::theme::*;
 use crate::AppState;
 use crate::ABView;
+use crate::View;
 use crate::api::{ActiveStorage, is_self_entity};
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
@@ -55,6 +56,123 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
         .sum();
 
     (grown - closed).max(0.0)
+}
+
+// entity.drift is a rate (days of Distance growth per day since the
+// relationship was added — see compute_distance above), not a contact-
+// interval expectation the way "recur every 7 days" would be. Labeling its
+// magnitude in words is honest; claiming a specific "expected every ~N
+// days" cadence from it wouldn't be, since that number isn't actually
+// derived from contact frequency. Buckets are first-draft, same as
+// urgency's coefficients.
+fn drift_label(drift: f64) -> &'static str {
+    match drift {
+        d if d < 1.0 => "Very attentive",
+        d if d < 3.0 => "Steady",
+        d if d < 6.0 => "Drifts quickly",
+        _ => "Drifts fast",
+    }
+}
+
+fn days_ago_label(dt: Option<chrono::DateTime<chrono::Utc>>, now: chrono::DateTime<chrono::Utc>) -> String {
+    match dt {
+        None => "No contact logged yet".to_string(),
+        Some(dt) => match (now - dt).num_days() {
+            0 => "Last contact: today".to_string(),
+            1 => "Last contact: 1 day ago".to_string(),
+            d => format!("Last contact: {d} days ago"),
+        },
+    }
+}
+
+// A Priority-style ranked list, but for relationships instead of tasks —
+// who you've drifted furthest from, at a glance, without a special trip to
+// Graph View. Reuses compute_distance (already built for Graph View/Stats)
+// rather than adding a new metric.
+#[component]
+pub fn DistanceViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let entities = state.entities;
+    let moments = state.moments;
+    let mut current_entity = state.current_entity;
+    let mut current_view = state.currentView;
+
+    let now = chrono::Utc::now();
+    let all_moments = moments.read().clone();
+
+    struct Row {
+        entity: EntityType,
+        distance: f64,
+        last_contact: Option<chrono::DateTime<chrono::Utc>>,
+        reaction_score: i32,
+    }
+
+    let mut rows: Vec<Row> = entities.read().iter()
+        .filter(|e| !is_self_entity(&e.id))
+        .map(|e| {
+            let entity_moments: Vec<&MomentType> = all_moments.iter().filter(|m| m.entity_id == e.id).collect();
+            let last_contact = entity_moments.iter()
+                .filter_map(|m| chrono::DateTime::parse_from_rfc3339(&m.created_at).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .max();
+            let reaction_score: i32 = entity_moments.iter()
+                .filter_map(|m| m.reactions.as_ref())
+                .flat_map(|rs| rs.iter())
+                .map(|r| r.value)
+                .sum();
+            Row {
+                distance: compute_distance(e, &all_moments, now),
+                entity: e.clone(),
+                last_contact,
+                reaction_score,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.distance.partial_cmp(&a.distance).unwrap_or(std::cmp::Ordering::Equal));
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+            if rows.is_empty() {
+                div {
+                    class: "text-sm text-muted-foreground text-center py-8",
+                    "No one to show yet — add a person to start tracking."
+                }
+            } else {
+                for row in rows.iter() {
+                    div {
+                        key: "{row.entity.id}",
+                        class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                        onclick: {
+                            let entity = row.entity.clone();
+                            move |_| {
+                                current_entity.set(Some(entity.clone()));
+                                current_view.set(View::Entity);
+                            }
+                        },
+                        div {
+                            class: "flex flex-col min-w-0",
+                            span { class: "text-sm font-medium text-foreground truncate", "{row.entity.name}" }
+                            span { class: "text-xs text-muted-foreground", "{days_ago_label(row.last_contact, now)} · {drift_label(row.entity.drift)}" }
+                        }
+                        div {
+                            class: "flex items-center gap-3 shrink-0",
+                            span {
+                                class: "text-xs text-muted-foreground",
+                                title: "Total reaction value logged for this person",
+                                "reactions: {row.reaction_score}"
+                            }
+                            span {
+                                class: "text-xs font-semibold px-2 py-0.5 rounded-full border border-border text-muted-foreground",
+                                title: "Distance",
+                                "{row.distance:.1}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[component]

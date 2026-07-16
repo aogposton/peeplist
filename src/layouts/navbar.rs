@@ -357,6 +357,8 @@ pub fn Navbar() -> Element {
         Entity => "".to_string(),
         Priority => "".to_string(),
         Graph => "".to_string(),
+        Distance => "".to_string(),
+        Due => "".to_string(),
     };
 
     rsx! {

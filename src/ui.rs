@@ -21,6 +21,12 @@ pub fn fa_inbox() -> Element { rsx! { i { class: "fa-solid fa-inbox" } } }
 #[component]
 pub fn fa_circle_nodes() -> Element { rsx! { i { class: "fa-solid fa-circle-nodes" } } }
 
+#[component]
+pub fn fa_compass() -> Element { rsx! { i { class: "fa-solid fa-compass" } } }
+
+#[component]
+pub fn fa_calendar() -> Element { rsx! { i { class: "fa-solid fa-calendar-days" } } }
+
 // ----- Slider
 #[derive(Props, Clone, PartialEq)]
 pub struct GravitySelectProps {
