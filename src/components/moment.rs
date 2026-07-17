@@ -1273,6 +1273,8 @@ pub fn ab_task_cmp() -> Element {
     // updates as fields get edited within the same open session.
     let current_metadata = moments.read().iter().find(|m| m.id == id).and_then(|m| m.metadata.clone()).unwrap_or_default();
 
+    let mut advanced_open = use_signal(|| false);
+
     rsx! {
         div {
             class: "flex flex-col h-full bg-background",
@@ -1471,14 +1473,21 @@ pub fn ab_task_cmp() -> Element {
                 // enforcement of scheduled/until are explicitly not built yet
                 // — see DESIGN_PROGRESS.md.
                 div {
-                    class: "rounded-lg border border-border bg-background overflow-hidden",
-                    Collapsible {
-                        CollapsibleTrigger {
-                            class: "text-sm font-medium text-foreground hover:no-underline hover:bg-muted/50",
-                            "Advanced"
+                    class: "rounded-lg border border-border bg-background",
+                    button {
+                        class: "flex w-full items-center justify-between px-3 py-2 text-sm font-medium text-foreground hover:bg-muted/50 transition-colors cursor-pointer",
+                        onclick: move |_| {
+                            let current = *advanced_open.read();
+                            advanced_open.set(!current);
+                        },
+                        "Advanced"
+                        span {
+                            class: if *advanced_open.read() { "transition-transform rotate-180" } else { "transition-transform rotate-0" },
+                            "⌄"
                         }
-                        CollapsibleContent {
-                            div {
+                    }
+                    if *advanced_open.read() {
+                        div {
                                 class: "flex flex-col gap-4 p-3 border-t border-border",
 
                                 div {
@@ -1698,7 +1707,6 @@ pub fn ab_task_cmp() -> Element {
                             }
                         }
                     }
-                }
 
                 div {
                     class: "rounded-lg border border-border bg-background overflow-hidden",
@@ -1854,17 +1862,27 @@ pub fn ab_task_cmp() -> Element {
                         let mut moments = moments.clone();
                         let token = auth_token;
                         let vault = active_vault;
+                        let mut activity_bar_tgl = activity_bar_tgl;
+                        let mut backdropTgl = backdropTgl;
                         spawn(async move {
                             let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                             match storage.delete_moment(moment.clone()).await {
                                 Ok(()) => {
                                     moments.write().retain(|m| m.id != moment.id);
+                                    // `ab_task_cmp` is keyed on activity_bar_tgl (see
+                                    // navbar.rs), so flipping it remounts/unmounts this
+                                    // component — closing the panel here has to come
+                                    // *after* the delete resolves and `moments` is
+                                    // updated, not before. Closing it synchronously
+                                    // right after `spawn()` (the previous bug) tore
+                                    // this task down mid-flight the moment the panel
+                                    // unmounted, so the delete never actually happened.
+                                    activity_bar_tgl.set(false);
+                                    backdropTgl.set(false);
                                 }
                                 Err(e) => clog!("Error deleting moment: {}", e),
                             }
                         });
-                        activity_bar_tgl.set(false);
-                        backdropTgl.set(false);
                         }
                     },
                     fa_trash {}

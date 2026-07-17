@@ -370,6 +370,7 @@ pub fn parse_trash(content: &str) -> Result<Vec<TrashEntry>, VaultFormatError> {
 mod tests {
     use super::*;
 
+
     fn sample_entity() -> EntityType {
         EntityType {
             id: "3f9a2b7e-1234-4a1b-9c3d-abcdef012345".to_string(),
