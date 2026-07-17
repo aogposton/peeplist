@@ -13,6 +13,7 @@ pub fn views_list_cmp() -> Element {
     let state = use_context::<AppState>();
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
+    let mut tag_filter = state.tag_filter;
 
     rsx! {
         div {
@@ -21,6 +22,7 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    tag_filter.set(None);
                     currentView.set(View::Inbox);
                 },
                 fa_inbox { }
@@ -30,6 +32,7 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    tag_filter.set(None);
                     currentView.set(View::Priority);
                 },
                 fa_bolt { }
@@ -39,6 +42,7 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    tag_filter.set(None);
                     currentView.set(View::Due);
                 },
                 fa_calendar { }
@@ -48,6 +52,7 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    tag_filter.set(None);
                     currentView.set(View::Scheduled);
                 },
                 fa_clock { }
@@ -57,6 +62,7 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    tag_filter.set(None);
                     currentView.set(View::Distance);
                 },
                 fa_compass { }
@@ -66,6 +72,7 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    tag_filter.set(None);
                     currentView.set(View::Graph);
                 },
                 fa_circle_nodes { }
@@ -82,6 +89,7 @@ pub fn entity_list_cmp() -> Element {
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
     let mut entityModalTgl = state.entityModalTgl;
+    let mut tag_filter = state.tag_filter;
 
     // The self entity (see api::is_self_entity) is always present once a
     // vault's been opened — it's not a "real" person you'd add/click on
@@ -115,7 +123,18 @@ pub fn entity_list_cmp() -> Element {
                     a {
                         class: NAV_LINK_CLASS,
                         onclick: move |_| {
+                            // Symmetric with the tag-click reset below: an
+                            // entity is its own distinct browsing mode too,
+                            // and a tag filter left active from earlier
+                            // silently compounded with whatever entity got
+                            // clicked next — "click a person, then click a
+                            // tag that's already active" did nothing
+                            // visible because the tag click's own reset
+                            // only fires when *activating* a tag, and this
+                            // was the one place a tag could stay active
+                            // without the user having touched tags at all.
                             current_entity.set(Some(entity.clone()));
+                            tag_filter.set(None);
                             currentView.set(View::Entity);
                         },
                         "{entity.name}"
