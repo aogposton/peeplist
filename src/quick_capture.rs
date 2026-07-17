@@ -13,13 +13,21 @@
 //                        the live @-mention search span multiple words
 //                        without needing an exact prefix match first (see
 //                        trailing_mention_query)
-//   priority:H/M/L       (also accepts high/medium/low)
-//   project:<value>      no spaces — stops at the next whitespace
+//   priority:H/M/L       (also accepts high/medium/low) — pri: is a shorthand alias
+//   project:<value>      no spaces — stops at the next whitespace — pro: is a shorthand alias
 //   due:<date>           "today", "tomorrow", "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM"
 //   scheduled:<date>     same date grammar as due
 //   until:<date>         same date grammar as due
+//   depends:<title>      blocked by another open moment, matched by title —
+//                        no spaces (stops at whitespace) unless quoted, same
+//                        as tags/mentions below. deps: is a shorthand alias.
+//                        Resolved against the target entity's open moments
+//                        at submit time (this module has no moments list to
+//                        search — see ParsedCapture.depends_on_title).
 //   +<tag> / -<tag>      add / remove a tag (single word)
 //   +"<tag>" / -"<tag>"  add / remove a tag containing spaces
+//   :t: / :p: / :n:      set the moment's type: task / promise / note —
+//                        home-row, stands alone as its own word
 //
 // Anything that isn't recognized (including a malformed date, an
 // unrecognized @name, or an unterminated quote) is left as plain text and
@@ -39,6 +47,8 @@ pub enum TokenKind {
     TagAdd(String),
     TagRemove(String),
     Entity(String),
+    Depends(String),
+    MomentType(i64),
 }
 
 impl TokenKind {
@@ -64,6 +74,12 @@ pub struct ParsedCapture {
     pub until_at: Option<String>,
     pub tags_add: Vec<String>,
     pub tags_remove: Vec<String>,
+    // Raw typed text, not yet resolved to a moment id — this module has no
+    // moments list to search titles against (deliberately pure/no-I/O, see
+    // module doc comment). The caller resolves this against the target
+    // entity's open moments at submit time.
+    pub depends_on_title: Option<String>,
+    pub moment_type_id: Option<i64>,
 }
 
 impl ParsedCapture {
@@ -143,6 +159,15 @@ fn parse_date_token(val: &str) -> Option<String> {
 }
 
 fn classify_word(word: &str) -> TokenKind {
+    if word == ":t:" {
+        return TokenKind::MomentType(1);
+    }
+    if word == ":p:" {
+        return TokenKind::MomentType(2);
+    }
+    if word == ":n:" {
+        return TokenKind::MomentType(3);
+    }
     if let Some(rest) = word.strip_prefix('+') {
         if !rest.is_empty() {
             return TokenKind::TagAdd(rest.to_string());
@@ -156,12 +181,12 @@ fn classify_word(word: &str) -> TokenKind {
     if let Some((key, val)) = word.split_once(':') {
         if !val.is_empty() {
             match key.to_lowercase().as_str() {
-                "priority" => {
+                "priority" | "pri" => {
                     if let Some(p) = normalize_priority(val) {
                         return TokenKind::Priority(p);
                     }
                 }
-                "project" => return TokenKind::Project(val.to_string()),
+                "project" | "pro" => return TokenKind::Project(val.to_string()),
                 "due" => {
                     if let Some(d) = parse_date_token(val) {
                         return TokenKind::Due(d);
@@ -177,6 +202,7 @@ fn classify_word(word: &str) -> TokenKind {
                         return TokenKind::Until(d);
                     }
                 }
+                "depends" | "deps" => return TokenKind::Depends(val.to_string()),
                 _ => {}
             }
         }
@@ -192,7 +218,7 @@ pub fn tokenize(input: &str, entities: &[EntityType]) -> Vec<Token> {
     let chars: Vec<(usize, char)> = input.char_indices().collect();
     let len = input.len();
     let mut i = 0usize;
-    while i < chars.len() {
+    'outer: while i < chars.len() {
         let (byte_pos, ch) = chars[i];
         if ch.is_whitespace() {
             let mut j = i;
@@ -238,6 +264,23 @@ pub fn tokenize(input: &str, entities: &[EntityType]) -> Vec<Token> {
                     i = j;
                     continue;
                 }
+            }
+        }
+        // depends:"..."/deps:"..." — same quoted-value trick as @"..." and
+        // +"..."/-"...", needed because classify_word only ever sees one
+        // whitespace-delimited word at a time and can't span a quoted
+        // multi-word title on its own.
+        if let Some(key) = ["depends:\"", "deps:\""].iter().find(|k| input[byte_pos..].starts_with(**k)) {
+            let after_key = byte_pos + key.len() - 1; // position of the opening quote itself
+            if let Some((inner, end)) = read_quoted(input, after_key) {
+                let kind = if inner.is_empty() { TokenKind::Plain } else { TokenKind::Depends(inner) };
+                tokens.push(Token { text: input[byte_pos..end].to_string(), kind });
+                let mut j = i;
+                while j < chars.len() && chars[j].0 < end {
+                    j += 1;
+                }
+                i = j;
+                continue 'outer;
             }
         }
         if ch == '+' || ch == '-' {
@@ -292,6 +335,8 @@ pub fn parse(input: &str, entities: &[EntityType]) -> ParsedCapture {
             TokenKind::TagAdd(tag) => cap.tags_add.push(tag.clone()),
             TokenKind::TagRemove(tag) => cap.tags_remove.push(tag.clone()),
             TokenKind::Entity(id) => cap.entity_id = Some(id.clone()),
+            TokenKind::Depends(title) => cap.depends_on_title = Some(title.clone()),
+            TokenKind::MomentType(id) => cap.moment_type_id = Some(*id),
         }
     }
     cap.title = title_parts.join(" ");
@@ -370,6 +415,32 @@ mod tests {
         assert_eq!(cap.priority, Some("H".to_string()));
         assert_eq!(cap.project, Some("Home.Garden".to_string()));
         assert_eq!(cap.tags_add, vec!["errand".to_string()]);
+    }
+
+    #[test]
+    fn pro_and_pri_are_shorthand_aliases() {
+        let cap = parse("Buy flowers pri:H pro:Home.Garden", &entities());
+        assert_eq!(cap.priority, Some("H".to_string()));
+        assert_eq!(cap.project, Some("Home.Garden".to_string()));
+    }
+
+    #[test]
+    fn colon_letter_colon_sets_moment_type() {
+        assert_eq!(parse("Call mom :t:", &entities()).moment_type_id, Some(1));
+        assert_eq!(parse("Call mom :p:", &entities()).moment_type_id, Some(2));
+        assert_eq!(parse("Call mom :n:", &entities()).moment_type_id, Some(3));
+        assert_eq!(parse("Call mom", &entities()).moment_type_id, None);
+    }
+
+    #[test]
+    fn depends_and_deps_capture_a_raw_title_to_resolve_later() {
+        let cap = parse("Ship it depends:review", &entities());
+        assert_eq!(cap.depends_on_title, Some("review".to_string()));
+        assert_eq!(cap.title, "Ship it");
+
+        let cap = parse("Ship it deps:\"final review\"", &entities());
+        assert_eq!(cap.depends_on_title, Some("final review".to_string()));
+        assert_eq!(cap.title, "Ship it");
     }
 
     #[test]

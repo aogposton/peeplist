@@ -483,8 +483,15 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     // MomentType::depends_on. Previously this was purely informational
     // (shown in ab_task_cmp's "Depends on" panel, factored into urgency
     // scoring) but never actually enforced at the point of completion.
+    // Notes have no completion state at all (see is_note above — no
+    // checkbox is ever rendered for one), so a dependency on a note can
+    // never resolve. Depending on a note is still allowed (useful as a
+    // reference/context link — "this task depends on what's in that note"),
+    // it just never actually blocks completion the way depending on an
+    // open task or promise does.
     let is_blocked = props.moment.depends_on.as_ref().is_some_and(|dep_id| {
-        moments.read().iter().find(|m| &m.id == dep_id).is_some_and(|dep| dep.completed_at.is_none())
+        moments.read().iter().find(|m| &m.id == dep_id)
+            .is_some_and(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none())
     });
     // The list row only ever said "Blocked" with no way to tell what by —
     // the detail panel already names the blocker (see ab_task_cmp's
@@ -596,11 +603,16 @@ pub fn MomentInputCmp() -> Element {
     let mut moments = state.moments;
     let entities = state.entities;
     let mut title = use_signal(|| String::new());
-    let mut description = use_signal(|| String::new());
     let current_entity = state.current_entity;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
-    let mut selected_entity = use_signal(|| None::<String>); 
+    let mut selected_entity = use_signal(|| None::<String>);
+    // Description had a signal declared here before but nothing in this
+    // component ever rendered a field for it — form_data.description (what
+    // actually gets submitted, below) was always empty. Tab now reveals a
+    // real field and focuses it, bound directly to form.description.
+    let mut description_open = use_signal(|| false);
+    let mut description_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
 
     
     let mut form = use_signal(move || {
@@ -651,6 +663,7 @@ pub fn MomentInputCmp() -> Element {
 
         form.set(reset_form);
         title.set(String::new());
+        description_open.set(false);
         let entity_id = parsed.entity_id.clone().unwrap_or(form_data.entity_sel.clone());
         let token = auth_token;
                         let vault = active_vault;
@@ -661,14 +674,34 @@ pub fn MomentInputCmp() -> Element {
                 entity_id,
                 description: Some(form_data.description.clone()),
                 gravity: Some(1),
-                moment_type_id: 1,
+                moment_type_id: parsed.moment_type_id.unwrap_or(1),
                 deleted_at: None,
             };
             let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
             match storage.create_moment(new_moment).await {
                 Ok(created_moment) => {
                     let created_id = created_moment.id.clone();
+                    let created_entity_id = created_moment.entity_id.clone();
                     moments.write().insert(0, created_moment);
+                    // depends_on_title is a raw typed string, not yet an id
+                    // (quick_capture.rs has no moments list to resolve it
+                    // against) — match it against the target entity's open
+                    // moments here, where the real list is available.
+                    if let Some(dep_title) = parsed.depends_on_title.clone() {
+                        let dep_id = moments.read().iter()
+                            .find(|m| m.entity_id == created_entity_id
+                                && m.id != created_id
+                                && m.completed_at.is_none()
+                                && m.title.to_lowercase() == dep_title.to_lowercase())
+                            .map(|m| m.id.clone());
+                        if let Some(dep_id) = dep_id {
+                            if storage.update_moment_field(created_id.clone(), "depends_on", serde_json::json!(Some(dep_id.clone()))).await.is_ok() {
+                                if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
+                                    m.depends_on = Some(dep_id);
+                                }
+                            }
+                        }
+                    }
                     if parsed.has_metadata() {
                         let meta = MomentMetadata {
                             tags: parsed.tags_add.clone(),
@@ -707,7 +740,7 @@ pub fn MomentInputCmp() -> Element {
                     class: "flex-1",
                     QuickCaptureInput {
                         value: title.read().clone(),
-                        placeholder: "Title  ·  try @name, priority:H, due:tomorrow, +tag".to_string(),
+                        placeholder: "Title · @name pri:H due:tomorrow +tag :t:/:p:/:n:".to_string(),
                         entities: entities.read().clone(),
                         on_input: move |v: String| {
                             // A completed @mention should be reflected on
@@ -725,6 +758,15 @@ pub fn MomentInputCmp() -> Element {
                             title.set(v);
                         },
                         on_submit: move |_| submit_moment(),
+                        on_tab: move |_| {
+                            description_open.set(true);
+                            let el = description_el.read().clone();
+                            spawn(async move {
+                                if let Some(el) = el {
+                                    let _ = el.set_focus(true).await;
+                                }
+                            });
+                        },
                     }
                 }
                 Dropdown {
@@ -761,6 +803,23 @@ pub fn MomentInputCmp() -> Element {
                 }
             }
 
+            // Always mounted (never conditionally removed) so its
+            // MountedData is captured exactly once and stays valid for
+            // every later Tab press — visually toggled instead, matching
+            // the always-mounted-plus-class-toggle pattern the mobile
+            // input popup already uses elsewhere in this file.
+            textarea {
+                class: if *description_open.read() {
+                    "w-full mt-2 min-h-20 rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y"
+                } else {
+                    "hidden"
+                },
+                placeholder: "Description...",
+                value: "{form.read().description}",
+                onmounted: move |e| description_el.set(Some(e.data())),
+                oninput: move |e| form.write().description = e.value(),
+            }
+
             button {
                 class: "xl:hidden block w-full mt-2 rounded-md py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer",
                 style: "background-color:{HL};",
@@ -779,6 +838,12 @@ pub struct QuickCaptureInputProps {
     pub entities: Vec<EntityType>,
     pub on_input: EventHandler<String>,
     pub on_submit: EventHandler<()>,
+    // Tab, when the @-mention dropdown isn't open (Tab has its existing job
+    // there — confirming the highlighted match), jumps to the description
+    // field instead of doing the browser's default focus-next-element
+    // thing: title, then keep typing a description, without touching the
+    // mouse.
+    pub on_tab: EventHandler<()>,
 }
 
 // The title input for MomentInputCmp, with live taskwarrior-style syntax
@@ -807,6 +872,7 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     let value = props.value.clone();
     let on_input = props.on_input;
     let on_submit = props.on_submit;
+    let on_tab = props.on_tab;
 
     // The real <input>'s text scrolls internally once typing overflows the
     // visible width (native browser behavior) — invisible here since its
@@ -896,6 +962,9 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                             }
                         } else if e.key() == Key::Enter {
                             on_submit.call(());
+                        } else if e.key() == Key::Tab {
+                            e.prevent_default();
+                            on_tab.call(());
                         }
                     }
                 },
@@ -1034,10 +1103,20 @@ pub fn ab_task_cmp() -> Element {
     let blocked_on = current_depends_on.clone().and_then(|dep_id| {
         moments.read().iter().find(|m| m.id == dep_id).cloned()
     });
-    let is_blocked = blocked_on.as_ref().is_some_and(|dep| dep.completed_at.is_none());
-    let blocking_count = moments.read().iter()
-        .filter(|m| m.depends_on == Some(id.clone()) && m.completed_at.is_none())
-        .count();
+    // Notes have no completion state (no checkbox is ever rendered for
+    // one), so a dependency on a note can never resolve. Depending on a
+    // note is still allowed — useful as a reference/context link — it just
+    // never actually blocks completion the way a task/promise dependency
+    // does. Symmetrically, a note can't "block" anything it's depended on
+    // by either, for the same reason.
+    let is_blocked = blocked_on.as_ref().is_some_and(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none());
+    let blocking_count = if moment.moment_type_id == 3 {
+        0
+    } else {
+        moments.read().iter()
+            .filter(|m| m.depends_on == Some(id.clone()) && m.completed_at.is_none())
+            .count()
+    };
 
     // Taskwarrior-style attributes, part 2 (priority/project/scheduled/
     // until) — same live-by-id read as current_depends_on above, for the
