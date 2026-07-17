@@ -72,14 +72,7 @@ pub fn Sidebar() -> Element {
                 }
                 views_list_cmp { }
             }
-            div {
-                class: "px-3 mt-6 pt-4 border-t border-border",
-                span {
-                    class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
-                    "Entities"
-                }
-                entity_list_cmp { }
-            }
+            entity_list_cmp { }
             div {
                 class: "px-3 mt-6 pt-4 border-t border-border",
                 span {
@@ -428,14 +421,7 @@ pub fn Navbar() -> Element {
                         }
                         views_list_cmp { }
                     }
-                    div {
-                        class: "px-3 mt-6 pt-4 border-t border-border",
-                        span {
-                            class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
-                            "Entities"
-                        }
-                        entity_list_cmp { }
-                    }
+                    entity_list_cmp { }
                     div {
                         class: "px-3 mt-6 pt-4 border-t border-border",
                         span {
