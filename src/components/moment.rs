@@ -601,7 +601,7 @@ pub fn MomentInputCmp() -> Element {
     let state = use_context::<AppState>();
     let mut momentInputTgl = state.momentInputTgl;
     let mut moments = state.moments;
-    let entities = state.entities;
+    let mut entities = state.entities;
     let mut title = use_signal(|| String::new());
     let current_entity = state.current_entity;
     let auth_token = state.auth_token;
@@ -767,6 +767,31 @@ pub fn MomentInputCmp() -> Element {
                                 }
                             });
                         },
+                        on_add_entity: move |name: String| {
+                            // Bare name only, nothing else — the whole
+                            // point is skipping the New Entity form for
+                            // quick capture. Details can be filled in later
+                            // from the Info panel.
+                            let token = auth_token;
+                            let vault = active_vault;
+                            spawn(async move {
+                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                let new_entity = NewEntityType {
+                                    name,
+                                    entity_type_id: None,
+                                    parent_entity_id: None,
+                                    user_id: None,
+                                    archived_at: None,
+                                    metadata: None,
+                                };
+                                match storage.create_entity(new_entity).await {
+                                    Ok(created) => {
+                                        entities.write().insert(0, created);
+                                    }
+                                    Err(e) => clog!("Error creating entity: {}", e),
+                                }
+                            });
+                        },
                     }
                 }
                 Dropdown {
@@ -844,6 +869,13 @@ pub struct QuickCaptureInputProps {
     // thing: title, then keep typing a description, without touching the
     // mouse.
     pub on_tab: EventHandler<()>,
+    // Fired with a bare name (no id yet) when "+ Add <name>" is chosen from
+    // the dropdown — see MomentInputCmp's wiring for the actual create
+    // call. Quick-capture already knows how to *reference* a person via
+    // @mention; this is the same gesture extended to *creating* one, so
+    // adding someone never requires leaving the composer for the full
+    // New Entity form.
+    pub on_add_entity: EventHandler<String>,
 }
 
 // The title input for MomentInputCmp, with live taskwarrior-style syntax
@@ -866,6 +898,11 @@ fn apply_selected_mention(value: &str, mention_start: usize, matches: &[EntityTy
     }
 }
 
+fn apply_add_new_mention(value: &str, mention_start: usize, name: &str, on_input: EventHandler<String>, on_add_entity: EventHandler<String>) {
+    on_input.call(quick_capture::apply_mention(value, mention_start, name));
+    on_add_entity.call(name.to_string());
+}
+
 #[component]
 pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     let mut highlighted = use_signal(|| 0usize);
@@ -873,6 +910,7 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     let on_input = props.on_input;
     let on_submit = props.on_submit;
     let on_tab = props.on_tab;
+    let on_add_entity = props.on_add_entity;
 
     // The real <input>'s text scrolls internally once typing overflows the
     // visible width (native browser behavior) — invisible here since its
@@ -902,6 +940,7 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     let tokens = quick_capture::tokenize(&value, &props.entities);
 
     let mention = quick_capture::trailing_mention_query(&value);
+    let mention_query = mention.as_ref().map(|m| m.query.to_string());
     let matches: Vec<EntityType> = match &mention {
         Some(m) => {
             let q_lower = m.query.to_lowercase();
@@ -916,8 +955,18 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
         None => Vec::new(),
     };
     let mention_start = mention.map(|m| m.start).unwrap_or(0);
-    let dropdown_open = !matches.is_empty();
-    if dropdown_open && *highlighted.read() >= matches.len() {
+    // Offer "+ Add <name>" whenever there's a non-empty @query with no
+    // exact (case-insensitive) name match — even alongside other fuzzy
+    // substring matches, since the typed text might still be a genuinely
+    // new, distinct person rather than any of those.
+    let show_add_new = mention_query.as_deref()
+        .map(str::trim)
+        .filter(|q| !q.is_empty())
+        .is_some_and(|q| !matches.iter().any(|e| e.name.to_lowercase() == q.to_lowercase()));
+    let add_new_name = mention_query.as_deref().map(str::trim).unwrap_or("").to_string();
+    let dropdown_open = !matches.is_empty() || show_add_new;
+    let option_count = matches.len() + if show_add_new { 1 } else { 0 };
+    if dropdown_open && *highlighted.read() >= option_count {
         highlighted.set(0);
     }
 
@@ -941,22 +990,28 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                 onkeydown: {
                     let value = value.clone();
                     let matches = matches.clone();
+                    let add_new_name = add_new_name.clone();
                     move |e: Event<KeyboardData>| {
                         if dropdown_open {
                             match e.key() {
                                 Key::ArrowDown => {
                                     e.prevent_default();
-                                    let next = (*highlighted.read() + 1) % matches.len();
+                                    let next = (*highlighted.read() + 1) % option_count;
                                     highlighted.set(next);
                                 }
                                 Key::ArrowUp => {
                                     e.prevent_default();
                                     let h = *highlighted.read();
-                                    highlighted.set(if h == 0 { matches.len() - 1 } else { h - 1 });
+                                    highlighted.set(if h == 0 { option_count - 1 } else { h - 1 });
                                 }
                                 Key::Enter | Key::Tab => {
                                     e.prevent_default();
-                                    apply_selected_mention(&value, mention_start, &matches, *highlighted.read(), on_input);
+                                    let h = *highlighted.read();
+                                    if h < matches.len() {
+                                        apply_selected_mention(&value, mention_start, &matches, h, on_input);
+                                    } else if show_add_new {
+                                        apply_add_new_mention(&value, mention_start, &add_new_name, on_input, on_add_entity);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -998,6 +1053,21 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                                 }
                             },
                             "{entity.name}"
+                        }
+                    }
+                    if show_add_new {
+                        div {
+                            class: if matches.len() == *highlighted.read() { "px-3 py-1.5 text-sm cursor-pointer bg-muted font-medium" } else { "px-3 py-1.5 text-sm cursor-pointer font-medium" },
+                            style: "color: {HL};",
+                            onmousedown: {
+                                let value = value.clone();
+                                let add_new_name = add_new_name.clone();
+                                move |e: Event<MouseData>| {
+                                    e.prevent_default();
+                                    apply_add_new_mention(&value, mention_start, &add_new_name, on_input, on_add_entity);
+                                }
+                            },
+                            "+ Add \"{add_new_name}\""
                         }
                     }
                 }
