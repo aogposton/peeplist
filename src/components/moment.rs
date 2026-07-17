@@ -481,10 +481,17 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     let is_completed = || props.moment.completed_at.is_some();
     let mut visual_opacity = use_signal(|| if props.moment.completed_at.is_some() { "0.4" } else { "1" });
 
+    // due_at is stored as bare "YYYY-MM-DDTHH:MM" (no timezone/seconds) —
+    // whether set through the Advanced fold's native datetime-local input
+    // or quick-capture's due: keyword, nothing in the app ever produces
+    // full RFC3339 for this field. Parsing only that format meant this due
+    // -date label never actually rendered for any moment, ever — same bug
+    // class already found and fixed once in urgency.rs, reused here instead
+    // of re-deriving a second copy of the same fix.
     let due_display = props.moment.due_at.as_deref()
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .and_then(crate::urgency::parse_moment_datetime)
         .map(|dt| {
-            let is_overdue = dt.with_timezone(&chrono::Utc) < chrono::Utc::now() && props.moment.completed_at.is_none();
+            let is_overdue = dt < chrono::Utc::now() && props.moment.completed_at.is_none();
             (dt.format("%b %d").to_string(), is_overdue)
         });
 
@@ -1870,7 +1877,7 @@ pub fn ScheduledViewCmp() -> Element {
         .filter(|m| m.completed_at.is_none())
         .filter_map(|m| {
             let s = m.metadata.as_ref()?.scheduled_at.as_ref()?;
-            let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&chrono::Utc);
+            let dt = crate::urgency::parse_moment_datetime(s)?;
             Some((m.clone(), dt))
         })
         .collect();
@@ -1944,8 +1951,13 @@ pub fn DueViewCmp() -> Element {
 
     let bucket_of = |m: &MomentType| -> &'static str {
         let Some(due_at) = m.due_at.as_ref() else { return "Later"; };
-        let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(due_at) else { return "Later"; };
-        let due_date = parsed.with_timezone(&chrono::Utc).date_naive();
+        // Bare "YYYY-MM-DDTHH:MM", not RFC3339 — see the due_display fix
+        // above (MomentCmp) for the full story. This one didn't silently
+        // show nothing, it silently bucketed *everything* into "Later"
+        // regardless of actual date, which is arguably worse — it looked
+        // like it was working.
+        let Some(parsed) = crate::urgency::parse_moment_datetime(due_at) else { return "Later"; };
+        let due_date = parsed.date_naive();
         let days = (due_date - today).num_days();
         match days {
             d if d < 0 => "Overdue",
