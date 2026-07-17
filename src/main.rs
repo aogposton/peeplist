@@ -137,6 +137,7 @@ pub struct AppState {
     pub user_email: Signal<Option<String>>,
     pub backdropTgl: Signal<bool>,
     pub tag_filter: Signal<Option<String>>,
+    pub project_filter: Signal<Option<String>>,
     // Not persisted (same as tag_filter above) — resets on reload, unlike
     // sort_mode/active_vault/urgency_weights below.
     pub hide_notes: Signal<bool>,
@@ -179,6 +180,7 @@ fn App() -> Element {
         user_email: Signal::new(None::<String>),
         backdropTgl: Signal::new(false),
         tag_filter: Signal::new(None::<String>),
+        project_filter: Signal::new(None::<String>),
         hide_notes: Signal::new(false),
         hide_completed: Signal::new(false),
         sort_mode: Signal::new(SortMode::Default),

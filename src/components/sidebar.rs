@@ -14,6 +14,7 @@ pub fn views_list_cmp() -> Element {
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
     let mut tag_filter = state.tag_filter;
+    let mut project_filter = state.project_filter;
 
     rsx! {
         div {
@@ -23,6 +24,7 @@ pub fn views_list_cmp() -> Element {
                 onclick: move |_| {
                     current_entity.set(None);
                     tag_filter.set(None);
+                    project_filter.set(None);
                     currentView.set(View::Inbox);
                 },
                 fa_inbox { }
@@ -33,6 +35,7 @@ pub fn views_list_cmp() -> Element {
                 onclick: move |_| {
                     current_entity.set(None);
                     tag_filter.set(None);
+                    project_filter.set(None);
                     currentView.set(View::Priority);
                 },
                 fa_bolt { }
@@ -43,6 +46,7 @@ pub fn views_list_cmp() -> Element {
                 onclick: move |_| {
                     current_entity.set(None);
                     tag_filter.set(None);
+                    project_filter.set(None);
                     currentView.set(View::Due);
                 },
                 fa_calendar { }
@@ -53,6 +57,7 @@ pub fn views_list_cmp() -> Element {
                 onclick: move |_| {
                     current_entity.set(None);
                     tag_filter.set(None);
+                    project_filter.set(None);
                     currentView.set(View::Scheduled);
                 },
                 fa_clock { }
@@ -63,6 +68,7 @@ pub fn views_list_cmp() -> Element {
                 onclick: move |_| {
                     current_entity.set(None);
                     tag_filter.set(None);
+                    project_filter.set(None);
                     currentView.set(View::Distance);
                 },
                 fa_compass { }
@@ -73,6 +79,7 @@ pub fn views_list_cmp() -> Element {
                 onclick: move |_| {
                     current_entity.set(None);
                     tag_filter.set(None);
+                    project_filter.set(None);
                     currentView.set(View::Graph);
                 },
                 fa_circle_nodes { }
@@ -90,6 +97,7 @@ pub fn entity_list_cmp() -> Element {
     let mut currentView = state.currentView;
     let mut entityModalTgl = state.entityModalTgl;
     let mut tag_filter = state.tag_filter;
+    let mut project_filter = state.project_filter;
 
     // The self entity (see api::is_self_entity) is always present once a
     // vault's been opened — it's not a "real" person you'd add/click on
@@ -135,6 +143,7 @@ pub fn entity_list_cmp() -> Element {
                             // without the user having touched tags at all.
                             current_entity.set(Some(entity.clone()));
                             tag_filter.set(None);
+                            project_filter.set(None);
                             currentView.set(View::Entity);
                         },
                         "{entity.name}"
@@ -150,6 +159,7 @@ pub fn tag_list_cmp() -> Element {
     let state = use_context::<AppState>();
     let moments = state.moments;
     let mut tag_filter = state.tag_filter;
+    let mut project_filter = state.project_filter;
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
 
@@ -162,7 +172,8 @@ pub fn tag_list_cmp() -> Element {
 
     rsx! {
         div {
-            class: "flex flex-col gap-y-1",
+            class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
+            span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1", "Tags" }
             if tags.is_empty() {
                 span {
                     class: "px-3 text-xs text-muted-foreground",
@@ -190,12 +201,73 @@ pub fn tag_list_cmp() -> Element {
                                     // just this one's. Drop entity scope so
                                     // the tag actually behaves like a list.
                                     tag_filter.set(Some(tag.clone()));
+                                    project_filter.set(None);
                                     current_entity.set(None);
                                     currentView.set(View::Inbox);
                                 }
                             }
                         },
                         "{tag}"
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Same cross-cutting-list treatment as tags, for the same reason: "which
+// projects exist" isn't something you're meant to hold in your head, it's
+// something you click through — same as not remembering every entity name
+// off the top of your head.
+#[component]
+pub fn project_list_cmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let mut tag_filter = state.tag_filter;
+    let mut project_filter = state.project_filter;
+    let mut current_entity = state.current_entity;
+    let mut currentView = state.currentView;
+
+    let mut projects: Vec<String> = moments.read().iter()
+        .filter_map(|m| m.metadata.as_ref())
+        .filter_map(|meta| meta.project.clone())
+        .filter(|p| !p.is_empty())
+        .collect();
+    projects.sort();
+    projects.dedup();
+
+    rsx! {
+        div {
+            class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
+            span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1", "Projects" }
+            if projects.is_empty() {
+                span {
+                    class: "px-3 text-xs text-muted-foreground",
+                    "No projects yet"
+                }
+            } else {
+                for project in projects.iter() {
+                    a {
+                        class: if project_filter.read().as_deref() == Some(project.as_str()) {
+                            "block rounded-md px-3 py-2 text-sm font-medium bg-muted text-foreground cursor-pointer"
+                        } else {
+                            NAV_LINK_CLASS
+                        },
+                        onclick: {
+                            let project = project.clone();
+                            move |_| {
+                                let is_active = project_filter.read().as_deref() == Some(project.as_str());
+                                if is_active {
+                                    project_filter.set(None);
+                                } else {
+                                    project_filter.set(Some(project.clone()));
+                                    tag_filter.set(None);
+                                    current_entity.set(None);
+                                    currentView.set(View::Inbox);
+                                }
+                            }
+                        },
+                        "{project}"
                     }
                 }
             }

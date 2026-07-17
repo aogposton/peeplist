@@ -31,6 +31,7 @@ pub fn Home() -> Element {
     let current_view = state.currentView;
     let current_entity = state.current_entity;
     let tag_filter = state.tag_filter;
+    let project_filter = state.project_filter;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let mut hide_notes = state.hide_notes;
@@ -38,6 +39,9 @@ pub fn Home() -> Element {
 
     let has_tag = |m: &MomentType, tag: &str| {
         m.metadata.as_ref().is_some_and(|meta| meta.tags.iter().any(|t| t == tag))
+    };
+    let has_project = |m: &MomentType, project: &str| {
+        m.metadata.as_ref().and_then(|meta| meta.project.as_deref()) == Some(project)
     };
 
     use_effect(move || {
@@ -74,6 +78,7 @@ pub fn Home() -> Element {
                     let visible: Vec<MomentType> = moments.read().iter()
                         .filter(|m| !crate::urgency::is_waiting(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
+                        .filter(|m| project_filter.read().as_ref().map_or(true, |p| has_project(m, p)))
                         .cloned()
                         .collect();
                     rsx! {
@@ -105,6 +110,7 @@ pub fn Home() -> Element {
                         .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.entity_id == e.id))
                         .filter(|m| !crate::urgency::is_waiting(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
+                        .filter(|m| project_filter.read().as_ref().map_or(true, |p| has_project(m, p)))
                         .cloned()
                         .collect();
                     rsx! {
