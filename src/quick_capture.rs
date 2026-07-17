@@ -406,6 +406,48 @@ pub fn apply_mention(current: &str, start: usize, entity_name: &str) -> String {
     format!("{}@{entity_name} ", &current[..start])
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct DependsQuery<'a> {
+    pub start: usize,
+    pub query: &'a str,
+}
+
+// The depends:/deps: query currently being typed, if any — same end-of-
+// string-only approach as trailing_mention_query, for the same reason
+// (quick capture is typed left-to-right at the end of the field). Unlike
+// mentions this only ever looks at the unquoted in-progress case: once a
+// depends:"..." is fully typed and closed, tokenize()/parse() takes over
+// and there's no longer an "in progress" query to show a dropdown for.
+pub fn trailing_depends_query(input: &str) -> Option<DependsQuery<'_>> {
+    let last_word_start = input.char_indices().rev()
+        .find(|&(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(0);
+    let last_word = &input[last_word_start..];
+    for prefix in ["depends:", "deps:"] {
+        if let Some(query) = last_word.strip_prefix(prefix) {
+            if !query.starts_with('"') {
+                return Some(DependsQuery { start: last_word_start, query });
+            }
+        }
+    }
+    None
+}
+
+// Same replace-the-trailing-fragment trick as apply_mention, but quotes
+// the title when it contains spaces — classify_word only ever sees one
+// whitespace-delimited word at a time for the unquoted depends: form
+// (unlike @mentions, which match_entity resolves via prefix+boundary
+// scanning over the *rest* of the string, not one word at a time), so an
+// unquoted multi-word title would silently truncate at the first space.
+pub fn apply_depends(current: &str, start: usize, title: &str) -> String {
+    if title.chars().any(char::is_whitespace) {
+        format!("{}depends:\"{title}\" ", &current[..start])
+    } else {
+        format!("{}depends:{title} ", &current[..start])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +565,22 @@ mod tests {
         assert_eq!(apply_mention("Call @ja", "Call ".len(), "Jane Doe"), "Call @Jane Doe ");
         assert_eq!(apply_mention("@ja", 0, "Jane Doe"), "@Jane Doe ");
         assert_eq!(apply_mention("Call @\"Jane D", "Call ".len(), "Jane Doe"), "Call @Jane Doe ");
+    }
+
+    #[test]
+    fn trailing_depends_query_detects_in_progress_typing() {
+        assert_eq!(trailing_depends_query("Ship it depends:rev").map(|q| q.query), Some("rev"));
+        assert_eq!(trailing_depends_query("Ship it deps:rev").map(|q| q.query), Some("rev"));
+        assert_eq!(trailing_depends_query("Ship it depends:"), Some(DependsQuery { start: "Ship it ".len(), query: "" }));
+        assert_eq!(trailing_depends_query("Ship it"), None);
+        // A closed quoted form isn't "in progress" anymore.
+        assert_eq!(trailing_depends_query("Ship it depends:\"final review\" "), None);
+    }
+
+    #[test]
+    fn apply_depends_quotes_multi_word_titles_only() {
+        assert_eq!(apply_depends("Ship it depends:rev", "Ship it ".len(), "review"), "Ship it depends:review ");
+        assert_eq!(apply_depends("Ship it depends:rev", "Ship it ".len(), "final review"), "Ship it depends:\"final review\" ");
     }
 
     #[test]
