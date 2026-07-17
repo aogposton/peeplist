@@ -297,11 +297,18 @@ impl LocalStorage {
             .ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {}", moment.entity_id)))?;
         if let Some(m) = file.moments.iter().find(|m| m.id == moment.id) {
             let entry = vault_format::moment_to_entry(m);
-            self.append_trash(&storage, TrashEntry::Moment {
+            // Best-effort: trash-logging is bookkeeping, not the thing the
+            // user actually asked for. It used to be able to silently veto
+            // the whole delete via `?` if it failed for any reason — the
+            // record still not being fully recoverable-from-trash is a much
+            // smaller problem than "delete does nothing."
+            if let Err(e) = self.append_trash(&storage, TrashEntry::Moment {
                 entity_id: moment.entity_id.clone(),
                 moment: entry,
                 deleted_at: now(),
-            })?;
+            }) {
+                log::warn!("Failed to log deleted moment to trash (deleting anyway): {e}");
+            }
         }
         file.moments.retain(|m| m.id != moment.id);
         self.save(&storage, &file.entity, &file.moments, &file.body)
@@ -311,7 +318,9 @@ impl LocalStorage {
         let storage = local_storage()?;
         if let Some(file) = self.load(&storage, &id) {
             let doc = vault_format::entity_to_doc(&file.entity, &file.moments);
-            self.append_trash(&storage, TrashEntry::Entity { entity: doc, deleted_at: now() })?;
+            if let Err(e) = self.append_trash(&storage, TrashEntry::Entity { entity: doc, deleted_at: now() }) {
+                log::warn!("Failed to log deleted entity to trash (deleting anyway): {e}");
+            }
         }
         storage
             .remove_item(&entity_key(&id))

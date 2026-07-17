@@ -1776,8 +1776,18 @@ pub fn ab_task_cmp() -> Element {
                 Button {
                     variant: ButtonVariant::Destructive,
                     full_width: true,
-                    on_click: move |_| {
-                        let moment = moment_sig.read().clone();
+                    on_click: {
+                        let id = id.clone();
+                        move |_| {
+                        // Look up live by id rather than moment_sig (a
+                        // one-time snapshot from when the panel opened) —
+                        // same staleness class fixed elsewhere in this
+                        // component; entity_id essentially never changes in
+                        // practice, but there's no reason to risk it here
+                        // either.
+                        let Some(moment) = moments.read().iter().find(|m| m.id == id).cloned() else {
+                            return;
+                        };
                         let mut moments = moments.clone();
                         let token = auth_token;
                         let vault = active_vault;
@@ -1787,11 +1797,12 @@ pub fn ab_task_cmp() -> Element {
                                 Ok(()) => {
                                     moments.write().retain(|m| m.id != moment.id);
                                 }
-                                Err(e) => clog!("Error: {}", e),
+                                Err(e) => clog!("Error deleting moment: {}", e),
                             }
                         });
                         activity_bar_tgl.set(false);
                         backdropTgl.set(false);
+                        }
                     },
                     fa_trash {}
                     "Delete"

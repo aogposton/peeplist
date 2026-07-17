@@ -302,11 +302,16 @@ impl LocalStorage {
             .ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {}", moment.entity_id)))?;
         if let Some(m) = file.moments.iter().find(|m| m.id == moment.id) {
             let entry = vault_format::moment_to_entry(m);
-            self.append_trash(TrashEntry::Moment {
+            // Best-effort — see local.rs's matching comment: trash-logging
+            // used to be able to silently veto the whole delete via `?` if
+            // it failed for any reason.
+            if let Err(e) = self.append_trash(TrashEntry::Moment {
                 entity_id: moment.entity_id.clone(),
                 moment: entry,
                 deleted_at: now(),
-            })?;
+            }) {
+                log::warn!("Failed to log deleted moment to trash (deleting anyway): {e}");
+            }
         }
         file.moments.retain(|m| m.id != moment.id);
         self.save(&path, &file.entity, &file.moments, &file.body)
@@ -315,7 +320,9 @@ impl LocalStorage {
     pub async fn delete_entity(&self, id: String) -> Result<(), StorageError> {
         let (path, file) = self.find(&id)?.ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {id}")))?;
         let doc = vault_format::entity_to_doc(&file.entity, &file.moments);
-        self.append_trash(TrashEntry::Entity { entity: doc, deleted_at: now() })?;
+        if let Err(e) = self.append_trash(TrashEntry::Entity { entity: doc, deleted_at: now() }) {
+            log::warn!("Failed to log deleted entity to trash (deleting anyway): {e}");
+        }
         fs::remove_file(&path).map_err(|e| StorageError::Local(e.to_string()))
     }
 
