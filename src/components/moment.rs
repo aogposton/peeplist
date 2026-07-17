@@ -1868,10 +1868,11 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
 }
 
 // Taskwarrior's "waiting" concept: moments given a future scheduled_at (via
-// the scheduled: quick-capture keyword) so they're off your mind until
-// that date, with somewhere to go check on all of them at once in the
-// meantime. Nothing currently hides a scheduled moment from the normal
-// list before its date arrives — this is a review view, not a filter.
+// the scheduled:/wait: quick-capture keyword) are hidden from every normal
+// view (see is_waiting() in urgency.rs) until that date, with this as the
+// one place to go check on everything currently parked. Only ever shows
+// what's still incoming — once a date arrives the moment is already back
+// in the normal views, so there's nothing left for this one to say about it.
 #[component]
 pub fn ScheduledViewCmp() -> Element {
     let state = use_context::<AppState>();
@@ -1884,12 +1885,15 @@ pub fn ScheduledViewCmp() -> Element {
 
     let now = chrono::Utc::now();
 
+    // Only what's still incoming — once a scheduled date arrives the
+    // moment is already visible everywhere else again (see is_waiting()),
+    // so it doesn't belong in a "what's parked" review list anymore either.
     let mut scheduled: Vec<(MomentType, chrono::DateTime<chrono::Utc>)> = moments.read().iter()
         .filter(|m| m.completed_at.is_none())
         .filter_map(|m| {
             let s = m.metadata.as_ref()?.scheduled_at.as_ref()?;
             let dt = crate::urgency::parse_moment_datetime(s)?;
-            Some((m.clone(), dt))
+            (dt > now).then_some((m.clone(), dt))
         })
         .collect();
     scheduled.sort_by_key(|(_, dt)| *dt);
@@ -1928,7 +1932,7 @@ pub fn ScheduledViewCmp() -> Element {
                         }
                         span {
                             class: "text-xs text-muted-foreground shrink-0",
-                            if *dt <= now { "Arrived" } else { "{dt.format(\"%b %d\")}" }
+                            "{dt.format(\"%b %d\")}"
                         }
                     }
                 }
