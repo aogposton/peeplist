@@ -620,6 +620,7 @@ pub fn MomentInputCmp() -> Element {
     let mut entities = state.entities;
     let mut title = use_signal(|| String::new());
     let current_entity = state.current_entity;
+    let project_filter = state.project_filter;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let mut selected_entity = use_signal(|| None::<String>);
@@ -681,6 +682,11 @@ pub fn MomentInputCmp() -> Element {
         title.set(String::new());
         description_open.set(false);
         let entity_id = parsed.entity_id.clone().unwrap_or(form_data.entity_sel.clone());
+        // Mirrors entity_id's default above: creating a moment while
+        // browsing a specific project should land it in that project
+        // unless project:/pro: explicitly says otherwise, same as how
+        // browsing an entity already defaults new moments to them.
+        let default_project = project_filter.read().clone();
         let token = auth_token;
                         let vault = active_vault;
 
@@ -718,12 +724,13 @@ pub fn MomentInputCmp() -> Element {
                             }
                         }
                     }
-                    if parsed.has_metadata() {
+                    let effective_project = parsed.project.clone().or_else(|| default_project.clone());
+                    if parsed.has_metadata() || effective_project.is_some() {
                         let meta = MomentMetadata {
                             tags: parsed.tags_add.clone(),
                             sort_index: None,
                             priority: parsed.priority.clone(),
-                            project: parsed.project.clone(),
+                            project: effective_project,
                             scheduled_at: parsed.scheduled_at.clone(),
                             until_at: parsed.until_at.clone(),
                         };
