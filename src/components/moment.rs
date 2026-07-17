@@ -1944,7 +1944,7 @@ pub fn DueViewCmp() -> Element {
     let today = now.date_naive();
 
     let mut due: Vec<MomentType> = moments.read().iter()
-        .filter(|m| m.completed_at.is_none() && m.due_at.is_some())
+        .filter(|m| m.completed_at.is_none() && m.due_at.is_some() && !crate::urgency::is_waiting(m, now))
         .cloned()
         .collect();
     due.sort_by(|a, b| a.due_at.cmp(&b.due_at));
@@ -2047,7 +2047,7 @@ pub fn PriorityViewCmp() -> Element {
     let now = chrono::Utc::now();
     let all = moments.read().clone();
     let mut ranked: Vec<(MomentType, crate::urgency::UrgencyBreakdown)> = all.iter()
-        .filter(|m| m.moment_type_id != 3i64 && m.completed_at.is_none())
+        .filter(|m| m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now))
         .map(|m| (m.clone(), crate::urgency::compute_urgency(m, &all, now, &weights)))
         .collect();
     ranked.sort_by(|a, b| b.1.total().partial_cmp(&a.1.total()).unwrap_or(std::cmp::Ordering::Equal));

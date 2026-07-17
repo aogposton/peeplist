@@ -16,7 +16,10 @@
 //   priority:H/M/L       (also accepts high/medium/low) — pri: is a shorthand alias
 //   project:<value>      no spaces — stops at the next whitespace — pro: is a shorthand alias
 //   due:<date>           "today", "tomorrow", "YYYY-MM-DD", or "YYYY-MM-DDTHH:MM"
-//   scheduled:<date>     same date grammar as due
+//   scheduled:<date>     same date grammar as due — hides the moment from
+//                        the normal views until this date (see the
+//                        Scheduled view). wait: is an alias (taskwarrior's
+//                        own name for this).
 //   until:<date>         same date grammar as due
 //   depends:<title>      blocked by another open moment, matched by title —
 //                        no spaces (stops at whitespace) unless quoted, same
@@ -196,7 +199,10 @@ fn classify_word(word: &str) -> TokenKind {
                         return TokenKind::Due(d);
                     }
                 }
-                "scheduled" => {
+                // wait: is taskwarrior's own name for this — same field,
+                // same syntax, just the more familiar word for what it
+                // actually does (hide until this date).
+                "scheduled" | "wait" => {
                     if let Some(d) = parse_date_token(val) {
                         return TokenKind::Scheduled(d);
                     }
@@ -426,6 +432,14 @@ mod tests {
         let cap = parse("Buy flowers pri:H pro:Home.Garden", &entities());
         assert_eq!(cap.priority, Some("H".to_string()));
         assert_eq!(cap.project, Some("Home.Garden".to_string()));
+    }
+
+    #[test]
+    fn wait_is_an_alias_for_scheduled() {
+        let scheduled = parse("Call back scheduled:2026-08-01", &entities());
+        let wait = parse("Call back wait:2026-08-01", &entities());
+        assert_eq!(scheduled.scheduled_at, wait.scheduled_at);
+        assert!(wait.scheduled_at.is_some());
     }
 
     #[test]

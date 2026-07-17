@@ -70,7 +70,9 @@ pub fn Home() -> Element {
             style: "background-color:{BG};",
             match current_view.read().clone() {
                 Inbox => {
+                    let now = chrono::Utc::now();
                     let visible: Vec<MomentType> = moments.read().iter()
+                        .filter(|m| !crate::urgency::is_waiting(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
                         .cloned()
                         .collect();
@@ -98,8 +100,10 @@ pub fn Home() -> Element {
                     }
                 },
                 Entity => {
+                    let now = chrono::Utc::now();
                     let visible: Vec<MomentType> = moments.read().iter()
                         .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.entity_id == e.id))
+                        .filter(|m| !crate::urgency::is_waiting(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
                         .cloned()
                         .collect();
