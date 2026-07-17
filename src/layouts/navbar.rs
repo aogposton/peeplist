@@ -405,8 +405,17 @@ pub fn Navbar() -> Element {
             }
             Sidebar { }
             div {
+                // No overflow-hidden here — #activity-bar below is
+                // position: fixed, and iOS Safari has long-standing bugs
+                // where an overflow:hidden ancestor clips/breaks a fixed
+                // descendant's own internal scrolling even though it
+                // shouldn't per spec (fixed elements are supposed to
+                // escape ancestor overflow entirely). Every child here
+                // (sidebar, main content, activity-bar) already constrains
+                // and scrolls itself independently, so this was never load
+                // -bearing for containing page-level scroll.
                 style: "background-color:{BG};",
-                class: "flex h-screen w-full overflow-hidden",
+                class: "flex h-screen w-full",
                 div {
                     class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-border bg-background transform translate-x-0 transition-transform duration-200",
                     div {
