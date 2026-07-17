@@ -152,7 +152,7 @@ impl UrgencyBreakdown {
 // the real UI, since nothing in the app produces full RFC3339 for that
 // field. Treat the bare shape as UTC — good enough for a ranking nudge,
 // not claiming timezone precision.
-fn parse_moment_datetime(s: &str) -> Option<DateTime<Utc>> {
+pub fn parse_moment_datetime(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
         .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok().map(|ndt| ndt.and_utc()))
 }
