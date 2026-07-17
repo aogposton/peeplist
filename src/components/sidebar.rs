@@ -86,11 +86,15 @@ pub fn entity_list_cmp() -> Element {
     rsx! {
         div {
             class: "flex flex-col gap-y-1",
-            button {
-                class: "w-full rounded-md py-2 mb-3 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer",
-                style: "background-color:{HL};",
-                onclick: move |_| entityModalTgl.set(true),
-                "+ Add entity"
+            div {
+                class: "flex items-center justify-between px-1 mb-1",
+                span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground", "Entities" }
+                button {
+                    class: "h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer",
+                    title: "Add entity",
+                    onclick: move |_| entityModalTgl.set(true),
+                    fa_plus {}
+                }
             }
             if visible_entities.is_empty() {
                 span {
@@ -118,6 +122,8 @@ pub fn tag_list_cmp() -> Element {
     let state = use_context::<AppState>();
     let moments = state.moments;
     let mut tag_filter = state.tag_filter;
+    let mut current_entity = state.current_entity;
+    let mut currentView = state.currentView;
 
     let mut tags: Vec<String> = moments.read().iter()
         .filter_map(|m| m.metadata.as_ref())
@@ -146,10 +152,22 @@ pub fn tag_list_cmp() -> Element {
                             let tag = tag.clone();
                             move |_| {
                                 let is_active = tag_filter.read().as_deref() == Some(tag.as_str());
-                                tag_filter.set(if is_active { None } else { Some(tag.clone()) });
+                                if is_active {
+                                    tag_filter.set(None);
+                                } else {
+                                    // A tag is a cross-cutting list, not a
+                                    // filter scoped to whatever entity
+                                    // happens to be selected — "bugs" should
+                                    // mean every bug for every person, not
+                                    // just this one's. Drop entity scope so
+                                    // the tag actually behaves like a list.
+                                    tag_filter.set(Some(tag.clone()));
+                                    current_entity.set(None);
+                                    currentView.set(View::Inbox);
+                                }
                             }
                         },
-                        "#{tag}"
+                        "{tag}"
                     }
                 }
             }
