@@ -26,7 +26,7 @@
 //                        search — see ParsedCapture.depends_on_title).
 //   +<tag> / -<tag>      add / remove a tag (single word)
 //   +"<tag>" / -"<tag>"  add / remove a tag containing spaces
-//   :t: / :p: / :n:      set the moment's type: task / promise / note —
+//   ;t; / ;p; / ;n;      set the moment's type: task / promise / note —
 //                        home-row, stands alone as its own word
 //
 // Anything that isn't recognized (including a malformed date, an
@@ -159,13 +159,17 @@ fn parse_date_token(val: &str) -> Option<String> {
 }
 
 fn classify_word(word: &str) -> TokenKind {
-    if word == ":t:" {
+    // Semicolons, not colons — deliberately, sits right on the home row
+    // with no shift needed, and doesn't visually collide with due:/
+    // scheduled:/until:'s colon-heavy date syntax the way :t:/:p:/:n:
+    // would have.
+    if word == ";t;" {
         return TokenKind::MomentType(1);
     }
-    if word == ":p:" {
+    if word == ";p;" {
         return TokenKind::MomentType(2);
     }
-    if word == ":n:" {
+    if word == ";n;" {
         return TokenKind::MomentType(3);
     }
     if let Some(rest) = word.strip_prefix('+') {
@@ -425,10 +429,10 @@ mod tests {
     }
 
     #[test]
-    fn colon_letter_colon_sets_moment_type() {
-        assert_eq!(parse("Call mom :t:", &entities()).moment_type_id, Some(1));
-        assert_eq!(parse("Call mom :p:", &entities()).moment_type_id, Some(2));
-        assert_eq!(parse("Call mom :n:", &entities()).moment_type_id, Some(3));
+    fn semicolon_letter_semicolon_sets_moment_type() {
+        assert_eq!(parse("Call mom ;t;", &entities()).moment_type_id, Some(1));
+        assert_eq!(parse("Call mom ;p;", &entities()).moment_type_id, Some(2));
+        assert_eq!(parse("Call mom ;n;", &entities()).moment_type_id, Some(3));
         assert_eq!(parse("Call mom", &entities()).moment_type_id, None);
     }
 

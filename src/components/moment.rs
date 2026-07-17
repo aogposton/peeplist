@@ -749,7 +749,7 @@ pub fn MomentInputCmp() -> Element {
                     class: "flex-1",
                     QuickCaptureInput {
                         value: title.read().clone(),
-                        placeholder: "Title · @name pri:H due:tomorrow +tag :t:/:p:/:n:".to_string(),
+                        placeholder: "Title · @name pri:H due:tomorrow +tag ;t;/;p;/;n;".to_string(),
                         entities: entities.read().clone(),
                         on_input: move |v: String| {
                             // A completed @mention should be reflected on
