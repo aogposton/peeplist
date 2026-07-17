@@ -157,6 +157,21 @@ pub fn parse_moment_datetime(s: &str) -> Option<DateTime<Utc>> {
         .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok().map(|ndt| ndt.and_utc()))
 }
 
+// Taskwarrior's real "wait" semantic: a moment scheduled for the future
+// (via scheduled:/wait: — same field, see quick_capture.rs) is hidden from
+// every normal view — Inbox, an entity's own list, Priority, Due — until
+// that date arrives, then behaves completely normally. The Scheduled view
+// is the one place it's visible in the meantime, specifically so there's
+// somewhere to go check on everything currently parked. Once the date
+// passes, this returns false and the moment reappears everywhere on its
+// own — no explicit "un-wait" action needed.
+pub fn is_waiting(m: &MomentType, now: DateTime<Utc>) -> bool {
+    m.metadata.as_ref()
+        .and_then(|meta| meta.scheduled_at.as_deref())
+        .and_then(parse_moment_datetime)
+        .is_some_and(|scheduled| scheduled > now)
+}
+
 /// The single function responsible for computing a moment's priority
 /// score. Change a ranking behavior here, and only here — everything else
 /// (the Priority view, its settings UI) just calls this and displays the
