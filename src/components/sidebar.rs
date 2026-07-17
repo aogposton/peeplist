@@ -94,9 +94,9 @@ pub fn entity_list_cmp() -> Element {
 
     rsx! {
         div {
-            class: "flex flex-col gap-y-1",
+            class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
             div {
-                class: "flex items-center justify-between px-1 mb-1",
+                class: "flex items-center justify-between px-3 mb-1",
                 span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground", "Entities" }
                 button {
                     class: "h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer",
