@@ -115,6 +115,8 @@ pub fn vault_switcher_cmp() -> Element {
     let mut user_email = state.user_email;
     let mut active_vault = state.active_vault;
     let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
+    let mut import_status = use_signal(|| None::<String>);
+    let mut importing = use_signal(|| false);
 
     let entries: Vec<VaultEntry> = {
         let mut v = vec![VaultEntry { kind: VaultKind::Local, label: "Local".to_string(), removable: false }];
@@ -246,6 +248,48 @@ pub fn vault_switcher_cmp() -> Element {
                                 "+ Add a vault"
                             }
                         }
+                        if has_synced {
+                            DropdownSeparator {}
+                            DropdownItem::<String> {
+                                value: "import".to_string(),
+                                index: entries.len() + 1,
+                                on_select: move |_| {
+                                    // Vaults are never auto-merged (see the
+                                    // vault switcher's own reasoning below) —
+                                    // this is the explicit, one-time
+                                    // exception: copy Local's entities/
+                                    // moments into Synced. Doesn't touch or
+                                    // clear the Local vault either way.
+                                    if *importing.read() {
+                                        return;
+                                    }
+                                    let Some(token) = auth_token.read().clone() else { return; };
+                                    importing.set(true);
+                                    import_status.set(None);
+                                    spawn(async move {
+                                        let msg = match crate::api::import_local_into_synced(token).await {
+                                            Ok(summary) => format!(
+                                                "Imported {} {}, {} {}.",
+                                                summary.entities,
+                                                if summary.entities == 1 { "person" } else { "people" },
+                                                summary.moments,
+                                                if summary.moments == 1 { "moment" } else { "moments" },
+                                            ),
+                                            Err(e) => format!("Import failed: {e}"),
+                                        };
+                                        import_status.set(Some(msg));
+                                        importing.set(false);
+                                    });
+                                },
+                                if *importing.read() { "Importing local vault…" } else { "Import local vault →" }
+                            }
+                        }
+                    }
+                }
+                if let Some(msg) = import_status.read().clone() {
+                    div {
+                        class: "px-2 pt-1.5 text-xs text-muted-foreground",
+                        "{msg}"
                     }
                 }
             }
