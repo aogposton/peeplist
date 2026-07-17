@@ -486,6 +486,12 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     let is_blocked = props.moment.depends_on.as_ref().is_some_and(|dep_id| {
         moments.read().iter().find(|m| &m.id == dep_id).is_some_and(|dep| dep.completed_at.is_none())
     });
+    // The list row only ever said "Blocked" with no way to tell what by —
+    // the detail panel already names the blocker (see ab_task_cmp's
+    // "Blocked by" line), the row itself just never did.
+    let blocked_on_title = props.moment.depends_on.as_ref().and_then(|dep_id| {
+        moments.read().iter().find(|m| &m.id == dep_id).map(|m| m.title.clone())
+    });
 
     let onCheckClicked = move |checked: bool| {
         if is_blocked {
@@ -560,7 +566,7 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
                 if is_blocked {
                     span {
                         class: "text-xs font-medium text-destructive",
-                        "Blocked"
+                        if let Some(t) = &blocked_on_title { "Blocked by \"{t}\"" } else { "Blocked" }
                     }
                 }
                 // p {
