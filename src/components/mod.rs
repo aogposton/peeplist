@@ -9,6 +9,7 @@ pub use moment::NotesSectionCmp;
 pub use moment::ab_task_cmp;
 pub use moment::PriorityViewCmp;
 pub use moment::DueViewCmp;
+pub use moment::ScheduledViewCmp;
 pub use moment::UrgencySettingsCmp;
 
 mod sidebar;

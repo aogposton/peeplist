@@ -67,6 +67,12 @@ pub fn CheckboxCmp(props: CheckboxProps) -> Element {
 
 #[component]
 pub fn NotesSectionCmp(props: MomentListProps) -> Element {
+    // Nothing to show, nothing to render — an empty collapsed shell was
+    // just visual noise for the common case of a person/tag with no notes
+    // at all.
+    if !props.moments.iter().any(|m| m.moment_type_id == 3i64) {
+        return rsx! {};
+    }
     let mut show_menu = use_signal(|| false);
     let mut menu_coords = use_signal(|| (0.0, 0.0));
     let mut last_moment_right_clicked_id = use_signal(String::new);
@@ -155,6 +161,9 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
 }
 #[component]
 pub fn CompletedSectionCmp(props: MomentListProps) -> Element {
+    if !props.moments.iter().any(|m| m.completed_at.is_some()) {
+        return rsx! {};
+    }
     let mut show_menu = use_signal(|| false);
     let mut menu_coords = use_signal(|| (0.0, 0.0));
     //
@@ -1836,6 +1845,76 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
                 }
             }
             queue.push(dep_id);
+        }
+    }
+}
+
+// Taskwarrior's "waiting" concept: moments given a future scheduled_at (via
+// the scheduled: quick-capture keyword) so they're off your mind until
+// that date, with somewhere to go check on all of them at once in the
+// meantime. Nothing currently hides a scheduled moment from the normal
+// list before its date arrives — this is a review view, not a filter.
+#[component]
+pub fn ScheduledViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut current_moment = state.current_moment;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    let now = chrono::Utc::now();
+
+    let mut scheduled: Vec<(MomentType, chrono::DateTime<chrono::Utc>)> = moments.read().iter()
+        .filter(|m| m.completed_at.is_none())
+        .filter_map(|m| {
+            let s = m.metadata.as_ref()?.scheduled_at.as_ref()?;
+            let dt = chrono::DateTime::parse_from_rfc3339(s).ok()?.with_timezone(&chrono::Utc);
+            Some((m.clone(), dt))
+        })
+        .collect();
+    scheduled.sort_by_key(|(_, dt)| *dt);
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+            if scheduled.is_empty() {
+                div {
+                    class: "text-sm text-muted-foreground text-center py-8",
+                    "Nothing scheduled for later right now."
+                }
+            } else {
+                for (m, dt) in scheduled.iter() {
+                    div {
+                        key: "{m.id}",
+                        class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                        onclick: {
+                            let m = m.clone();
+                            move |_| {
+                                current_moment.set(Some(m.clone()));
+                                activity_bar_view.set(ABView::Task);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
+                        },
+                        div {
+                            class: "flex flex-col min-w-0",
+                            span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                        }
+                        span {
+                            class: "text-xs text-muted-foreground shrink-0",
+                            if *dt <= now { "Arrived" } else { "{dt.format(\"%b %d\")}" }
+                        }
+                    }
+                }
+            }
         }
     }
 }

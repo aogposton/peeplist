@@ -27,6 +27,9 @@ pub fn fa_compass() -> Element { rsx! { i { class: "fa-solid fa-compass" } } }
 #[component]
 pub fn fa_calendar() -> Element { rsx! { i { class: "fa-solid fa-calendar-days" } } }
 
+#[component]
+pub fn fa_clock() -> Element { rsx! { i { class: "fa-solid fa-clock" } } }
+
 // ----- Slider
 #[derive(Props, Clone, PartialEq)]
 pub struct GravitySelectProps {

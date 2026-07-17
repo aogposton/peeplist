@@ -48,6 +48,15 @@ pub fn views_list_cmp() -> Element {
                 class: NAV_LINK_ICON_CLASS,
                 onclick: move |_| {
                     current_entity.set(None);
+                    currentView.set(View::Scheduled);
+                },
+                fa_clock { }
+                span { "Scheduled" }
+            }
+            a {
+                class: NAV_LINK_ICON_CLASS,
+                onclick: move |_| {
+                    current_entity.set(None);
                     currentView.set(View::Distance);
                 },
                 fa_compass { }
