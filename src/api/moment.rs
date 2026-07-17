@@ -15,16 +15,16 @@ pub async fn deleteReaction(mut reaction: ReactionType,token: String) -> Result<
     Ok(())
 }
 
-pub async fn deleteMoment(mut moment: MomentType,token: String) -> Result<(), reqwest::Error> {
-    moment.deleted_at = Some(chrono::Utc::now().to_string());
-
-    let response = SupabaseClient::new(token)
-        .patch("moments", &moment.id)
-        .json(&moment)
-        .send()
-        .await?;
-
-    Ok(())
+pub async fn deleteMoment(moment: MomentType, token: String) -> Result<(), reqwest::Error> {
+    // Soft delete: was PATCHing the whole `moment` struct, which includes
+    // `reactions` — not a real column on the `moments` table (it's only
+    // populated client-side via the `select=*,reactions(*)` embed on
+    // fetch) — so PostgREST rejected every delete with an unknown-column
+    // error. It also stamped `deleted_at` with `to_string()` instead of
+    // `to_rfc3339()`, which isn't valid timestamptz input either. Routing
+    // through the same single-field patch every other edit already uses
+    // sidesteps both.
+    update_moment_field(moment.id, "deleted_at", serde_json::json!(chrono::Utc::now().to_rfc3339()), token).await
 }
 
 pub async fn createMoment(moment: NewMomentType,token: String) -> Result<MomentType, reqwest::Error> {
