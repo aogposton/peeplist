@@ -904,10 +904,18 @@ pub fn ab_task_cmp() -> Element {
     let moment_sig = use_signal(|| moment.clone());
     let mut reactions = use_signal(|| moment.reactions.clone().unwrap_or_default());
     let id = moment.id.clone();
-    let description = moment.description;
-    let title = moment.title;
-    let gravity = moment.gravity.unwrap_or(0);
-    let due_at = moment.due_at;
+    // Read live off `moments` by id, not off the one-time `moment` snapshot
+    // — same staleness class already fixed for depends_on/metadata below.
+    // Any moments.write() while this panel is open (including this panel's
+    // own other field edits) re-renders this component, and a field still
+    // computed from the stale snapshot snaps back to whatever it was when
+    // the panel first opened — gravity_select visibly "resetting to 1"
+    // after every edit was this exact bug.
+    let live_moment = moments.read().iter().find(|m| m.id == id).cloned().unwrap_or_else(|| moment.clone());
+    let description = live_moment.description.clone();
+    let title = live_moment.title.clone();
+    let gravity = live_moment.gravity.unwrap_or(0);
+    let due_at = live_moment.due_at.clone();
     let mut ReactionForm = use_signal(ReactionForm::default);
 
     let moment_kind = match moment.moment_type_id {
@@ -1004,7 +1012,7 @@ pub fn ab_task_cmp() -> Element {
             }
 
             div {
-                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1",
+                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1 min-h-0",
 
                 if moment.moment_type_id != 3i64 {
                     div {
@@ -1029,7 +1037,7 @@ pub fn ab_task_cmp() -> Element {
                         for _key in [id.clone()] {
                         CheckboxCmp {
                             key: "{_key}",
-                            checked: moment.completed_at.clone().is_some(),
+                            checked: live_moment.completed_at.is_some(),
                             disabled: is_blocked,
                             on_change: {
                                 let id = id.clone();

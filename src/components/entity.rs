@@ -320,7 +320,7 @@ pub fn ab_history_cmp() -> Element {
             }
 
             div {
-                class: "flex flex-col gap-3 px-4 py-4 overflow-y-auto flex-1",
+                class: "flex flex-col gap-3 px-4 py-4 overflow-y-auto flex-1 min-h-0",
                 if entity_moments.is_empty() {
                     div {
                         class: "text-sm text-muted-foreground text-center py-8",
@@ -455,7 +455,7 @@ pub fn ab_stats_cmp() -> Element {
                 }
             }
             div {
-                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1",
+                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1 min-h-0",
                 div {
                     class: "rounded-lg border border-border p-4",
                     h3 {
@@ -556,7 +556,7 @@ pub fn ab_info_cmp() -> Element {
                 }
             }
             div {
-                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1",
+                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1 min-h-0",
                 div {
                     class: "rounded-lg border border-border p-4",
                     div {
