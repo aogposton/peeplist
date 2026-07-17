@@ -14,6 +14,7 @@ use crate::components::{
     GraphViewCmp,
     DistanceViewCmp,
     DueViewCmp,
+    ScheduledViewCmp,
 };
 
 use crate::api::ActiveStorage;
@@ -32,6 +33,8 @@ pub fn Home() -> Element {
     let tag_filter = state.tag_filter;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
+    let mut hide_notes = state.hide_notes;
+    let mut hide_completed = state.hide_completed;
 
     let has_tag = |m: &MomentType, tag: &str| {
         m.metadata.as_ref().is_some_and(|meta| meta.tags.iter().any(|t| t == tag))
@@ -77,8 +80,21 @@ pub fn Home() -> Element {
                         div { class: "hidden xl:block", MomentInputCmp { } }
                         div {class:"h-4"}
                         MomentListCmp { moments: visible.clone() }
-                        NotesSectionCmp { moments: visible.clone() }
-                        CompletedSectionCmp { moments: visible }
+                        div {
+                            class: "flex items-center gap-3 px-5 mb-1",
+                            a {
+                                class: "text-xs text-muted-foreground hover:text-foreground cursor-pointer",
+                                onclick: move |_| { let v = *hide_notes.read(); hide_notes.set(!v); },
+                                if *hide_notes.read() { "Show notes" } else { "Hide notes" }
+                            }
+                            a {
+                                class: "text-xs text-muted-foreground hover:text-foreground cursor-pointer",
+                                onclick: move |_| { let v = *hide_completed.read(); hide_completed.set(!v); },
+                                if *hide_completed.read() { "Show completed" } else { "Hide completed" }
+                            }
+                        }
+                        if !*hide_notes.read() { NotesSectionCmp { moments: visible.clone() } }
+                        if !*hide_completed.read() { CompletedSectionCmp { moments: visible } }
                     }
                 },
                 Entity => {
@@ -93,8 +109,21 @@ pub fn Home() -> Element {
                         div { class: "hidden xl:block", MomentInputCmp { } }
                         div {class:"h-4"}
                         MomentListCmp { moments: visible.clone() }
-                        NotesSectionCmp { moments: visible.clone() }
-                        CompletedSectionCmp { moments: visible }
+                        div {
+                            class: "flex items-center gap-3 px-5 mb-1",
+                            a {
+                                class: "text-xs text-muted-foreground hover:text-foreground cursor-pointer",
+                                onclick: move |_| { let v = *hide_notes.read(); hide_notes.set(!v); },
+                                if *hide_notes.read() { "Show notes" } else { "Hide notes" }
+                            }
+                            a {
+                                class: "text-xs text-muted-foreground hover:text-foreground cursor-pointer",
+                                onclick: move |_| { let v = *hide_completed.read(); hide_completed.set(!v); },
+                                if *hide_completed.read() { "Show completed" } else { "Hide completed" }
+                            }
+                        }
+                        if !*hide_notes.read() { NotesSectionCmp { moments: visible.clone() } }
+                        if !*hide_completed.read() { CompletedSectionCmp { moments: visible } }
                     }
                 },
                 Priority => rsx! {
@@ -126,6 +155,14 @@ pub fn Home() -> Element {
                         p { class: "text-sm text-muted-foreground mb-4", "What's overdue, due today, or coming up this week." }
                     }
                     DueViewCmp { }
+                },
+                Scheduled => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Scheduled" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Waiting to come back into view — check on these before they arrive." }
+                    }
+                    ScheduledViewCmp { }
                 }
             }
         }

@@ -359,6 +359,7 @@ pub fn Navbar() -> Element {
         Graph => "".to_string(),
         Distance => "".to_string(),
         Due => "".to_string(),
+        Scheduled => "".to_string(),
     };
 
     rsx! {

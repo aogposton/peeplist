@@ -70,6 +70,7 @@ pub enum View {
     Graph,
     Distance,
     Due,
+    Scheduled,
 }
 
 #[derive(Clone, PartialEq)]
@@ -114,6 +115,7 @@ impl fmt::Display for View {
             View::Graph => write!(f, "Graph"),
             View::Distance => write!(f, "Distance"),
             View::Due => write!(f, "Due"),
+            View::Scheduled => write!(f, "Scheduled"),
         }
     }
 }
@@ -135,6 +137,10 @@ pub struct AppState {
     pub user_email: Signal<Option<String>>,
     pub backdropTgl: Signal<bool>,
     pub tag_filter: Signal<Option<String>>,
+    // Not persisted (same as tag_filter above) — resets on reload, unlike
+    // sort_mode/active_vault/urgency_weights below.
+    pub hide_notes: Signal<bool>,
+    pub hide_completed: Signal<bool>,
     pub sort_mode: Signal<SortMode>,
     // Local-first pivot Phase 1b (see memory reference_local_first_pivot_plan).
     // Defaults to Synced, not Local as the plan's eventual design intends —
@@ -173,6 +179,8 @@ fn App() -> Element {
         user_email: Signal::new(None::<String>),
         backdropTgl: Signal::new(false),
         tag_filter: Signal::new(None::<String>),
+        hide_notes: Signal::new(false),
+        hide_completed: Signal::new(false),
         sort_mode: Signal::new(SortMode::Default),
         active_vault: Signal::new(VaultKind::Synced),
         urgency_weights: Signal::new(UrgencyWeights::default()),
