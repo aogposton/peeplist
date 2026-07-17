@@ -98,6 +98,7 @@ pub fn entity_list_cmp() -> Element {
     let mut entityModalTgl = state.entityModalTgl;
     let mut tag_filter = state.tag_filter;
     let mut project_filter = state.project_filter;
+    let mut expanded = use_signal(|| true);
 
     // The self entity (see api::is_self_entity) is always present once a
     // vault's been opened — it's not a "real" person you'd add/click on
@@ -113,7 +114,12 @@ pub fn entity_list_cmp() -> Element {
             class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
             div {
                 class: "flex items-center justify-between px-3 mb-1",
-                span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground", "Entities" }
+                span {
+                    class: "flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground cursor-pointer select-none",
+                    onclick: move |_| { let v = *expanded.read(); expanded.set(!v); },
+                    span { class: "text-[10px]", if *expanded.read() { "▾" } else { "▸" } }
+                    "Entities"
+                }
                 button {
                     class: "h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer",
                     title: "Add entity",
@@ -121,6 +127,7 @@ pub fn entity_list_cmp() -> Element {
                     fa_plus {}
                 }
             }
+            if *expanded.read() {
             if visible_entities.is_empty() {
                 span {
                     class: "px-3 text-xs text-muted-foreground",
@@ -150,6 +157,7 @@ pub fn entity_list_cmp() -> Element {
                     }
                 }
             }
+            }
         }
     }
 }
@@ -162,6 +170,7 @@ pub fn tag_list_cmp() -> Element {
     let mut project_filter = state.project_filter;
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
+    let mut expanded = use_signal(|| true);
 
     let mut tags: Vec<String> = moments.read().iter()
         .filter_map(|m| m.metadata.as_ref())
@@ -173,7 +182,13 @@ pub fn tag_list_cmp() -> Element {
     rsx! {
         div {
             class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
-            span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1", "Tags" }
+            span {
+                class: "flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1 cursor-pointer select-none",
+                onclick: move |_| { let v = *expanded.read(); expanded.set(!v); },
+                span { class: "text-[10px]", if *expanded.read() { "▾" } else { "▸" } }
+                "Tags"
+            }
+            if *expanded.read() {
             if tags.is_empty() {
                 span {
                     class: "px-3 text-xs text-muted-foreground",
@@ -211,6 +226,7 @@ pub fn tag_list_cmp() -> Element {
                     }
                 }
             }
+            }
         }
     }
 }
@@ -227,6 +243,7 @@ pub fn project_list_cmp() -> Element {
     let mut project_filter = state.project_filter;
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
+    let mut expanded = use_signal(|| true);
 
     let mut projects: Vec<String> = moments.read().iter()
         .filter_map(|m| m.metadata.as_ref())
@@ -239,7 +256,13 @@ pub fn project_list_cmp() -> Element {
     rsx! {
         div {
             class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
-            span { class: "text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1", "Projects" }
+            span {
+                class: "flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1 cursor-pointer select-none",
+                onclick: move |_| { let v = *expanded.read(); expanded.set(!v); },
+                span { class: "text-[10px]", if *expanded.read() { "▾" } else { "▸" } }
+                "Projects"
+            }
+            if *expanded.read() {
             if projects.is_empty() {
                 span {
                     class: "px-3 text-xs text-muted-foreground",
@@ -270,6 +293,7 @@ pub fn project_list_cmp() -> Element {
                         "{project}"
                     }
                 }
+            }
             }
         }
     }
