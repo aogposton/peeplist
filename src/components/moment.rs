@@ -763,8 +763,9 @@ pub fn MomentInputCmp() -> Element {
                     class: "flex-1",
                     QuickCaptureInput {
                         value: title.read().clone(),
-                        placeholder: "Title · @name pri:H due:tomorrow +tag ;t;/;p;/;n;".to_string(),
+                        placeholder: "Title · @name pri:H due:tomorrow +tag ;t;/;p;/;n; deps:".to_string(),
                         entities: entities.read().clone(),
+                        moments: moments.read().clone(),
                         on_input: move |v: String| {
                             // A completed @mention should be reflected on
                             // the right-hand selector immediately, not just
@@ -884,6 +885,10 @@ pub struct QuickCaptureInputProps {
     pub value: String,
     pub placeholder: String,
     pub entities: Vec<EntityType>,
+    // For the depends:/deps: dropdown — matched by title, same live-search
+    // treatment as @mention gets for entities, so "no way I'm going to
+    // remember whole task names" isn't a real constraint anymore.
+    pub moments: Vec<MomentType>,
     pub on_input: EventHandler<String>,
     pub on_submit: EventHandler<()>,
     // Tab, when the @-mention dropdown isn't open (Tab has its existing job
@@ -963,6 +968,28 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     let tokens = quick_capture::tokenize(&value, &props.entities);
 
     let mention = quick_capture::trailing_mention_query(&value);
+    // Mutually exclusive with @mentions — both are "is the trailing word a
+    // live fragment of a specific prefix", and a word can only start with
+    // one prefix at a time, so only check for a depends: query when there
+    // isn't already a mention in progress.
+    let depends_query = if mention.is_none() { quick_capture::trailing_depends_query(&value) } else { None };
+    let is_depends_mode = depends_query.is_some();
+    let dep_matches: Vec<MomentType> = match &depends_query {
+        Some(d) => {
+            let q_lower = d.query.to_lowercase();
+            let mut list: Vec<MomentType> = props.moments.iter()
+                .filter(|m| m.completed_at.is_none())
+                .filter(|m| m.title.to_lowercase().contains(&q_lower))
+                .cloned()
+                .collect();
+            list.sort_by_key(|m| (!m.title.to_lowercase().starts_with(&q_lower), m.title.to_lowercase()));
+            list.truncate(8);
+            list
+        }
+        None => Vec::new(),
+    };
+    let depends_start = depends_query.map(|d| d.start).unwrap_or(0);
+
     let mention_query = mention.as_ref().map(|m| m.query.to_string());
     let matches: Vec<EntityType> = match &mention {
         Some(m) => {
@@ -987,8 +1014,11 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
         .filter(|q| !q.is_empty())
         .is_some_and(|q| !matches.iter().any(|e| e.name.to_lowercase() == q.to_lowercase()));
     let add_new_name = mention_query.as_deref().map(str::trim).unwrap_or("").to_string();
-    let dropdown_open = !matches.is_empty() || show_add_new;
-    let option_count = matches.len() + if show_add_new { 1 } else { 0 };
+    // is_depends_mode alone (not just !dep_matches.is_empty()) keeps the
+    // dropdown open even with zero candidates, so "No matching open tasks"
+    // below can actually render instead of just silently doing nothing.
+    let dropdown_open = !matches.is_empty() || show_add_new || is_depends_mode;
+    let option_count = if is_depends_mode { dep_matches.len() } else { matches.len() + if show_add_new { 1 } else { 0 } };
     if dropdown_open && *highlighted.read() >= option_count {
         highlighted.set(0);
     }
@@ -1014,8 +1044,9 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                     let value = value.clone();
                     let matches = matches.clone();
                     let add_new_name = add_new_name.clone();
+                    let dep_matches = dep_matches.clone();
                     move |e: Event<KeyboardData>| {
-                        if dropdown_open {
+                        if dropdown_open && option_count > 0 {
                             match e.key() {
                                 Key::ArrowDown => {
                                     e.prevent_default();
@@ -1030,7 +1061,11 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                                 Key::Enter | Key::Tab => {
                                     e.prevent_default();
                                     let h = *highlighted.read();
-                                    if h < matches.len() {
+                                    if is_depends_mode {
+                                        if let Some(m) = dep_matches.get(h) {
+                                            on_input.call(quick_capture::apply_depends(&value, depends_start, &m.title));
+                                        }
+                                    } else if h < matches.len() {
                                         apply_selected_mention(&value, mention_start, &matches, h, on_input);
                                     } else if show_add_new {
                                         apply_add_new_mention(&value, mention_start, &add_new_name, on_input, on_add_entity);
@@ -1091,6 +1126,27 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                                 }
                             },
                             "+ Add \"{add_new_name}\""
+                        }
+                    }
+                    for (i, dep) in dep_matches.iter().enumerate() {
+                        div {
+                            key: "{dep.id}",
+                            class: if i == *highlighted.read() { "px-3 py-1.5 text-sm cursor-pointer bg-muted" } else { "px-3 py-1.5 text-sm cursor-pointer" },
+                            onmousedown: {
+                                let value = value.clone();
+                                let title = dep.title.clone();
+                                move |e: Event<MouseData>| {
+                                    e.prevent_default();
+                                    on_input.call(quick_capture::apply_depends(&value, depends_start, &title));
+                                }
+                            },
+                            "{dep.title}"
+                        }
+                    }
+                    if is_depends_mode && dep_matches.is_empty() {
+                        div {
+                            class: "px-3 py-1.5 text-sm text-muted-foreground",
+                            "No matching open tasks"
                         }
                     }
                 }
