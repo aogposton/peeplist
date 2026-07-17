@@ -107,6 +107,44 @@ struct VaultEntry {
     removable: bool,
 }
 
+// Desktop already writes real files under ~/Documents/Peeplist — this is
+// specifically the web build's missing "get my data back out" path, since
+// `#[cfg]` can't gate code directly inside an `rsx!` block, so the two
+// variants live as separate components instead of an inline `#[cfg]` split.
+#[cfg(not(feature = "desktop"))]
+#[component]
+fn ExportVaultMenuItem(mut export_text: Signal<Option<String>>, index: usize) -> Element {
+    rsx! {
+        DropdownSeparator {}
+        DropdownItem::<String> {
+            value: "export".to_string(),
+            index: index,
+            on_select: move |_| {
+                spawn(async move {
+                    match crate::api::export_local_vault().await {
+                        Ok(files) => {
+                            let bundle = files.into_iter()
+                                .map(|(name, content)| format!("--- FILE: {name} ---\n{content}"))
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            export_text.set(Some(bundle));
+                        }
+                        Err(e) => export_text.set(Some(format!("Export failed: {e}"))),
+                    }
+                });
+            },
+            "Export local vault ↓"
+        }
+    }
+}
+
+#[cfg(feature = "desktop")]
+#[component]
+fn ExportVaultMenuItem(export_text: Signal<Option<String>>, index: usize) -> Element {
+    let _ = (export_text, index);
+    rsx! {}
+}
+
 #[component]
 pub fn vault_switcher_cmp() -> Element {
     let state = use_context::<AppState>();
@@ -117,6 +155,7 @@ pub fn vault_switcher_cmp() -> Element {
     let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
     let mut import_status = use_signal(|| None::<String>);
     let mut importing = use_signal(|| false);
+    let mut export_text = use_signal(|| None::<String>);
 
     let entries: Vec<VaultEntry> = {
         let mut v = vec![VaultEntry { kind: VaultKind::Local, label: "Local".to_string(), removable: false }];
@@ -284,12 +323,33 @@ pub fn vault_switcher_cmp() -> Element {
                                 if *importing.read() { "Importing local vault…" } else { "Import local vault →" }
                             }
                         }
+                        ExportVaultMenuItem { export_text, index: entries.len() + 2 }
                     }
                 }
                 if let Some(msg) = import_status.read().clone() {
                     div {
                         class: "px-2 pt-1.5 text-xs text-muted-foreground",
                         "{msg}"
+                    }
+                }
+                if let Some(text) = export_text.read().clone() {
+                    div {
+                        class: "px-2 pt-2 flex flex-col gap-1.5",
+                        div {
+                            class: "flex items-center justify-between",
+                            span { class: "text-xs text-muted-foreground", "Select all and copy — this is every file in your local vault, byte for byte." }
+                            a {
+                                class: "text-xs text-muted-foreground hover:text-foreground cursor-pointer shrink-0 pl-2",
+                                onclick: move |_| export_text.set(None),
+                                "Close"
+                            }
+                        }
+                        textarea {
+                            class: "w-full h-40 rounded-md border border-input bg-background text-xs font-mono text-foreground p-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            readonly: true,
+                            value: "{text}",
+                            onclick: move |e| e.stop_propagation(),
+                        }
                     }
                 }
             }

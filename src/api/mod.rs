@@ -19,6 +19,14 @@ pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_to
 pub use storage::{ActiveStorage, VaultKind, StorageError, is_self_entity};
 pub use import::{import_local_into_synced, ImportSummary};
 
+// Desktop already writes real files under ~/Documents/Peeplist — this is
+// specifically the web build's missing "get my data back out" path, since
+// a web Local vault only ever exists inside localStorage otherwise.
+#[cfg(not(feature = "desktop"))]
+pub async fn export_local_vault() -> Result<Vec<(String, String)>, StorageError> {
+    local::LocalStorage::new().export_all().await
+}
+
 // The `entities`/`moments` tables still have `bigint` FK columns
 // (entity_id, depends_on, entity_type_id, parent_entity_id) even though the
 // app's ids are now Strings app-wide (see types.rs's de_flex_id/se_flex_id).

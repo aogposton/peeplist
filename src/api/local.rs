@@ -168,6 +168,27 @@ impl LocalStorage {
         Ok(self.all(&storage).into_iter().map(|f| f.entity).collect())
     }
 
+    // Web has no way to get data back out today — the desktop build already
+    // writes real files under ~/Documents/Peeplist, but a web vault only
+    // exists in localStorage, with no export path at all. Bundles every
+    // entity's exact rendered file content (frontmatter + freeform body,
+    // byte-for-byte what render_entity_file produces — same thing the
+    // desktop build would write to disk for the same data) so nothing is
+    // lost, not even notes typed into a file's freeform section.
+    pub async fn export_all(&self) -> Result<Vec<(String, String)>, StorageError> {
+        let storage = local_storage()?;
+        self.ensure_self_entity(&storage)?;
+        Ok(self.all(&storage).into_iter().map(|f| {
+            let filename = if f.entity.id == LOCAL_SELF_ENTITY_ID {
+                vault_format::SELF_FILENAME.to_string()
+            } else {
+                vault_format::entity_filename(&f.entity.name, &f.entity.id)
+            };
+            let rendered = vault_format::render_entity_file(&f.entity, &f.moments, &f.body);
+            (filename, rendered)
+        }).collect())
+    }
+
     pub async fn get_entity_types(&self) -> Result<Vec<EntityTypeType>, StorageError> {
         let storage = local_storage()?;
         let mut names: Vec<String> = self.all(&storage).into_iter().filter_map(|f| f.entity.entity_type_id).collect();
