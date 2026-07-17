@@ -179,13 +179,19 @@ pub fn DistanceViewCmp() -> Element {
 pub fn entity_view_cmp() -> Element {
     let state = use_context::<AppState>();
     let current_entity = state.current_entity;
+    let tag_filter = state.tag_filter;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut activity_bar_view = state.activity_bar_view;
     let mut backdropTgl = state.backdropTgl;
     let mut is_graphs_open = use_signal(|| false);
 
     let entity = current_entity();
-    let name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
+    // A tag is a real list, not just a filter — its name belongs at the top
+    // the same way an entity's does, instead of a generic "All" that hides
+    // which list you're actually looking at.
+    let name = entity.as_ref().map(|e| e.name.clone())
+        .or_else(|| tag_filter.read().clone())
+        .unwrap_or_else(|| "All".to_string());
     let initial = name.chars().next().unwrap_or('?').to_uppercase().to_string();
 
     let tab_variant = |open: bool| if open { ButtonVariant::Secondary } else { ButtonVariant::Ghost };
