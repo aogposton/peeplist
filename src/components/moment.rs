@@ -703,7 +703,21 @@ pub fn MomentInputCmp() -> Element {
                         value: title.read().clone(),
                         placeholder: "Title  ·  try @name, priority:H, due:tomorrow, +tag".to_string(),
                         entities: entities.read().clone(),
-                        on_input: move |v: String| title.set(v),
+                        on_input: move |v: String| {
+                            // A completed @mention should be reflected on
+                            // the right-hand selector immediately, not just
+                            // silently honored at submit time — otherwise
+                            // there's no visible confirmation of who the
+                            // moment is actually going to before you hit
+                            // enter.
+                            if let Some(entity_id) = quick_capture::parse(&v, &entities.read()).entity_id {
+                                if let Some(entity) = entities.read().iter().find(|e| e.id == entity_id) {
+                                    selected_entity.set(Some(entity.name.clone()));
+                                    form.write().entity_sel = entity_id.clone();
+                                }
+                            }
+                            title.set(v);
+                        },
                         on_submit: move |_| submit_moment(),
                     }
                 }
@@ -788,6 +802,31 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     let on_input = props.on_input;
     let on_submit = props.on_submit;
 
+    // The real <input>'s text scrolls internally once typing overflows the
+    // visible width (native browser behavior) — invisible here since its
+    // text is transparent, but the colored overlay below is a totally
+    // separate div with no knowledge of that scroll at all, so it just sat
+    // frozen while the (invisible) real caret kept advancing off-screen.
+    // Mirrors the real input's scrollLeft onto the overlay's text via a
+    // transform on every keystroke/click, so the two stay visually locked
+    // together instead of drifting apart — which on iOS/Safari is also
+    // almost certainly why a cursor-like element looked "unattached" from
+    // the input box: the overlay text the user was actually looking at
+    // wasn't moving while the real (invisible) input + native caret
+    // scrolled correctly underneath it.
+    let mut input_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
+    let mut scroll_x = use_signal(|| 0.0f64);
+    let sync_scroll = move || {
+        spawn(async move {
+            let el = input_el.read().clone();
+            if let Some(el) = el {
+                if let Ok(offset) = el.get_scroll_offset().await {
+                    scroll_x.set(offset.x);
+                }
+            }
+        });
+    };
+
     let tokens = quick_capture::tokenize(&value, &props.entities);
 
     let mention = quick_capture::trailing_mention_query(&value);
@@ -820,7 +859,13 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                 style: "color: transparent; caret-color: {BaseFont};",
                 placeholder: "{props.placeholder}",
                 value: "{value}",
-                oninput: move |e| on_input.call(e.value()),
+                onmounted: move |e| input_el.set(Some(e.data())),
+                oninput: move |e| {
+                    on_input.call(e.value());
+                    sync_scroll();
+                },
+                onclick: move |_| sync_scroll(),
+                onkeyup: move |_| sync_scroll(),
                 onkeydown: {
                     let value = value.clone();
                     let matches = matches.clone();
@@ -851,11 +896,14 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
             }
             div {
                 class: "absolute inset-0 flex items-center pointer-events-none px-3 text-sm whitespace-pre overflow-hidden",
-                for (i, token) in tokens.iter().enumerate() {
-                    span {
-                        key: "{i}",
-                        style: if token.kind.is_recognized() { format!("color: {HL}; font-weight: 600;") } else { format!("color: {BaseFont};") },
-                        "{token.text}"
+                div {
+                    style: "transform: translateX(-{scroll_x}px);",
+                    for (i, token) in tokens.iter().enumerate() {
+                        span {
+                            key: "{i}",
+                            style: if token.kind.is_recognized() { format!("color: {HL}; font-weight: 600;") } else { format!("color: {BaseFont};") },
+                            "{token.text}"
+                        }
                     }
                 }
             }
