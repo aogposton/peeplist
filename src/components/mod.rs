@@ -16,6 +16,7 @@ mod sidebar;
 pub use sidebar::views_list_cmp;
 pub use sidebar::entity_list_cmp;
 pub use sidebar::tag_list_cmp;
+pub use sidebar::project_list_cmp;
 
 mod entity;
 pub use entity::EntityModalCmp;

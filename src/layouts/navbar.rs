@@ -20,6 +20,7 @@ use crate::components::{
     views_list_cmp,
     entity_list_cmp,
     tag_list_cmp,
+    project_list_cmp,
     NotesSectionCmp,
 };
 
@@ -73,14 +74,8 @@ pub fn Sidebar() -> Element {
                 views_list_cmp { }
             }
             entity_list_cmp { }
-            div {
-                class: "px-3 mt-6 pt-4 border-t border-border",
-                span {
-                    class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
-                    "Tags"
-                }
-                tag_list_cmp { }
-            }
+            project_list_cmp { }
+            tag_list_cmp { }
         }
     }
 }
@@ -431,14 +426,8 @@ pub fn Navbar() -> Element {
                         views_list_cmp { }
                     }
                     entity_list_cmp { }
-                    div {
-                        class: "px-3 mt-6 pt-4 border-t border-border",
-                        span {
-                            class: "block px-3 mb-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground",
-                            "Tags"
-                        }
-                        tag_list_cmp { }
-                    }
+                    project_list_cmp { }
+                    tag_list_cmp { }
                 }
                 div {
                     class: "xl:w-2/3 w-full overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black/30",
