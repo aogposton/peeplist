@@ -110,7 +110,17 @@ pub fn LoginCMP() -> Element {
 
     rsx! {
         div {
-            class: "flex justify-center items-center w-full h-screen bg-background",
+            // min-h-screen (not h-screen) + overflow-y-auto: h-screen is a
+            // rigid box sized to the *layout* viewport, which on mobile
+            // Safari/Chrome doesn't shrink when the on-screen keyboard opens
+            // (only the visual viewport does) or reliably matches what's
+            // actually visible before any address-bar collapse. A flex-
+            // centered card in a rigid h-screen can render below the fold
+            // with no way to scroll to it — exactly "the Login button isn't
+            // pressable on mobile". min-h-screen lets the box grow past one
+            // viewport if it has to, and overflow-y-auto makes sure it can
+            // actually be scrolled into view when that happens.
+            class: "flex justify-center items-center w-full min-h-screen overflow-y-auto bg-background py-8",
             div {
                 class: "w-full max-w-sm p-8 flex flex-col gap-y-5 rounded-lg border border-border bg-card shadow-sm",
                 div {
