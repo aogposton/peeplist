@@ -28,10 +28,13 @@ fn stat_row(label: &str, value: &str) -> Element {
 // Every entity starts BASE_DISTANCE units away and grows further apart at
 // `drift` units/day since the entity was created (day 1 = 10, day 2 = 12,
 // day 3 = 14 for drift=2 — additive, not a ratio). Distance closes back up
-// when something happens: a completed task/promise, or a note that carries
+// when something happens: a completed task/promise, a note that carries
 // a non-zero gravity (logged-but-never-"completed" events, like someone
-// bringing you flowers, still count). Closing amount is |gravity| scaled
-// down — GRAVITY_DISTANCE_DIVISOR is a first-draft tuning knob, not final.
+// bringing you flowers, still count), or reactions logged on ANY of the
+// entity's moments (reactions are a lighter-weight, in-the-moment signal
+// that isn't gated on moment type or completion the way gravity is).
+// Closing amount is |gravity| (or reaction value) scaled down —
+// GRAVITY_DISTANCE_DIVISOR is a first-draft tuning knob, not final.
 const BASE_DISTANCE: f64 = 10.0;
 const GRAVITY_DISTANCE_DIVISOR: f64 = 20.0;
 
@@ -45,8 +48,9 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
     let drift = if entity.drift > 0.0 { entity.drift } else { 2.0 };
     let grown = BASE_DISTANCE + drift * days_elapsed;
 
-    let closed: f64 = moments.iter()
-        .filter(|m| m.entity_id == entity.id)
+    let entity_moments: Vec<&MomentType> = moments.iter().filter(|m| m.entity_id == entity.id).collect();
+
+    let closed_gravity: f64 = entity_moments.iter()
         .filter(|m| {
             let completed_task_or_promise = (m.moment_type_id == 1i64 || m.moment_type_id == 2i64) && m.completed_at.is_some();
             let noteworthy_note = m.moment_type_id == 3i64 && m.gravity.unwrap_or(0) != 0;
@@ -55,7 +59,12 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
         .map(|m| (m.gravity.unwrap_or(0).unsigned_abs() as f64) / GRAVITY_DISTANCE_DIVISOR)
         .sum();
 
-    (grown - closed).max(0.0)
+    let closed_reactions: f64 = entity_moments.iter()
+        .flat_map(|m| m.reactions.iter().flatten())
+        .map(|r| (r.value.unsigned_abs() as f64) / GRAVITY_DISTANCE_DIVISOR)
+        .sum();
+
+    (grown - closed_gravity - closed_reactions).max(0.0)
 }
 
 // entity.drift is a rate (days of Distance growth per day since the

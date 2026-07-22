@@ -6,8 +6,10 @@ use crate::api::is_self_entity;
 use super::entity::compute_distance;
 
 // You're fixed at the canvas center; every entity gets a node whose target
-// orbit radius is driven by compute_distance() (see entity.rs) — closer
-// relationships (lower distance) sit nearer the center. The physics
+// orbit radius is driven by compute_distance() (see entity.rs) — inverted
+// on purpose (higher distance sits nearer the center, lowest sits farthest)
+// per explicit user call, not a literal "distance == pixel distance" map.
+// The physics
 // (d3-force, vendored locally as assets/d3.v7.min.js — see main.rs) is run
 // once per data change via document::eval and the settled positions are
 // sent back to Rust, rather than continuously animated: this is a first
@@ -21,7 +23,6 @@ const CANVAS_SIZE: f64 = 600.0;
 const CENTER: f64 = CANVAS_SIZE / 2.0;
 const MIN_RADIUS: f64 = 70.0;
 const MAX_RADIUS: f64 = 260.0;
-const DISTANCE_CAP: f64 = 8.0;
 const MIN_ZOOM: f64 = 0.3;
 const MAX_ZOOM: f64 = 3.0;
 
@@ -89,10 +90,25 @@ pub fn GraphViewCmp() -> Element {
         computing.set(true);
         spawn(async move {
             let now = chrono::Utc::now();
-            let nodes_in: Vec<GraphNodeIn> = entity_list.iter().map(|e| {
-                let distance = compute_distance(e, &moment_list, now);
-                let radius = MIN_RADIUS + distance.min(DISTANCE_CAP) / DISTANCE_CAP * (MAX_RADIUS - MIN_RADIUS);
-                GraphNodeIn { id: e.id.clone(), target_radius: radius }
+            // Distance is normalized against the current entity set's own min/max
+            // rather than a fixed cap — compute_distance() grows unbounded with
+            // time and drift, so a fixed cap would leave nearly everyone pinned
+            // to MAX_RADIUS. This keeps the closest and farthest entity always
+            // spanning the full MIN_RADIUS..MAX_RADIUS range, at the cost of
+            // radius no longer being an absolute, session-to-session measure.
+            let distances: Vec<(String, f64)> = entity_list.iter()
+                .map(|e| (e.id.clone(), compute_distance(e, &moment_list, now)))
+                .collect();
+            let min_distance = distances.iter().map(|(_, d)| *d).fold(f64::INFINITY, f64::min);
+            let max_distance = distances.iter().map(|(_, d)| *d).fold(f64::NEG_INFINITY, f64::max);
+            let span = max_distance - min_distance;
+            let nodes_in: Vec<GraphNodeIn> = distances.iter().map(|(id, distance)| {
+                // Inverted on purpose: highest raw distance value renders closest
+                // to center, lowest renders farthest. Per-user call, not a
+                // "distance == literal pixel distance" mapping.
+                let ratio = if span > f64::EPSILON { (distance - min_distance) / span } else { 0.5 };
+                let radius = MAX_RADIUS - ratio * (MAX_RADIUS - MIN_RADIUS);
+                GraphNodeIn { id: id.clone(), target_radius: radius }
             }).collect();
 
             let eval = document::eval(LAYOUT_SCRIPT);
@@ -116,29 +132,32 @@ pub fn GraphViewCmp() -> Element {
 
     rsx! {
         div {
-            class: "px-4 pt-4",
-            h1 { class: "text-2xl font-semibold text-foreground mb-1", "Graph View" }
-            p {
-                class: "text-sm text-muted-foreground mb-4",
-                "Everyone, positioned by relationship distance — closer means less distance. Click a node to open that person. Scroll to zoom, drag to pan."
-            }
-        }
-        div {
-            class: "flex justify-center px-4 pb-8",
-            if entity_lookup.is_empty() {
-                div {
-                    class: "text-sm text-muted-foreground text-center py-16",
-                    "No entities yet — add someone to see them here."
+            class: "h-full flex flex-col",
+            div {
+                class: "px-4 pt-4",
+                h1 { class: "text-2xl font-semibold text-foreground mb-1", "Graph View" }
+                p {
+                    class: "text-sm text-muted-foreground mb-4",
+                    "Everyone, positioned by relationship distance — closer means more distance. Click a node to open that person. Scroll to zoom, drag to pan."
                 }
-            } else {
+            }
+            div {
+                class: "flex-1 min-h-0 flex justify-center px-4 pb-4",
+                if entity_lookup.is_empty() {
+                    div {
+                        class: "text-sm text-muted-foreground text-center py-16",
+                        "No entities yet — add someone to see them here."
+                    }
+                } else {
                 svg {
-                    width: "{CANVAS_SIZE}",
-                    height: "{CANVAS_SIZE}",
+                    width: "100%",
+                    height: "100%",
                     view_box: "0 0 {CANVAS_SIZE} {CANVAS_SIZE}",
+                    preserve_aspect_ratio: "xMidYMid meet",
                     class: if *dragging.read() {
-                        "border border-border rounded-lg bg-background max-w-full cursor-grabbing select-none"
+                        "border border-border rounded-lg bg-background cursor-grabbing select-none"
                     } else {
-                        "border border-border rounded-lg bg-background max-w-full cursor-grab select-none"
+                        "border border-border rounded-lg bg-background cursor-grab select-none"
                     },
                     onwheel: move |e: WheelEvent| {
                         e.prevent_default();
@@ -178,6 +197,26 @@ pub fn GraphViewCmp() -> Element {
                             class: "text-xs fill-primary-foreground font-semibold pointer-events-none",
                             "You"
                         }
+                        for radius in {
+                            let mut radii: Vec<i64> = positions.read().iter()
+                                .map(|n| {
+                                    let dx = n.x - CENTER;
+                                    let dy = n.y - CENTER;
+                                    (dx * dx + dy * dy).sqrt().round() as i64
+                                })
+                                .collect();
+                            radii.sort_unstable();
+                            radii.dedup();
+                            radii
+                        } {
+                            circle {
+                                cx: "{CENTER}",
+                                cy: "{CENTER}",
+                                r: "{radius}",
+                                class: "fill-none stroke-border/40 pointer-events-none",
+                                stroke_width: "1",
+                            }
+                        }
                         for node in positions.read().iter() {
                             {
                                 let node_id = node.id.clone();
@@ -215,6 +254,7 @@ pub fn GraphViewCmp() -> Element {
                             }
                         }
                     }
+                }
                 }
             }
         }

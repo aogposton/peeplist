@@ -102,6 +102,8 @@ pub fn vault_switcher_cmp() -> Element {
     let mut user_id = state.user_id;
     let mut user_email = state.user_email;
     let mut active_vault = state.active_vault;
+    let mut sidebarTgl = state.sidebarTgl;
+    let mut backdropTgl = state.backdropTgl;
     let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
 
     let entries: Vec<VaultEntry> = {
@@ -229,6 +231,14 @@ pub fn vault_switcher_cmp() -> Element {
                                 value: "add".to_string(),
                                 index: entries.len(),
                                 on_select: move |_| {
+                                    // On mobile the sidebar is a fixed-position drawer
+                                    // with a full-screen dimming backdrop (z-30) above
+                                    // the routed content. Navigating away without
+                                    // closing both left the backdrop up, blocking and
+                                    // hiding the login page underneath it — "the
+                                    // dropdown closes and I don't get to log in".
+                                    sidebarTgl.set(false);
+                                    backdropTgl.set(false);
                                     navigator().push(Route::LoginCMP {});
                                 },
                                 "+ Add a vault"

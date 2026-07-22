@@ -19,3 +19,6 @@ scripts/deploy.sh
 DESIGN_PROGRESS.md
 AGENTS.md
 
+# Marketing site (blackserverbook.com) — separate static site, not part of the app
+/marketing/
+

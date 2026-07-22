@@ -1354,12 +1354,11 @@ pub fn ab_task_cmp() -> Element {
                             }
                         }
                         }
-                        Input {
-                            input_type: "datetime-local",
-                            size: InputSize::Medium,
-                            class: Some("min-w-[12rem]".to_string()),
-                            value: due_at.clone().unwrap_or_default().chars().take(16).collect::<String>(),
-                            on_change: {
+                        input {
+                            r#type: "datetime-local",
+                            class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 min-w-[12rem] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            value: "{due_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
+                            onchange: {
                                 let id = id.clone();
                                 move |e: Event<FormData>| {
                                     let id = id.clone();
@@ -1492,7 +1491,7 @@ pub fn ab_task_cmp() -> Element {
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
-                                    Label { size: LabelSize::Small, "Priority" }
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Priority" }
                                     select {
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         oninput: {
@@ -1519,12 +1518,13 @@ pub fn ab_task_cmp() -> Element {
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
-                                    Label { size: LabelSize::Small, "Project" }
-                                    Input {
-                                        full_width: true,
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Project" }
+                                    input {
+                                        r#type: "text",
+                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         placeholder: "e.g. Home.Garden",
                                         value: "{current_metadata.project.clone().unwrap_or_default()}",
-                                        on_change: {
+                                        onchange: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
@@ -1544,12 +1544,12 @@ pub fn ab_task_cmp() -> Element {
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
-                                    Label { size: LabelSize::Small, "Scheduled" }
-                                    Input {
-                                        input_type: "datetime-local",
-                                        size: InputSize::Medium,
-                                        value: current_metadata.scheduled_at.clone().unwrap_or_default().chars().take(16).collect::<String>(),
-                                        on_change: {
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Scheduled" }
+                                    input {
+                                        r#type: "datetime-local",
+                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                        value: "{current_metadata.scheduled_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
+                                        onchange: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
@@ -1569,12 +1569,12 @@ pub fn ab_task_cmp() -> Element {
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
-                                    Label { size: LabelSize::Small, "Until" }
-                                    Input {
-                                        input_type: "datetime-local",
-                                        size: InputSize::Medium,
-                                        value: current_metadata.until_at.clone().unwrap_or_default().chars().take(16).collect::<String>(),
-                                        on_change: {
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Until" }
+                                    input {
+                                        r#type: "datetime-local",
+                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                        value: "{current_metadata.until_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
+                                        onchange: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
@@ -1623,16 +1623,16 @@ pub fn ab_task_cmp() -> Element {
                                     }
                                     div {
                                         class: "flex items-center gap-2",
-                                        Input {
-                                            size: InputSize::Small,
+                                        input {
+                                            r#type: "text",
+                                            class: "rounded-md border border-input bg-background text-xs text-foreground px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                             placeholder: "Add tag...",
                                             value: "{tag_input.read()}",
-                                            on_input: move |e: Event<FormData>| tag_input.set(e.value()),
+                                            oninput: move |e: Event<FormData>| tag_input.set(e.value()),
                                         }
-                                        Button {
-                                            variant: ButtonVariant::Secondary,
-                                            size: ButtonSize::Small,
-                                            on_click: {
+                                        button {
+                                            class: "rounded border border-transparent bg-secondary text-secondary-foreground text-xs px-2.5 py-1 font-medium hover:bg-secondary/80 transition-colors cursor-pointer",
+                                            onclick: {
                                                 let mut save_tags = save_tags.clone();
                                                 move |_| {
                                                     let new_tag = tag_input.read().trim().to_string();
@@ -1709,7 +1709,7 @@ pub fn ab_task_cmp() -> Element {
                     }
 
                 div {
-                    class: "rounded-lg border border-border bg-background overflow-hidden",
+                    class: "rounded-lg border border-border bg-background",
                     div {
                         class: "text-sm font-medium text-foreground px-3 py-2 border-b border-border",
                         "Reactions"
@@ -1725,7 +1725,7 @@ pub fn ab_task_cmp() -> Element {
                             }
                             div {
                                 class: "flex items-center justify-between rounded-md border border-border px-3 py-2",
-                                Label { size: LabelSize::Small, "Reaction" }
+                                label { class: "block mb-1.5 text-xs font-medium text-foreground", "Reaction" }
                                 gravity_select {
                                     ival: ReactionForm.read().value,
                                     onchange: move |e: i32| {
@@ -1733,11 +1733,10 @@ pub fn ab_task_cmp() -> Element {
                                     }
                                 }
                             }
-                            Button {
-                                variant: ButtonVariant::Secondary,
-                                full_width: true,
+                            button {
+                                class: "w-full rounded border border-transparent bg-secondary text-secondary-foreground text-sm px-4 py-1.5 font-medium hover:bg-secondary/80 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
                                 disabled: is_blocked,
-                                on_click: {
+                                onclick: {
                                     let id = id.clone();
                                     move |_| {
                                         if is_blocked {
@@ -1844,10 +1843,9 @@ pub fn ab_task_cmp() -> Element {
 
             div {
                 class: "px-4 py-3 border-t border-border shrink-0",
-                Button {
-                    variant: ButtonVariant::Destructive,
-                    full_width: true,
-                    on_click: {
+                button {
+                    class: "w-full inline-flex items-center justify-center gap-2 rounded border border-transparent bg-destructive text-primary-foreground dark:text-foreground text-sm px-4 py-1.5 font-medium hover:bg-destructive/90 transition-colors cursor-pointer",
+                    onclick: {
                         let id = id.clone();
                         move |_| {
                         // Look up live by id rather than moment_sig (a
