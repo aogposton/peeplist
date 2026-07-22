@@ -7,15 +7,6 @@
 - User can see drift velocity per entity
 - User can scrub through graph history as a timeline
 
-**Crisis View**
-
-- User can open crisis view from anywhere in the app
-- User can see their closest entities at a glance
-- User can see recent moments logged by others for them
-- User can see recent moments they have done for others
-- User can see open promises made to them
-- User can see evidence of recent positive reactions
-
 **Urgency Engine**
 
 - User can see moments sorted by urgency automatically
