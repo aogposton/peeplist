@@ -3,6 +3,7 @@ use crate::theme::*;
 use dioxus::prelude::*;
 use crate::AppState;
 use crate::ui::*;
+use crate::View;
 use crate::View::*;
 use crate::ABView;
 // use dioxus_sdk_window::size::{get_window_size, use_window_size};
@@ -104,6 +105,8 @@ pub fn vault_switcher_cmp() -> Element {
     let mut active_vault = state.active_vault;
     let mut sidebarTgl = state.sidebarTgl;
     let mut backdropTgl = state.backdropTgl;
+    let mut currentView = state.currentView;
+    let mut current_entity = state.current_entity;
     let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
 
     let entries: Vec<VaultEntry> = {
@@ -244,6 +247,16 @@ pub fn vault_switcher_cmp() -> Element {
                                 "+ Add a vault"
                             }
                         }
+                        DropdownSeparator {}
+                        DropdownItem::<String> {
+                            value: "settings".to_string(),
+                            index: entries.len() + 1,
+                            on_select: move |_| {
+                                current_entity.set(None);
+                                currentView.set(View::Settings);
+                            },
+                            "Settings"
+                        }
                     }
                 }
             }
@@ -358,6 +371,9 @@ pub fn Navbar() -> Element {
         Distance => "".to_string(),
         Due => "".to_string(),
         Scheduled => "".to_string(),
+        Settings => "".to_string(),
+        RecentlyDeleted => "".to_string(),
+        SelfEntity => "".to_string(),
     };
 
     rsx! {
@@ -422,7 +438,17 @@ pub fn Navbar() -> Element {
                 style: "background-color:{BG};",
                 class: "flex h-screen w-full",
                 div {
-                    class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-border bg-background transform translate-x-0 transition-transform duration-200",
+                    // No transform/translate here — this desktop sidebar
+                    // never animates (it's not the mobile drawer, which
+                    // does need translate-x-0/-translate-x-full to slide,
+                    // see Sidebar's own component above). A stray
+                    // translate-x-0 copy-pasted from that mobile version
+                    // was silently establishing a containing block for
+                    // every position:fixed descendant (see this sidebar's
+                    // confirmation modals in entity_list_cmp/tag_list_cmp/
+                    // project_list_cmp), pinning them inside the sidebar's
+                    // 256px box instead of centering on the real viewport.
+                    class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-border bg-background",
                     div {
                         class:"h-1",
                     }

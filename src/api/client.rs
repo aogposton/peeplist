@@ -45,6 +45,17 @@ impl SupabaseClient {
             .header("Authorization", format!("Bearer {}", self.token))
     }
 
+    // Supabase's "update user" endpoint (email/password changes) — needs
+    // the user's own access token, not the anon key, unlike auth_post
+    // (signup/login/refresh, which happen before any token exists).
+    pub fn auth_put(&self, path: &str) -> RequestBuilder {
+        self.client
+            .put(format!("{}/auth/v1/{}", self.url, path))
+            .header("apikey",self.anon_key.clone())
+            .header("Authorization", format!("Bearer {}", self.token))
+            .header("Content-Type", "application/json")
+    }
+
     pub fn get(&self, table: &str) -> RequestBuilder {
         self.client
             .get(format!("{}/rest/v1/{}", self.url, table))

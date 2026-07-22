@@ -19,6 +19,11 @@ scripts/deploy.sh
 DESIGN_PROGRESS.md
 AGENTS.md
 
+# One-off SQL fixes run directly against the hosted Supabase project — too
+# much detail about the live schema/security posture to be comfortable
+# public, even after the fix itself is live either way.
+scripts/*.sql
+
 # Marketing site (blackserverbook.com) — separate static site, not part of the app
 /marketing/
 

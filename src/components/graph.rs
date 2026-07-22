@@ -77,7 +77,7 @@ pub fn GraphViewCmp() -> Element {
 
     use_effect(move || {
         let entity_list: Vec<EntityType> = entities.read().iter()
-            .filter(|e| !is_self_entity(&e.id))
+            .filter(|e| !is_self_entity(e))
             .cloned()
             .collect();
         let moment_list = moments.read().clone();
@@ -123,7 +123,7 @@ pub fn GraphViewCmp() -> Element {
     });
 
     let entity_lookup: Vec<EntityType> = entities.read().iter()
-        .filter(|e| !is_self_entity(&e.id))
+        .filter(|e| !is_self_entity(e))
         .cloned()
         .collect();
 

@@ -140,6 +140,7 @@ impl LocalStorage {
             id: LOCAL_SELF_ENTITY_ID.to_string(),
             name: "Self".to_string(),
             entity_type_id: None,
+            parent_entity_id: None,
             created_at: now(),
             drift: 2.0,
             metadata: None,
@@ -244,6 +245,7 @@ impl LocalStorage {
             id: Uuid::new_v4().to_string(),
             name: e.name,
             entity_type_id: e.entity_type_id,
+            parent_entity_id: e.parent_entity_id,
             created_at: now(),
             drift: 2.0,
             metadata: e.metadata,
@@ -282,6 +284,30 @@ impl LocalStorage {
             return self.save(&path, &file.entity, &file.moments, &file.body);
         }
         Err(StorageError::Local(format!("no such moment in this vault: {id}")))
+    }
+
+    // See local.rs's identical method for why entity_id can't go through
+    // update_moment_field above — a moment's home file *is* the entity it
+    // belongs to here, so this actually moves it between files rather than
+    // just patching the field.
+    pub async fn reassign_moment_entity(&self, moment_id: String, new_entity_id: String) -> Result<(), StorageError> {
+        let (new_path, mut new_file) = self.find(&new_entity_id)?
+            .ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {new_entity_id}")))?;
+
+        if new_file.moments.iter().any(|m| m.id == moment_id) {
+            return Ok(());
+        }
+
+        for path in self.person_paths()?.into_iter().chain(self_path().into_iter().filter(|p| p.exists())) {
+            let Some(mut old_file) = self.load_path(&path) else { continue };
+            let Some(pos) = old_file.moments.iter().position(|m| m.id == moment_id) else { continue };
+            let mut moment = old_file.moments.remove(pos);
+            moment.entity_id = new_entity_id.clone();
+            self.save(&path, &old_file.entity, &old_file.moments, &old_file.body)?;
+            new_file.moments.push(moment);
+            return self.save(&new_path, &new_file.entity, &new_file.moments, &new_file.body);
+        }
+        Err(StorageError::Local(format!("no such moment in this vault: {moment_id}")))
     }
 
     pub async fn update_entity_field(&self, id: String, field: &str, value: Value) -> Result<(), StorageError> {
@@ -324,6 +350,44 @@ impl LocalStorage {
             log::warn!("Failed to log deleted entity to trash (deleting anyway): {e}");
         }
         fs::remove_file(&path).map_err(|e| StorageError::Local(e.to_string()))
+    }
+
+    // See local.rs's matching methods for the full rationale — same
+    // TrashEntry::Moment-only scope (whole-entity restore isn't built yet).
+    pub async fn get_deleted_moments(&self) -> Result<Vec<MomentType>, StorageError> {
+        let mut entries: Vec<(MomentType, String)> = self.load_trash().into_iter()
+            .filter_map(|entry| match entry {
+                TrashEntry::Moment { entity_id, moment, deleted_at } => {
+                    Some((vault_format::entry_to_moment(&moment, &entity_id), deleted_at))
+                }
+                TrashEntry::Entity { .. } => None,
+            })
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(entries.into_iter().map(|(m, _)| m).collect())
+    }
+
+    pub async fn restore_moment(&self, moment_id: String) -> Result<(), StorageError> {
+        let mut trash = self.load_trash();
+        let pos = trash.iter().position(|entry| matches!(
+            entry,
+            TrashEntry::Moment { moment, .. } if moment.id == moment_id
+        )).ok_or_else(|| StorageError::Local("that moment isn't in the trash".to_string()))?;
+
+        let TrashEntry::Moment { entity_id, moment, .. } = trash.remove(pos) else {
+            unreachable!("position was matched on TrashEntry::Moment above");
+        };
+
+        let (path, mut file) = self.find(&entity_id)?
+            .ok_or_else(|| StorageError::Local("the entity this moment belonged to no longer exists in this vault".to_string()))?;
+        file.moments.push(vault_format::entry_to_moment(&moment, &entity_id));
+        self.save(&path, &file.entity, &file.moments, &file.body)?;
+
+        let rendered = vault_format::render_trash(&trash).map_err(|e| StorageError::Local(e.to_string()))?;
+        let trash_p = trash_path()?;
+        let tmp = trash_p.with_extension("yaml.tmp");
+        fs::write(&tmp, rendered).map_err(|e| StorageError::Local(e.to_string()))?;
+        fs::rename(&tmp, &trash_p).map_err(|e| StorageError::Local(e.to_string()))
     }
 
     pub async fn delete_reaction(&self, reaction: ReactionType) -> Result<(), StorageError> {

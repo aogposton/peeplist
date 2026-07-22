@@ -76,6 +76,26 @@ pub async fn get_current_user(token: String) -> Result<AuthUser, String> {
     response.json::<AuthUser>().await.map_err(|e| e.to_string())
 }
 
+/// Changes the password on the currently-authenticated Supabase user.
+/// Needs the user's own access token (Supabase's /auth/v1/user PUT
+/// endpoint rejects the anon key), so this can only ever apply to the
+/// Synced vault, not Local (which has no Supabase account behind it).
+pub async fn update_password(token: String, new_password: String) -> Result<(), String> {
+    let response = SupabaseClient::new(token)
+        .auth_put("user")
+        .json(&serde_json::json!({ "password": new_password }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Password update failed ({}): {}", status, text));
+    }
+    Ok(())
+}
+
 pub async fn refresh_access_token(refresh_token: String) -> Result<LoginResponse, String> {
     let response = SupabaseClient::new("".to_string())
         .auth_post("token?grant_type=refresh_token")

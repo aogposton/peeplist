@@ -75,3 +75,21 @@ pub async fn getMoments(token: String) -> Result<Vec<MomentType>, reqwest::Error
     let moments = response.json::<Vec<MomentType>>().await?;
     Ok(moments)
 }
+
+// Counterpart to getMoments' `deleted_at=is.null` — deleteMoment (above)
+// only ever soft-deletes (sets deleted_at), so the row is still sitting in
+// the same table, just filtered out of the normal query. "Recently
+// deleted" reads it back with the inverse filter; restoreMoment below
+// undoes it by clearing deleted_at back to null.
+pub async fn getDeletedMoments(token: String) -> Result<Vec<MomentType>, reqwest::Error> {
+    let response = SupabaseClient::new(token)
+        .get("moments?deleted_at=not.is.null&select=*,reactions(*)&order=deleted_at.desc")
+        .send()
+        .await?;
+    let moments = response.json::<Vec<MomentType>>().await?;
+    Ok(moments)
+}
+
+pub async fn restoreMoment(id: String, token: String) -> Result<(), reqwest::Error> {
+    update_moment_field(id, "deleted_at", Value::Null, token).await
+}

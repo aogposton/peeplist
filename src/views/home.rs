@@ -15,6 +15,8 @@ use crate::components::{
     DistanceViewCmp,
     DueViewCmp,
     ScheduledViewCmp,
+    SettingsCmp,
+    RecentlyDeletedViewCmp,
 };
 
 use crate::api::ActiveStorage;
@@ -28,6 +30,7 @@ pub fn Home() -> Element {
     let mut moments = state.moments;
     let mut entities = state.entities;
     let mut sidebarTgl = state.sidebarTgl;
+    let mut data_loading = state.data_loading;
     let current_view = state.currentView;
     let current_entity = state.current_entity;
     let tag_filter = state.tag_filter;
@@ -53,6 +56,7 @@ pub fn Home() -> Element {
         // need a manual page refresh to actually take effect.
         let vault = *active_vault.read();
         let token = auth_token.read().clone();
+        data_loading.set(true);
         spawn(async move {
             let storage = ActiveStorage::for_vault(vault, token);
             match storage.get_moments().await {
@@ -64,6 +68,8 @@ pub fn Home() -> Element {
                 Ok(data) => entities.set(data),
                 Err(e) => log::info!("Error fetching entities: {}", e),
             }
+
+            data_loading.set(false);
         });
     });
 
@@ -72,6 +78,9 @@ pub fn Home() -> Element {
         div {
             class: "w-full h-min-screen pt-2 mb-10",
             style: "background-color:{BG};",
+            if *data_loading.read() {
+                loading_skeleton_cmp {}
+            } else {
             match current_view.read().clone() {
                 Inbox => {
                     let now = chrono::Utc::now();
@@ -104,7 +113,13 @@ pub fn Home() -> Element {
                         if !*hide_completed.read() { CompletedSectionCmp { moments: visible } }
                     }
                 },
-                Entity => {
+                // SelfEntity is a sidebar View (hideable, listed like Due/
+                // Priority) whose click handler (sidebar.rs's
+                // views_list_cmp) sets current_entity to the self entity
+                // before landing here — same rendering as clicking any
+                // other entity, just reached from the Views list instead
+                // of the Entities list.
+                Entity | SelfEntity => {
                     let now = chrono::Utc::now();
                     let visible: Vec<MomentType> = moments.read().iter()
                         .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.entity_id == e.id))
@@ -173,9 +188,39 @@ pub fn Home() -> Element {
                         p { class: "text-sm text-muted-foreground mb-4", "Waiting to come back into view — check on these before they arrive." }
                     }
                     ScheduledViewCmp { }
+                },
+                Settings => rsx! {
+                    SettingsCmp { }
+                },
+                RecentlyDeleted => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Recently Deleted" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Deleted moments in this vault. Restore one to bring it back to its entity." }
+                    }
+                    RecentlyDeletedViewCmp { }
                 }
+            }
             }
         }
 
+    }
+}
+
+// Generic on purpose — the thing loading is moments/entities, which every
+// view (Inbox, Priority, Graph, Stats, etc.) is ultimately rendering a
+// projection of, not view-specific content. A handful of pulsing rows
+// reads as "data incoming" regardless of which view you land on first.
+#[component]
+fn loading_skeleton_cmp() -> Element {
+    rsx! {
+        div {
+            class: "px-4 pt-4 flex flex-col gap-3 animate-pulse",
+            div { class: "h-6 w-32 rounded bg-muted" }
+            div { class: "h-10 w-full rounded-lg bg-muted mt-2" }
+            for _ in 0..5 {
+                div { class: "h-14 w-full rounded-lg bg-muted" }
+            }
+        }
     }
 }

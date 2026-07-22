@@ -27,6 +27,12 @@ pub enum StorageError {
     // referenced by id that isn't in the vault, or a JSON merge-patch that
     // didn't round-trip. See src/api/local.rs.
     Local(String),
+    // A Supabase request that reached the server and got a real response
+    // back (unlike Network, which is transport-level failure) — the server
+    // just rejected it. Distinct from Local: this is the Synced vault's
+    // backend saying no (e.g. a foreign-key violation on entity delete),
+    // not a client-side storage problem.
+    Remote(String),
 }
 
 impl std::fmt::Display for StorageError {
@@ -35,6 +41,7 @@ impl std::fmt::Display for StorageError {
             StorageError::Network(e) => write!(f, "{e}"),
             StorageError::NotImplemented => write!(f, "not implemented yet"),
             StorageError::Local(msg) => write!(f, "{msg}"),
+            StorageError::Remote(msg) => write!(f, "{msg}"),
         }
     }
 }
@@ -87,30 +94,32 @@ impl VaultKind {
         }
     }
 
-    // The "this entity means yourself" sentinel differs per vault and isn't
-    // reconciled at the type level (see types.rs's SELF_ENTITY_ID doc
-    // comment and memory project_self_entity_convention) — the Synced
-    // backend is still bound to the live Supabase self-row's real id ("0"),
-    // while a local vault's self entity is minted fresh per vault with the
-    // reserved id vault_format::LOCAL_SELF_ENTITY_ID ("self"). Anything that
-    // needs "the id that means self right now" should go through this
-    // rather than hardcoding one or the other.
-    pub fn self_entity_id(&self) -> &'static str {
+    // The "this entity means yourself" id differs per vault, and for Synced
+    // it's no longer a fixed sentinel at all (see types.rs's
+    // SELF_ENTITY_TYPE_ID doc comment) — every account has its own Self
+    // entity row now, found by scanning the already-fetched entities list
+    // rather than assumed by a hardcoded id. Local still has a real fixed
+    // sentinel (each local vault mints its own self.md at that id, so no
+    // lookup needed). None only if a Synced account somehow has no Self
+    // entity yet — shouldn't happen once the signup trigger/backfill in
+    // scripts/2026-07-22-rls-and-self-entity.sql has run, but callers still
+    // have to handle it since entities may not have loaded yet either.
+    pub fn resolve_self_entity_id(&self, entities: &[crate::types::EntityType]) -> Option<String> {
         match self {
-            VaultKind::Local => super::vault_format::LOCAL_SELF_ENTITY_ID,
-            VaultKind::Synced => crate::types::SELF_ENTITY_ID,
+            VaultKind::Local => Some(super::vault_format::LOCAL_SELF_ENTITY_ID.to_string()),
+            VaultKind::Synced => entities.iter().find(|e| is_self_entity(e)).map(|e| e.id.clone()),
         }
     }
 }
 
-// Checked against both possible self ids rather than needing to know which
-// vault is active — the two sentinels never collide with a real entity's id
-// in either backend, so this is safe to call from anywhere that just needs
-// "is this entity the self entity" without threading vault context through
-// (e.g. general entity lists that should exclude it — see memory
-// project_self_entity_convention).
-pub fn is_self_entity(id: &str) -> bool {
-    id == crate::types::SELF_ENTITY_ID || id == super::vault_format::LOCAL_SELF_ENTITY_ID
+// A local vault's self entity keeps a real fixed sentinel id (safe to
+// compare directly — see vault_format::LOCAL_SELF_ENTITY_ID). A Synced
+// self entity no longer has one (see types.rs's SELF_ENTITY_TYPE_ID doc
+// comment): it's identified by entity_type_id instead, which is why this
+// takes the whole entity rather than just an id string now.
+pub fn is_self_entity(entity: &crate::types::EntityType) -> bool {
+    entity.id == super::vault_format::LOCAL_SELF_ENTITY_ID
+        || entity.entity_type_id.as_deref() == Some(crate::types::SELF_ENTITY_TYPE_ID)
 }
 
 pub struct SupabaseStorage {
@@ -154,16 +163,36 @@ impl SupabaseStorage {
         Ok(super::entity::update_entity_field(id, field, value, self.token.clone()).await?)
     }
 
+    // Unlike Local's storage (see LocalStorage::reassign_moment_entity —
+    // moments there live nested inside their entity's own file, so
+    // reassignment means physically moving them), Supabase's `moments`
+    // table has a real entity_id column — the existing generic field-patch
+    // path already handles it correctly (entity_id is in coerce_fk_value's
+    // FK_FIELDS list). This just gives it the same method name/shape as
+    // the Local backend so ActiveStorage's dispatch below doesn't need to
+    // know which backend it's talking to.
+    pub async fn reassign_moment_entity(&self, moment_id: String, new_entity_id: String) -> Result<(), StorageError> {
+        self.update_moment_field(moment_id, "entity_id", serde_json::json!(new_entity_id)).await
+    }
+
     pub async fn delete_moment(&self, moment: MomentType) -> Result<(), StorageError> {
         Ok(super::moment::deleteMoment(moment, self.token.clone()).await?)
     }
 
     pub async fn delete_entity(&self, id: String) -> Result<(), StorageError> {
-        Ok(super::entity::deleteEntity(id, self.token.clone()).await?)
+        super::entity::deleteEntity(id, self.token.clone()).await.map_err(StorageError::Remote)
     }
 
     pub async fn delete_reaction(&self, reaction: ReactionType) -> Result<(), StorageError> {
         Ok(super::moment::deleteReaction(reaction, self.token.clone()).await?)
+    }
+
+    pub async fn get_deleted_moments(&self) -> Result<Vec<MomentType>, StorageError> {
+        Ok(super::moment::getDeletedMoments(self.token.clone()).await?)
+    }
+
+    pub async fn restore_moment(&self, id: String) -> Result<(), StorageError> {
+        Ok(super::moment::restoreMoment(id, self.token.clone()).await?)
     }
 }
 
@@ -248,6 +277,13 @@ impl ActiveStorage {
         }
     }
 
+    pub async fn reassign_moment_entity(&self, moment_id: String, new_entity_id: String) -> Result<(), StorageError> {
+        match self {
+            ActiveStorage::Local(l) => l.reassign_moment_entity(moment_id, new_entity_id).await,
+            ActiveStorage::Supabase(s) => s.reassign_moment_entity(moment_id, new_entity_id).await,
+        }
+    }
+
     pub async fn delete_moment(&self, moment: MomentType) -> Result<(), StorageError> {
         match self {
             ActiveStorage::Local(l) => l.delete_moment(moment).await,
@@ -266,6 +302,20 @@ impl ActiveStorage {
         match self {
             ActiveStorage::Local(l) => l.delete_reaction(reaction).await,
             ActiveStorage::Supabase(s) => s.delete_reaction(reaction).await,
+        }
+    }
+
+    pub async fn get_deleted_moments(&self) -> Result<Vec<MomentType>, StorageError> {
+        match self {
+            ActiveStorage::Local(l) => l.get_deleted_moments().await,
+            ActiveStorage::Supabase(s) => s.get_deleted_moments().await,
+        }
+    }
+
+    pub async fn restore_moment(&self, id: String) -> Result<(), StorageError> {
+        match self {
+            ActiveStorage::Local(l) => l.restore_moment(id).await,
+            ActiveStorage::Supabase(s) => s.restore_moment(id).await,
         }
     }
 }

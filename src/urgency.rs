@@ -12,9 +12,18 @@
 // matter — so changing a weight in Settings changes the ranking without
 // ever touching this function's logic, and every factor is independently
 // tunable (including disabling one entirely by setting its weight to 0).
-use crate::types::MomentType;
+use crate::types::{EntityType, MomentType};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+// Distance grows unboundedly with time (see components::entity::
+// compute_distance) — this is the fixed point past which "more neglected"
+// stops adding more urgency. A first-draft tuning knob, not final, same
+// caveat as every other coefficient in this file's Default impl. Local, not
+// a per-call dynamic normalization (unlike Graph View's), since urgency is
+// computed one moment at a time rather than over the whole entity set at
+// once.
+const DRIFT_NORMALIZATION_CAP: f64 = 40.0;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct UrgencyWeights {
@@ -57,6 +66,16 @@ pub struct UrgencyWeights {
     /// more-thoroughly-categorized task was more deliberately captured.
     /// Weak signal by design — small default weight.
     pub tags: f64,
+    /// Applied to a 0..1 "how drifted/neglected is this moment's entity"
+    /// ramp (the entity's own computed Distance, normalized against
+    /// DRIFT_NORMALIZATION_CAP — see components::entity::compute_distance
+    /// and the Distance/Drift spec). The original todo.md urgency spec
+    /// called for "drift velocity" as a factor; Distance didn't exist yet
+    /// when compute_urgency was first built, so this was the one spec'd
+    /// factor missing until 2026-07-22. Higher distance (more neglected)
+    /// nudges a person's moments *up* — the theory being urgency should
+    /// help surface who you've been neglecting, not just what's overdue.
+    pub drift: f64,
 }
 
 impl Default for UrgencyWeights {
@@ -73,6 +92,7 @@ impl Default for UrgencyWeights {
             blocked: -8.0,
             blocking: 8.0,
             tags: 0.5,
+            drift: 4.0,
         }
     }
 }
@@ -106,12 +126,13 @@ pub struct UrgencyBreakdown {
     pub blocked: f64,
     pub blocking: f64,
     pub tags: f64,
+    pub drift: f64,
 }
 
 impl UrgencyBreakdown {
     pub fn total(&self) -> f64 {
         self.due + self.priority + self.project + self.scheduled
-            + self.gravity + self.age + self.blocked + self.blocking + self.tags
+            + self.gravity + self.age + self.blocked + self.blocking + self.tags + self.drift
     }
 
     // Human-readable "why", e.g. "due +8.2 · priority +6.0 · blocking
@@ -129,6 +150,7 @@ impl UrgencyBreakdown {
             ("blocked", self.blocked),
             ("blocking", self.blocking),
             ("tags", self.tags),
+            ("drift", self.drift),
         ];
         parts.retain(|(_, v)| v.abs() > 0.001);
         parts.sort_by(|a, b| b.1.abs().partial_cmp(&a.1.abs()).unwrap_or(std::cmp::Ordering::Equal));
@@ -179,6 +201,7 @@ pub fn is_waiting(m: &MomentType, now: DateTime<Utc>) -> bool {
 pub fn compute_urgency(
     m: &MomentType,
     all_moments: &[MomentType],
+    entities: &[EntityType],
     now: DateTime<Utc>,
     weights: &UrgencyWeights,
 ) -> UrgencyBreakdown {
@@ -242,6 +265,11 @@ pub fn compute_urgency(
         .map(|meta| meta.tags.len().min(3) as f64)
         .unwrap_or(0.0);
 
+    let drift_indicator = entities.iter()
+        .find(|e| e.id == m.entity_id)
+        .map(|e| (crate::components::compute_distance(e, all_moments, now) / DRIFT_NORMALIZATION_CAP).clamp(0.0, 1.0))
+        .unwrap_or(0.0);
+
     UrgencyBreakdown {
         due: due_indicator * weights.due,
         priority: priority_contribution,
@@ -252,6 +280,7 @@ pub fn compute_urgency(
         blocked: if blocked_indicator { weights.blocked } else { 0.0 },
         blocking: if blocking_indicator { weights.blocking } else { 0.0 },
         tags: tags_indicator * weights.tags,
+        drift: drift_indicator * weights.drift,
     }
 }
 
@@ -282,7 +311,7 @@ mod tests {
     fn overdue_task_gets_full_due_weight() {
         let mut m = base_moment();
         m.due_at = Some((Utc::now() - chrono::Duration::days(1)).to_rfc3339());
-        let b = compute_urgency(&m, &[], Utc::now(), &UrgencyWeights::default());
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         assert_eq!(b.due, UrgencyWeights::default().due);
     }
 
@@ -295,7 +324,7 @@ mod tests {
     fn due_date_in_the_actual_datetime_local_shape_still_scores() {
         let mut m = base_moment();
         m.due_at = Some((Utc::now() - chrono::Duration::days(1)).format("%Y-%m-%dT%H:%M").to_string());
-        let b = compute_urgency(&m, &[], Utc::now(), &UrgencyWeights::default());
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         assert_eq!(b.due, UrgencyWeights::default().due);
     }
 
@@ -303,7 +332,7 @@ mod tests {
     fn far_future_due_date_contributes_nothing() {
         let mut m = base_moment();
         m.due_at = Some((Utc::now() + chrono::Duration::days(30)).to_rfc3339());
-        let b = compute_urgency(&m, &[], Utc::now(), &UrgencyWeights::default());
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         assert_eq!(b.due, 0.0);
     }
 
@@ -312,7 +341,7 @@ mod tests {
         let mut m = base_moment();
         m.metadata = Some(MomentMetadata { priority: Some("H".to_string()), ..Default::default() });
         let weights = UrgencyWeights::default();
-        let b = compute_urgency(&m, &[], Utc::now(), &weights);
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &weights);
         assert_eq!(b.priority, weights.priority_high);
     }
 
@@ -323,7 +352,7 @@ mod tests {
         let mut m = base_moment();
         m.depends_on = Some("blocker".to_string());
         let weights = UrgencyWeights::default();
-        let b = compute_urgency(&m, &[blocker], Utc::now(), &weights);
+        let b = compute_urgency(&m, &[blocker], &[], Utc::now(), &weights);
         assert_eq!(b.blocked, weights.blocked);
     }
 
@@ -334,7 +363,7 @@ mod tests {
         blocker.completed_at = Some(Utc::now().to_rfc3339());
         let mut m = base_moment();
         m.depends_on = Some("blocker".to_string());
-        let b = compute_urgency(&m, &[blocker], Utc::now(), &UrgencyWeights::default());
+        let b = compute_urgency(&m, &[blocker], &[], Utc::now(), &UrgencyWeights::default());
         assert_eq!(b.blocked, 0.0);
     }
 
@@ -346,7 +375,7 @@ mod tests {
         dependent.id = "dependent".into();
         dependent.depends_on = Some("blocker".to_string());
         let weights = UrgencyWeights::default();
-        let b = compute_urgency(&m, &[dependent], Utc::now(), &weights);
+        let b = compute_urgency(&m, &[dependent], &[], Utc::now(), &weights);
         assert_eq!(b.blocking, weights.blocking);
     }
 
@@ -357,7 +386,7 @@ mod tests {
             scheduled_at: Some((Utc::now() + chrono::Duration::days(5)).format("%Y-%m-%dT%H:%M").to_string()),
             ..Default::default()
         });
-        let b = compute_urgency(&m, &[], Utc::now(), &UrgencyWeights::default());
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         assert_eq!(b.scheduled, 0.0);
     }
 
@@ -369,7 +398,7 @@ mod tests {
             ..Default::default()
         });
         let weights = UrgencyWeights::default();
-        let b = compute_urgency(&m, &[], Utc::now(), &weights);
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &weights);
         assert_eq!(b.scheduled, weights.scheduled);
     }
 
@@ -381,7 +410,7 @@ mod tests {
             ..Default::default()
         });
         let weights = UrgencyWeights::default();
-        let b = compute_urgency(&m, &[], Utc::now(), &weights);
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &weights);
         assert_eq!(b.tags, 3.0 * weights.tags);
     }
 
@@ -391,7 +420,7 @@ mod tests {
         m.gravity = Some(80);
         let mut weights = UrgencyWeights::default();
         weights.gravity = 0.0;
-        let b = compute_urgency(&m, &[], Utc::now(), &weights);
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &weights);
         assert_eq!(b.gravity, 0.0);
     }
 
@@ -399,7 +428,7 @@ mod tests {
     fn describe_lists_only_nonzero_factors_largest_first() {
         let mut m = base_moment();
         m.metadata = Some(MomentMetadata { priority: Some("H".to_string()), ..Default::default() });
-        let b = compute_urgency(&m, &[], Utc::now(), &UrgencyWeights::default());
+        let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         let d = b.describe();
         assert!(d.contains("priority"));
         assert!(!d.contains("due "));

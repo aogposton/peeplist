@@ -67,6 +67,27 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
     (grown - closed_gravity - closed_reactions).max(0.0)
 }
 
+// Individuation (splitting a person out of a group entity, see memory
+// project_entity_individuation) — per explicit user decision 2026-07-22:
+// the new individual entity "gets the exact same drift/distance as the
+// group has. They start AT the full entity's distance then drift towards
+// and away after." A brand-new entity has zero moments of its own (no
+// automatic moment transfer — that's a separate, not-yet-designed piece of
+// individuation), so its distance is just BASE_DISTANCE + drift *
+// days_elapsed with nothing closed. Backdating created_at is what
+// reproduces `target_distance` under that formula — same drift rate, same
+// starting point, drifting independently from there on. If target_distance
+// is already below BASE_DISTANCE (a heavily-engaged group, closed gravity
+// pulling it down further than a zero-moment entity ever could on its own),
+// this floors at days_elapsed = 0 — the closest honest approximation
+// without inventing moment history that doesn't exist.
+pub(crate) fn backdated_created_at_for_distance(target_distance: f64, drift: f64, now: chrono::DateTime<chrono::Utc>) -> String {
+    let drift = if drift > 0.0 { drift } else { 2.0 };
+    let days_elapsed = ((target_distance - BASE_DISTANCE) / drift).max(0.0);
+    let seconds = (days_elapsed * 86400.0) as i64;
+    (now - chrono::Duration::seconds(seconds)).to_rfc3339()
+}
+
 // entity.drift is a rate (days of Distance growth per day since the
 // relationship was added — see compute_distance above), not a contact-
 // interval expectation the way "recur every 7 days" would be. Labeling its
@@ -117,7 +138,7 @@ pub fn DistanceViewCmp() -> Element {
     }
 
     let mut rows: Vec<Row> = entities.read().iter()
-        .filter(|e| !is_self_entity(&e.id))
+        .filter(|e| !is_self_entity(e))
         .map(|e| {
             let entity_moments: Vec<&MomentType> = all_moments.iter().filter(|m| m.entity_id == e.id).collect();
             let last_contact = entity_moments.iter()
@@ -187,15 +208,22 @@ pub fn DistanceViewCmp() -> Element {
 #[component]
 pub fn entity_view_cmp() -> Element {
     let state = use_context::<AppState>();
-    let current_entity = state.current_entity;
+    let mut current_entity = state.current_entity;
+    let entities = state.entities;
     let tag_filter = state.tag_filter;
     let project_filter = state.project_filter;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut activity_bar_view = state.activity_bar_view;
     let mut backdropTgl = state.backdropTgl;
-    let mut is_graphs_open = use_signal(|| false);
 
     let entity = current_entity();
+    // Individuation provenance (see components::sidebar::entity_list_cmp's
+    // "Individuate" action, and EntityType::parent_entity_id) — resolved by
+    // name here rather than shown as a raw id, and only shown at all if the
+    // parent hasn't itself been deleted since.
+    let parent = entity.as_ref()
+        .and_then(|e| e.parent_entity_id.as_deref())
+        .and_then(|parent_id| entities.read().iter().find(|e| e.id == parent_id).cloned());
     // A tag or project is a real list, not just a filter — its name belongs
     // at the top the same way an entity's does, instead of a generic "All"
     // that hides which list you're actually looking at.
@@ -220,6 +248,13 @@ pub fn entity_view_cmp() -> Element {
             h1 {
                 class: "text-2xl font-semibold text-foreground",
                 "{name}"
+            }
+            if let Some(parent) = parent.clone() {
+                a {
+                    class: "text-xs text-muted-foreground hover:text-foreground cursor-pointer -mt-2",
+                    onclick: move |_| current_entity.set(Some(parent.clone())),
+                    "Split from {parent.name}"
+                }
             }
             if entity.is_some() {
                 div {
@@ -268,15 +303,6 @@ pub fn entity_view_cmp() -> Element {
                             }
                         },
                         "Stats"
-                    }
-                    Button {
-                        variant: tab_variant(*is_graphs_open.read()),
-                        size: ButtonSize::Small,
-                        on_click: move |_| {
-                            let tgl = *is_graphs_open.read();
-                            is_graphs_open.set(!tgl);
-                        },
-                        "Graphs"
                     }
                 }
             }
@@ -444,7 +470,7 @@ pub fn ab_stats_cmp() -> Element {
         let all_moments = moments.read();
         let all_entities = entities.read();
         let mut counts: Vec<(String, usize)> = all_entities.iter()
-            .filter(|e| !is_self_entity(&e.id))
+            .filter(|e| !is_self_entity(e))
             .map(|e| (e.id.clone(), all_moments.iter().filter(|m| m.entity_id == e.id).count()))
             .collect();
         counts.sort_by(|a, b| b.1.cmp(&a.1));
@@ -555,7 +581,7 @@ pub fn ab_info_cmp() -> Element {
     // Self isn't deletable — there's no "unselect yourself" concept in this
     // app's model, and every un-attributed moment defaults to Self, so
     // removing it would just get silently recreated on next capture anyway.
-    let is_deletable = entity.as_ref().map(|e| !is_self_entity(&e.id)).unwrap_or(false);
+    let is_deletable = entity.as_ref().map(|e| !is_self_entity(e)).unwrap_or(false);
 
     rsx! {
         div {
@@ -755,7 +781,12 @@ pub fn EntityModalCmp() -> Element {
                                     form.write().entity_type_sel = e.value();
                                 },
                                 option { value: "", "Select a type..." }
-                                for entity_type in entityTypes.iter() {
+                                // "Self" is a reserved marker (exactly one
+                                // per account, auto-provisioned — see
+                                // types.rs's SELF_ENTITY_TYPE_ID), not a
+                                // real relationship type to hand-pick when
+                                // creating a new person.
+                                for entity_type in entityTypes.iter().filter(|t| t.id != crate::types::SELF_ENTITY_TYPE_ID) {
                                     option {
                                         value: "{entity_type.id}",
                                         "{entity_type.name}"
@@ -830,5 +861,80 @@ pub fn EntityModalCmp() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod individuation_tests {
+    use super::*;
+
+    fn entity_with(created_at: &str, drift: f64) -> EntityType {
+        EntityType {
+            id: "group".into(),
+            name: "The Smiths".into(),
+            entity_type_id: None,
+            parent_entity_id: None,
+            created_at: created_at.to_string(),
+            drift,
+            metadata: None,
+        }
+    }
+
+    // The whole point of backdated_created_at_for_distance: a brand-new,
+    // zero-moment entity created with the returned timestamp should
+    // immediately compute back to (approximately) the same distance the
+    // original entity had at the moment of the split — same drift rate,
+    // same starting point.
+    #[test]
+    fn backdated_entity_reproduces_the_original_distance() {
+        let now = chrono::Utc::now();
+        // An entity that's been drifting for 30 days at 2.0/day: distance =
+        // 10 (BASE_DISTANCE) + 2*30 = 70.
+        let original = entity_with(&(now - chrono::Duration::days(30)).to_rfc3339(), 2.0);
+        let original_distance = compute_distance(&original, &[], now);
+        assert!((original_distance - 70.0).abs() < 0.01, "expected ~70.0, got {original_distance}");
+
+        let backdated = backdated_created_at_for_distance(original_distance, original.drift, now);
+        let new_entity = entity_with(&backdated, original.drift);
+        let new_distance = compute_distance(&new_entity, &[], now);
+
+        assert!(
+            (new_distance - original_distance).abs() < 0.01,
+            "individuated entity's distance ({new_distance}) should match the original's ({original_distance}) at the moment of the split"
+        );
+    }
+
+    // A heavily-engaged group (lots of closed gravity pulling distance
+    // below what a zero-moment entity could ever reach) can't be perfectly
+    // reproduced — floors at days_elapsed = 0, i.e. BASE_DISTANCE, the
+    // closest honest approximation.
+    #[test]
+    fn target_distance_below_base_floors_at_zero_days_elapsed() {
+        let now = chrono::Utc::now();
+        let backdated = backdated_created_at_for_distance(3.0, 2.0, now);
+        let new_entity = entity_with(&backdated, 2.0);
+        let new_distance = compute_distance(&new_entity, &[], now);
+        assert!((new_distance - BASE_DISTANCE).abs() < 0.01, "expected the BASE_DISTANCE floor, got {new_distance}");
+    }
+
+    // Same drift rate carries forward — a fast-drifting group's split-off
+    // individual should keep drifting at the same rate, not reset to the
+    // 2.0/day default.
+    #[test]
+    fn drift_rate_carries_over_unchanged() {
+        let now = chrono::Utc::now();
+        let original = entity_with(&(now - chrono::Duration::days(10)).to_rfc3339(), 5.0);
+        let original_distance = compute_distance(&original, &[], now);
+        let backdated = backdated_created_at_for_distance(original_distance, original.drift, now);
+
+        let one_day_later = now + chrono::Duration::days(1);
+        let new_entity = entity_with(&backdated, original.drift);
+        let distance_one_day_later = compute_distance(&new_entity, &[], one_day_later);
+
+        assert!(
+            (distance_one_day_later - (original_distance + 5.0)).abs() < 0.01,
+            "expected distance to grow by exactly the 5.0/day drift rate, got a delta of {}",
+            distance_one_day_later - original_distance
+        );
     }
 }

@@ -100,6 +100,7 @@ impl LocalStorage {
             id: LOCAL_SELF_ENTITY_ID.to_string(),
             name: "Self".to_string(),
             entity_type_id: None,
+            parent_entity_id: None,
             created_at: now(),
             drift: 2.0,
             metadata: None,
@@ -233,6 +234,7 @@ impl LocalStorage {
             id: Uuid::new_v4().to_string(),
             name: e.name,
             entity_type_id: e.entity_type_id,
+            parent_entity_id: e.parent_entity_id,
             created_at: now(),
             drift: 2.0,
             metadata: e.metadata,
@@ -272,6 +274,37 @@ impl LocalStorage {
             return self.save(&storage, &file.entity, &file.moments, &file.body);
         }
         Err(StorageError::Local(format!("no such moment in this vault: {id}")))
+    }
+
+    // Unlike every other field, entity_id can't go through
+    // update_moment_field above: a moment's home file *is* the entity it
+    // belongs to (unlike Supabase's single `moments` table with a real
+    // entity_id column), so patching just the field while leaving the
+    // moment sitting in the old entity's file would desync the two — the
+    // moment would claim to belong to the new entity but still physically
+    // live (and get deleted, exported, etc) under the old one. This
+    // actually removes it from the old entity's file and appends it to the
+    // new one.
+    pub async fn reassign_moment_entity(&self, moment_id: String, new_entity_id: String) -> Result<(), StorageError> {
+        let storage = local_storage()?;
+        let mut new_file = self.load(&storage, &new_entity_id)
+            .ok_or_else(|| StorageError::Local(format!("no such entity in this vault: {new_entity_id}")))?;
+
+        // Already there — a no-op, not an error.
+        if new_file.moments.iter().any(|m| m.id == moment_id) {
+            return Ok(());
+        }
+
+        for old_entity_id in self.entity_ids(&storage) {
+            let Some(mut old_file) = self.load(&storage, &old_entity_id) else { continue };
+            let Some(pos) = old_file.moments.iter().position(|m| m.id == moment_id) else { continue };
+            let mut moment = old_file.moments.remove(pos);
+            moment.entity_id = new_entity_id.clone();
+            self.save(&storage, &old_file.entity, &old_file.moments, &old_file.body)?;
+            new_file.moments.push(moment);
+            return self.save(&storage, &new_file.entity, &new_file.moments, &new_file.body);
+        }
+        Err(StorageError::Local(format!("no such moment in this vault: {moment_id}")))
     }
 
     pub async fn update_entity_field(&self, id: String, field: &str, value: Value) -> Result<(), StorageError> {
@@ -325,6 +358,53 @@ impl LocalStorage {
         storage
             .remove_item(&entity_key(&id))
             .map_err(|_| StorageError::Local("failed to remove from localStorage".to_string()))
+    }
+
+    // Reads TrashEntry::Moment entries back out as real MomentType values
+    // (via vault_format::entry_to_moment) so the "Recently deleted" UI can
+    // render them the same way it renders any other moment, and so
+    // restore_moment below has a real MomentType to hand back to the
+    // caller/moments signal once restored. TrashEntry::Entity isn't
+    // surfaced here — whole-entity restore isn't built yet.
+    pub async fn get_deleted_moments(&self) -> Result<Vec<MomentType>, StorageError> {
+        let storage = local_storage()?;
+        let mut entries: Vec<(MomentType, String)> = self.load_trash(&storage).into_iter()
+            .filter_map(|entry| match entry {
+                TrashEntry::Moment { entity_id, moment, deleted_at } => {
+                    Some((vault_format::entry_to_moment(&moment, &entity_id), deleted_at))
+                }
+                TrashEntry::Entity { .. } => None,
+            })
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1));
+        Ok(entries.into_iter().map(|(m, _)| m).collect())
+    }
+
+    // Undoes delete_moment: moves the matching TrashEntry::Moment back into
+    // its entity's live moments and drops it from the trash log. Errors if
+    // the entity it belonged to was itself deleted/no longer exists in this
+    // vault — whole-entity restore isn't built yet (see get_deleted_moments),
+    // so there's nowhere to put the moment back.
+    pub async fn restore_moment(&self, moment_id: String) -> Result<(), StorageError> {
+        let storage = local_storage()?;
+        let mut trash = self.load_trash(&storage);
+        let pos = trash.iter().position(|entry| matches!(
+            entry,
+            TrashEntry::Moment { moment, .. } if moment.id == moment_id
+        )).ok_or_else(|| StorageError::Local("that moment isn't in the trash".to_string()))?;
+
+        let TrashEntry::Moment { entity_id, moment, .. } = trash.remove(pos) else {
+            unreachable!("position was matched on TrashEntry::Moment above");
+        };
+
+        let mut file = self.load(&storage, &entity_id)
+            .ok_or_else(|| StorageError::Local("the entity this moment belonged to no longer exists in this vault".to_string()))?;
+        file.moments.push(vault_format::entry_to_moment(&moment, &entity_id));
+        self.save(&storage, &file.entity, &file.moments, &file.body)?;
+
+        let rendered = vault_format::render_trash(&trash).map_err(|e| StorageError::Local(e.to_string()))?;
+        storage.set_item(TRASH_KEY, &rendered)
+            .map_err(|_| StorageError::Local("failed to update trash after restoring".to_string()))
     }
 
     pub async fn delete_reaction(&self, reaction: ReactionType) -> Result<(), StorageError> {
