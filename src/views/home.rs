@@ -162,7 +162,7 @@ pub fn Home() -> Element {
                     div {
                         class: "px-4 pt-4",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Due" }
-                        p { class: "text-sm text-muted-foreground mb-4", "What's overdue, due today, or coming up this week." }
+                        p { class: "text-sm text-muted-foreground mb-4", "Only what's overdue — nothing due today or later shows up here." }
                     }
                     DueViewCmp { }
                 },

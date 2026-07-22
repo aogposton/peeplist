@@ -2037,29 +2037,23 @@ pub fn DueViewCmp() -> Element {
     let now = chrono::Utc::now();
     let today = now.date_naive();
 
+    // Strictly overdue only, on purpose — the user's own words: "if its not
+    // overdue, its not relevant in that view." This used to bucket
+    // everything with any due date into Overdue/Today/This week/Later;
+    // now anything not already past its due date is excluded outright,
+    // not just de-emphasized into a lower bucket.
     let mut due: Vec<MomentType> = moments.read().iter()
-        .filter(|m| m.completed_at.is_none() && m.due_at.is_some() && !crate::urgency::is_waiting(m, now))
+        .filter(|m| {
+            if m.completed_at.is_some() || crate::urgency::is_waiting(m, now) {
+                return false;
+            }
+            let Some(due_at) = m.due_at.as_ref() else { return false; };
+            let Some(parsed) = crate::urgency::parse_moment_datetime(due_at) else { return false; };
+            parsed.date_naive() < today
+        })
         .cloned()
         .collect();
     due.sort_by(|a, b| a.due_at.cmp(&b.due_at));
-
-    let bucket_of = |m: &MomentType| -> &'static str {
-        let Some(due_at) = m.due_at.as_ref() else { return "Later"; };
-        // Bare "YYYY-MM-DDTHH:MM", not RFC3339 — see the due_display fix
-        // above (MomentCmp) for the full story. This one didn't silently
-        // show nothing, it silently bucketed *everything* into "Later"
-        // regardless of actual date, which is arguably worse — it looked
-        // like it was working.
-        let Some(parsed) = crate::urgency::parse_moment_datetime(due_at) else { return "Later"; };
-        let due_date = parsed.date_naive();
-        let days = (due_date - today).num_days();
-        match days {
-            d if d < 0 => "Overdue",
-            0 => "Today",
-            1..=6 => "This week",
-            _ => "Later",
-        }
-    };
 
     let entity_name = move |entity_id: &str| entities.read().iter()
         .find(|e| e.id == entity_id)
@@ -2072,52 +2066,32 @@ pub fn DueViewCmp() -> Element {
             if due.is_empty() {
                 div {
                     class: "rounded-lg border border-border bg-background text-sm text-muted-foreground text-center py-8",
-                    "Nothing with a due date right now."
+                    "Nothing overdue right now."
                 }
             } else {
-                for bucket in ["Overdue", "Today", "This week", "Later"] {
-                    {
-                        let items: Vec<MomentType> = due.iter().filter(|m| bucket_of(m) == bucket).cloned().collect();
-                        rsx! {
-                            if !items.is_empty() {
-                                div {
-                                    key: "{bucket}",
-                                    div {
-                                        class: if bucket == "Overdue" {
-                                            "text-xs font-semibold uppercase tracking-wide text-destructive mb-1.5 px-1"
-                                        } else {
-                                            "text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 px-1"
-                                        },
-                                        "{bucket}"
-                                    }
-                                    div {
-                                        class: "rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
-                                        for m in items.iter() {
-                                            div {
-                                                key: "{m.id}",
-                                                class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
-                                                onclick: {
-                                                    let m = m.clone();
-                                                    move |_| {
-                                                        current_moment.set(Some(m.clone()));
-                                                        activity_bar_view.set(ABView::Task);
-                                                        backdropTgl.set(true);
-                                                        activity_bar_tgl.set(true);
-                                                    }
-                                                },
-                                                div {
-                                                    class: "flex flex-col min-w-0",
-                                                    span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                                                    span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
-                                                }
-                                                span {
-                                                    class: "text-xs text-muted-foreground shrink-0",
-                                                    "{m.due_at.as_deref().unwrap_or(\"\").chars().take(10).collect::<String>()}"
-                                                }
-                                            }
-                                        }
-                                    }
+                div {
+                    class: "rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+                    for m in due.iter() {
+                        div {
+                            key: "{m.id}",
+                            class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                            onclick: {
+                                let m = m.clone();
+                                move |_| {
+                                    current_moment.set(Some(m.clone()));
+                                    activity_bar_view.set(ABView::Task);
+                                    backdropTgl.set(true);
+                                    activity_bar_tgl.set(true);
                                 }
+                            },
+                            div {
+                                class: "flex flex-col min-w-0",
+                                span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                                span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                            }
+                            span {
+                                class: "text-xs text-destructive shrink-0",
+                                "{m.due_at.as_deref().unwrap_or(\"\").chars().take(10).collect::<String>()}"
                             }
                         }
                     }
