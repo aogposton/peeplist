@@ -74,6 +74,7 @@ fn ensure_self_entity() -> Result<(), String> {
         id: LOCAL_SELF_ENTITY_ID.to_string(),
         name: "Self".to_string(),
         entity_type_id: None,
+        parent_entity_id: None,
         created_at: now(),
         drift: 2.0,
         metadata: None,

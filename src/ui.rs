@@ -30,6 +30,12 @@ pub fn fa_calendar() -> Element { rsx! { i { class: "fa-solid fa-calendar-days" 
 #[component]
 pub fn fa_clock() -> Element { rsx! { i { class: "fa-solid fa-clock" } } }
 
+#[component]
+pub fn fa_gear() -> Element { rsx! { i { class: "fa-solid fa-gear" } } }
+
+#[component]
+pub fn fa_user() -> Element { rsx! { i { class: "fa-solid fa-user" } } }
+
 // ----- Slider
 #[derive(Props, Clone, PartialEq)]
 pub struct GravitySelectProps {

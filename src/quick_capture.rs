@@ -454,9 +454,9 @@ mod tests {
 
     fn entities() -> Vec<EntityType> {
         vec![
-            EntityType { id: "1".into(), name: "Jane".into(), entity_type_id: None, created_at: String::new(), drift: 2.0, metadata: None },
-            EntityType { id: "2".into(), name: "Jane Doe".into(), entity_type_id: None, created_at: String::new(), drift: 2.0, metadata: None },
-            EntityType { id: "0".into(), name: "Self".into(), entity_type_id: None, created_at: String::new(), drift: 2.0, metadata: None },
+            EntityType { id: "1".into(), name: "Jane".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), drift: 2.0, metadata: None },
+            EntityType { id: "2".into(), name: "Jane Doe".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), drift: 2.0, metadata: None },
+            EntityType { id: "0".into(), name: "Self".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), drift: 2.0, metadata: None },
         ]
     }
 

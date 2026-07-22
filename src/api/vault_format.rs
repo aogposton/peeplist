@@ -76,6 +76,10 @@ pub struct EntityDoc {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub entity_type: Option<String>,
+    // See EntityType::parent_entity_id (types.rs) — the group entity this
+    // one was split out of via individuation, if any.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_entity_id: Option<String>,
     #[serde(default = "default_drift")]
     pub drift: f64,
     #[serde(default)]
@@ -201,7 +205,7 @@ pub(crate) fn moment_to_entry(m: &MomentType) -> MomentEntry {
 // Soft-deleted moments never appear in the visible file (see §1d — they're
 // filtered out and appended to trash.yaml instead), so `deleted_at` is
 // always None for anything round-tripped through this format.
-fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentType {
+pub(crate) fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentType {
     let meta = MomentMetadata {
         tags: entry.tags.clone(),
         sort_index: entry.sort_index,
@@ -235,6 +239,7 @@ pub(crate) fn entity_to_doc(entity: &EntityType, moments: &[MomentType]) -> Enti
         id: entity.id.clone(),
         name: entity.name.clone(),
         entity_type: entity.entity_type_id.clone(),
+        parent_entity_id: entity.parent_entity_id.clone(),
         drift: entity.drift,
         created_at: entity.created_at.clone(),
         relationship: meta.relationship,
@@ -258,6 +263,7 @@ fn doc_to_entity(doc: &EntityDoc) -> (EntityType, Vec<MomentType>) {
         id: doc.id.clone(),
         name: doc.name.clone(),
         entity_type_id: doc.entity_type.clone(),
+        parent_entity_id: doc.parent_entity_id.clone(),
         created_at: doc.created_at.clone(),
         drift: doc.drift,
         metadata: Some(metadata),
@@ -337,9 +343,10 @@ pub struct VaultMeta {
     pub app_version: String,
 }
 
-// Append-only, non-destructive soft-delete log — no recovery UI planned yet
-// (see §1d), this just gives deleted records somewhere to go instead of
-// vanishing outright.
+// Append-only, non-destructive soft-delete log — read back and restorable
+// via LocalStorage::get_deleted_moments/restore_moment (src/api/local.rs,
+// src/api/local_desktop.rs), added 2026-07-22. Entities aren't restorable
+// yet, only moments — TrashEntry::Entity is still write-only.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TrashEntry {
@@ -376,6 +383,7 @@ mod tests {
             id: "3f9a2b7e-1234-4a1b-9c3d-abcdef012345".to_string(),
             name: "Jane Doe".to_string(),
             entity_type_id: Some("Friend".to_string()),
+            parent_entity_id: None,
             created_at: "2024-03-01T10:00:00Z".to_string(),
             drift: 2.0,
             metadata: Some(EntityMetadata {
@@ -503,6 +511,7 @@ mod tests {
             id: "abc".to_string(),
             name: "Bare Entity".to_string(),
             entity_type_id: None,
+            parent_entity_id: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
             drift: 2.0,
             metadata: None,

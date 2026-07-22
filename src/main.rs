@@ -62,7 +62,7 @@ const FA_JS: Asset = asset!("/assets/ae47c6a44d.js");
 // Used by the Graph View for force-directed layout (see src/components/graph.rs).
 const D3_JS: Asset = asset!("/assets/d3.v7.min.js");
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum View {
     Entity,
     Inbox,
@@ -71,6 +71,86 @@ pub enum View {
     Distance,
     Due,
     Scheduled,
+    Settings,
+    RecentlyDeleted,
+    // Reuses the same rendering as View::Entity (see views/home.rs's
+    // combined `Entity | SelfEntity` match arm) — the only difference is
+    // this one's a real sidebar View (hideable, listed in VIEW_ENTRIES)
+    // rather than something only reachable by clicking an entity link.
+    // Previously the self entity was deliberately excluded from the
+    // Entities list entirely; user reversed that 2026-07-22 by asking for
+    // this instead.
+    SelfEntity,
+}
+
+impl View {
+    // Only the views that ever appear in the sidebar's "Views" list are
+    // hideable/storable here — Entity and Settings aren't in that list
+    // (Entity is reached by clicking an entity, Settings via its own
+    // link), so they're intentionally absent from both directions.
+    pub fn as_storage_str(&self) -> Option<&'static str> {
+        match self {
+            View::Inbox => Some("inbox"),
+            View::Priority => Some("priority"),
+            View::Due => Some("due"),
+            View::Scheduled => Some("scheduled"),
+            View::Distance => Some("distance"),
+            View::Graph => Some("graph"),
+            View::RecentlyDeleted => Some("recently_deleted"),
+            View::SelfEntity => Some("self_entity"),
+            View::Entity | View::Settings => None,
+        }
+    }
+
+    pub fn from_storage_str(s: &str) -> Option<View> {
+        match s {
+            "inbox" => Some(View::Inbox),
+            "priority" => Some(View::Priority),
+            "due" => Some(View::Due),
+            "scheduled" => Some(View::Scheduled),
+            "distance" => Some(View::Distance),
+            "graph" => Some(View::Graph),
+            "recently_deleted" => Some(View::RecentlyDeleted),
+            "self_entity" => Some(View::SelfEntity),
+            _ => None,
+        }
+    }
+
+    // The sidebar's actual visible label per view — kept separate from
+    // Display above (which gives generic names like "Inbox"/"Graph") since
+    // the sidebar's real copy diverges ("All", "Graph View"). Used by
+    // Settings' hidden-views list so restoring one shows the same label
+    // you'd recognize from the sidebar.
+    pub fn sidebar_label(&self) -> Option<&'static str> {
+        match self {
+            View::Inbox => Some("All"),
+            View::Priority => Some("Priority"),
+            View::Due => Some("Due"),
+            View::Scheduled => Some("Scheduled"),
+            View::Distance => Some("Distance"),
+            View::Graph => Some("Graph View"),
+            View::RecentlyDeleted => Some("Recently Deleted"),
+            View::SelfEntity => Some("Self"),
+            View::Entity | View::Settings => None,
+        }
+    }
+}
+
+// Shared by the sidebar's "Hide" action and Settings' "Show" (restore)
+// action — both mutate `hidden_views` and need to persist the result the
+// same way, so this is one place instead of two copies of the same
+// localStorage-join logic.
+pub fn persist_hidden_views(views: &[View]) {
+    #[cfg(not(feature = "desktop"))]
+    if let Some(storage) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let joined = views.iter()
+            .filter_map(|v| v.as_storage_str())
+            .collect::<Vec<_>>()
+            .join(",");
+        storage.set("hidden_views", &joined).ok();
+    }
+    #[cfg(feature = "desktop")]
+    let _ = views;
 }
 
 #[derive(Clone, PartialEq)]
@@ -116,6 +196,9 @@ impl fmt::Display for View {
             View::Distance => write!(f, "Distance"),
             View::Due => write!(f, "Due"),
             View::Scheduled => write!(f, "Scheduled"),
+            View::Settings => write!(f, "Settings"),
+            View::RecentlyDeleted => write!(f, "Recently Deleted"),
+            View::SelfEntity => write!(f, "Self"),
         }
     }
 }
@@ -155,6 +238,20 @@ pub struct AppState {
     // user-editable via UrgencySettingsCmp. Persisted the same way as
     // sort_mode below (localStorage on web; no persistence yet on desktop).
     pub urgency_weights: Signal<UrgencyWeights>,
+    // Sidebar "Views" the user has hidden via the 3-dot menu next to each
+    // one — restorable from the Settings page. Persisted the same way as
+    // sort_mode/active_vault/urgency_weights above (localStorage on web;
+    // no persistence yet on desktop, same known gap as everything else
+    // in this list).
+    pub hidden_views: Signal<Vec<View>>,
+    // True until the first moments+entities fetch (see views/home.rs's
+    // effect) resolves, or resets to true whenever it re-fetches (vault
+    // switch, etc). Everything that reads `moments`/`entities` — Home's own
+    // view match, Graph/Stats/History/Info panels — starts as an empty Vec,
+    // which used to render as "you have nothing" for a flash before real
+    // data arrived. This is the single shared flag they all key a loading
+    // skeleton off, instead of each view doing its own separate fetch/flag.
+    pub data_loading: Signal<bool>,
 }
 
 fn main() {
@@ -186,6 +283,8 @@ fn App() -> Element {
         sort_mode: Signal::new(SortMode::Default),
         active_vault: Signal::new(VaultKind::Synced),
         urgency_weights: Signal::new(UrgencyWeights::default()),
+        hidden_views: Signal::new(vec![]),
+        data_loading: Signal::new(true),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -228,6 +327,13 @@ fn App() -> Element {
 
                 if let Ok(Some(weights)) = storage.get_item("urgency_weights") {
                     state.urgency_weights.set(UrgencyWeights::from_storage_string(&weights));
+                }
+
+                if let Ok(Some(hidden)) = storage.get_item("hidden_views") {
+                    let views: Vec<View> = hidden.split(',')
+                        .filter_map(View::from_storage_str)
+                        .collect();
+                    state.hidden_views.set(views);
                 }
             } else {
                 clog!("localStorage unavailable — starting with in-memory defaults");

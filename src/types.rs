@@ -4,14 +4,17 @@ use uuid::Uuid;
 
 fn default_drift() -> f64 { 2.0 }
 
-// Entity id 0 is reserved to always mean "yourself" (see memory
-// project_self_entity_convention). IDs became UUID strings in the local-first
-// migration, but the live Supabase project still assigns this row the
-// integer id 0 — the value here has to match what the SupabaseStorage
-// boundary stringifies that row's id to (see api/client.rs), not the plan's
-// eventual "self" sentinel, which only applies once a local vault (with its
-// own self.md file) exists.
-pub const SELF_ENTITY_ID: &str = "0";
+// entity_types row 0 is reserved to mean "this is the type of the entity
+// that IS its owner" — every Synced account gets exactly one entities row
+// of this type, auto-provisioned server-side on signup (see
+// scripts/2026-07-22-rls-and-self-entity.sql). Replaces the old
+// entities.id == "0" convention: that was a single row shared by every
+// account (a real data-isolation bug, fixed alongside RLS in the same
+// migration), whereas this is a type marker each user's own row can carry.
+// Not offered as a selectable type in the New Entity modal (see
+// components::entity::EntityModalCmp) — it's a reserved system marker, not
+// a real relationship type.
+pub const SELF_ENTITY_TYPE_ID: &str = "0";
 
 // Supabase's `bigint` id columns are unchanged (see api/client.rs) — these
 // helpers are the one place that reconciles that wire shape (JSON numbers)
@@ -99,6 +102,14 @@ pub struct EntityType {
     pub name: String,
     #[serde(deserialize_with = "de_flex_id_opt", default)]
     pub entity_type_id: Option<String>,
+    // Set once at individuation time (see components::sidebar::entity_list_cmp's
+    // "Individuate" action) — the group entity this one was split out of.
+    // Was write-only via NewEntityType until 2026-07-22 (sent on creation
+    // but never read back here), so every individuated entity's provenance
+    // was silently unrecoverable despite the column existing on both
+    // storage backends.
+    #[serde(deserialize_with = "de_flex_id_opt", default)]
+    pub parent_entity_id: Option<String>,
     // Server-generated on insert; never sent back on writes.
     #[serde(skip_serializing, default)]
     pub created_at: String,

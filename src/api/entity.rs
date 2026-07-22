@@ -52,13 +52,26 @@ pub async fn getEntityTypes(token: String) -> Result<Vec<EntityTypeType>, reqwes
     Ok(result)
 }
 
-// No delete-entity path exists anywhere in the UI yet (see storage.rs's
-// ActiveStorage::delete_entity) — this just closes the gap at the API layer.
-pub async fn deleteEntity(id: String, token: String) -> Result<(), reqwest::Error> {
-    SupabaseClient::new(token)
+// Was `Result<(), reqwest::Error>` with no status check — reqwest's `?`
+// only errors on transport-level failure (DNS, connection refused), not on
+// the server returning a non-2xx response. A DELETE rejected by Postgres
+// (almost certainly a foreign-key violation here — moments.entity_id
+// references this row, and nothing cascades or nulls it out) silently
+// looked like success: the entity vanished from the UI, then came right
+// back on the next fetch since it was never actually deleted server-side.
+// Now matches the login/signup pattern (String error, not reqwest::Error)
+// so the real failure reason surfaces instead of being swallowed.
+pub async fn deleteEntity(id: String, token: String) -> Result<(), String> {
+    let response = SupabaseClient::new(token)
         .delete("entities", &id)
         .send()
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
 
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Delete failed ({}): {}", status, text));
+    }
     Ok(())
 }

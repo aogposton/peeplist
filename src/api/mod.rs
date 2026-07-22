@@ -15,7 +15,7 @@ pub mod local_desktop;
 #[cfg(not(feature = "desktop"))]
 pub mod local;
 
-pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_token};
+pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_token, update_password};
 pub use storage::{ActiveStorage, VaultKind, StorageError, is_self_entity};
 pub use import::{import_local_into_synced, ImportSummary};
 

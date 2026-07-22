@@ -640,7 +640,7 @@ pub fn MomentInputCmp() -> Element {
             selected_entity.set(Some(entity.name));
         }else{
             selected_entity.set(Some("Self".to_string()));
-            f.entity_sel = active_vault.read().effective(&auth_token.read()).self_entity_id().to_string();
+            f.entity_sel = active_vault.read().effective(&auth_token.read()).resolve_self_entity_id(&entities.read()).unwrap_or_default();
         }
 
 
@@ -653,7 +653,7 @@ pub fn MomentInputCmp() -> Element {
             selected_entity.set(Some(entity.name));
         }else{
             selected_entity.set(Some("Self".to_string()));
-            form.write().entity_sel = active_vault.read().effective(&auth_token.read()).self_entity_id().to_string();
+            form.write().entity_sel = active_vault.read().effective(&auth_token.read()).resolve_self_entity_id(&entities.read()).unwrap_or_default();
         }
     });
 
@@ -763,7 +763,13 @@ pub fn MomentInputCmp() -> Element {
                     class: "flex-1",
                     QuickCaptureInput {
                         value: title.read().clone(),
-                        placeholder: "Title · @name pri:H due:tomorrow +tag ;t;/;p;/;n; deps:".to_string(),
+                        // Not documenting the taskwarrior-style syntax here on
+                        // purpose — it read as confusing noise to new users.
+                        // Power users find @-mentions/pri:/due:/+tags/;t;/;p;/;n;
+                        // on their own (or from docs), same as any other
+                        // power-user shortcut isn't advertised in a plain
+                        // placeholder.
+                        placeholder: "What's on your mind?".to_string(),
                         entities: entities.read().clone(),
                         moments: moments.read().clone(),
                         on_input: move |v: String| {
@@ -833,7 +839,7 @@ pub fn MomentInputCmp() -> Element {
                         // Self is already the default option (the trigger
                         // label above) — omit it here so it isn't offered
                         // twice.
-                        for entity in entities.iter().filter(|e| !is_self_entity(&e.id)) {
+                        for entity in entities.iter().filter(|e| !is_self_entity(e)) {
                             DropdownItem::<String> {
                                 value:  "{entity.id}".to_string(),
                                 index: 0,
@@ -1165,6 +1171,8 @@ pub fn ab_task_cmp() -> Element {
     let mut backdropTgl = state.backdropTgl;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
+    let entities = state.entities;
+    let mut reassign_error = use_signal(|| None::<String>);
 
     // Every call site that opens this panel sets current_moment in the same
     // handler, so this shouldn't be reachable — but that's a convention, not
@@ -1488,6 +1496,48 @@ pub fn ab_task_cmp() -> Element {
                     if *advanced_open.read() {
                         div {
                                 class: "flex flex-col gap-4 p-3 border-t border-border",
+
+                                div {
+                                    class: "flex flex-col gap-y-1.5",
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Entity" }
+                                    select {
+                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                        oninput: {
+                                            let id = id.clone();
+                                            move |e| {
+                                                reassign_error.set(None);
+                                                let id = id.clone();
+                                                let new_entity_id = e.value();
+                                                let token = auth_token;
+                                                let vault = active_vault;
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    match storage.reassign_moment_entity(id.clone(), new_entity_id.clone()).await {
+                                                        Ok(()) => {
+                                                            if let Some(m) = moments.write().iter_mut().find(|m| m.id == id) {
+                                                                m.entity_id = new_entity_id;
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            clog!("Error reassigning moment's entity: {}", e);
+                                                            reassign_error.set(Some("Couldn't move this to that entity — try again.".to_string()));
+                                                        }
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        for e in entities.read().iter() {
+                                            option {
+                                                value: "{e.id}",
+                                                selected: live_moment.entity_id == e.id,
+                                                "{e.name}"
+                                            }
+                                        }
+                                    }
+                                    if let Some(msg) = reassign_error.read().as_ref() {
+                                        p { class: "text-xs text-destructive mt-1", "{msg}" }
+                                    }
+                                }
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
@@ -2020,6 +2070,117 @@ pub fn ScheduledViewCmp() -> Element {
     }
 }
 
+// Moved out of Settings 2026-07-22 — this is a data view (like Due/
+// Scheduled), not an account/vault setting, so it belongs in the sidebar's
+// "Views" list, not buried in Settings. Same underlying storage calls
+// (get_deleted_moments/restore_moment — see api::storage) as when this
+// lived in SettingsCmp, just relocated.
+#[component]
+pub fn RecentlyDeletedViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let entities = state.entities;
+    let mut moments = state.moments;
+    let active_vault = state.active_vault;
+    let auth_token = state.auth_token;
+
+    let mut deleted_moments = use_signal(Vec::<MomentType>::new);
+    let mut deleted_loading = use_signal(|| true);
+    let mut deleted_error = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        let vault = *active_vault.read();
+        let token = auth_token.read().clone();
+        deleted_loading.set(true);
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(vault, token);
+            match storage.get_deleted_moments().await {
+                Ok(data) => {
+                    deleted_moments.set(data);
+                    deleted_error.set(None);
+                }
+                Err(e) => {
+                    clog!("Error fetching deleted moments: {}", e);
+                    deleted_error.set(Some("Couldn't load recently deleted moments.".to_string()));
+                }
+            }
+            deleted_loading.set(false);
+        });
+    });
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    let mut restore_error = use_signal(|| None::<String>);
+    let mut restore_moment = move |moment: MomentType| {
+        restore_error.set(None);
+        let vault = *active_vault.read();
+        let token = auth_token.read().clone();
+        let id = moment.id.clone();
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(vault, token);
+            match storage.restore_moment(id.clone()).await {
+                Ok(()) => {
+                    deleted_moments.write().retain(|m| m.id != id);
+                    let mut restored = moment.clone();
+                    restored.deleted_at = None;
+                    moments.write().push(restored);
+                }
+                Err(e) => {
+                    clog!("Error restoring moment: {}", e);
+                    restore_error.set(Some("Couldn't restore that moment — try again.".to_string()));
+                }
+            }
+        });
+    };
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 flex flex-col gap-3",
+            if let Some(msg) = restore_error.read().as_ref() {
+                p { class: "text-sm text-destructive", "{msg}" }
+            }
+            if *deleted_loading.read() {
+                div {
+                    class: "rounded-lg border border-border bg-background text-sm text-muted-foreground text-center py-8",
+                    "Loading…"
+                }
+            } else if let Some(msg) = deleted_error.read().as_ref() {
+                div {
+                    class: "rounded-lg border border-border bg-background text-sm text-destructive text-center py-8",
+                    "{msg}"
+                }
+            } else if deleted_moments.read().is_empty() {
+                div {
+                    class: "rounded-lg border border-border bg-background text-sm text-muted-foreground text-center py-8",
+                    "Nothing in the trash."
+                }
+            } else {
+                div {
+                    class: "rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+                    for moment in deleted_moments.read().iter().cloned() {
+                        div {
+                            key: "{moment.id}",
+                            class: "flex items-center justify-between gap-3 px-4 py-3",
+                            div {
+                                class: "flex flex-col min-w-0",
+                                span { class: "text-sm font-medium text-foreground truncate", "{moment.title}" }
+                                span { class: "text-xs text-muted-foreground", "{entity_name(&moment.entity_id)}" }
+                            }
+                            button {
+                                class: "text-sm text-primary hover:underline cursor-pointer shrink-0",
+                                onclick: move |_| restore_moment(moment.clone()),
+                                "Restore"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Distinct from Priority: this answers "what does my week look like" (the
 // literal calendar shape of what's due), not "what should I do next" (a
 // composite urgency score). Same underlying due_at field, different
@@ -2114,9 +2275,10 @@ pub fn PriorityViewCmp() -> Element {
 
     let now = chrono::Utc::now();
     let all = moments.read().clone();
+    let all_entities = entities.read().clone();
     let mut ranked: Vec<(MomentType, crate::urgency::UrgencyBreakdown)> = all.iter()
         .filter(|m| m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now))
-        .map(|m| (m.clone(), crate::urgency::compute_urgency(m, &all, now, &weights)))
+        .map(|m| (m.clone(), crate::urgency::compute_urgency(m, &all, &all_entities, now, &weights)))
         .collect();
     ranked.sort_by(|a, b| b.1.total().partial_cmp(&a.1.total()).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -2181,6 +2343,7 @@ fn weight_fields() -> Vec<(&'static str, &'static str, fn(&UrgencyWeights) -> f6
         ("Blocked", "Applied when waiting on an unfinished dependency — usually negative.", |w| w.blocked, |w, v| w.blocked = v),
         ("Blocking", "Applied when finishing this would unblock other open work.", |w| w.blocking, |w, v| w.blocking = v),
         ("Tags", "Applied per tag, capped at 3 tags.", |w| w.tags, |w, v| w.tags = v),
+        ("Drift", "Ramps up the more a task's entity has drifted (their Distance), nudging you toward people you've neglected.", |w| w.drift, |w, v| w.drift = v),
     ]
 }
 

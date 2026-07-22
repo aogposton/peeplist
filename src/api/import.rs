@@ -12,6 +12,7 @@
 // silently reported as complete.
 
 use crate::api::{ActiveStorage, VaultKind, is_self_entity};
+use crate::api::vault_format::LOCAL_SELF_ENTITY_ID;
 use crate::types::*;
 use std::collections::HashMap;
 
@@ -23,22 +24,25 @@ pub struct ImportSummary {
 
 pub async fn import_local_into_synced(token: String) -> Result<ImportSummary, String> {
     let local = ActiveStorage::for_vault(VaultKind::Local, None);
-    let synced = ActiveStorage::for_vault(VaultKind::Synced, Some(token));
+    let synced = ActiveStorage::for_vault(VaultKind::Synced, Some(token.clone()));
 
     let local_entities = local.get_entities().await.map_err(|e| e.to_string())?;
     let local_moments = local.get_moments().await.map_err(|e| e.to_string())?;
+    let synced_entities = synced.get_entities().await.map_err(|e| e.to_string())?;
+    let synced_self_id = VaultKind::Synced.resolve_self_entity_id(&synced_entities)
+        .ok_or_else(|| "Couldn't find the Synced vault's Self entity".to_string())?;
 
     // Self is never copied as a new entity — each vault already has its
     // own self-identity, under a different id convention on each backend
-    // (LOCAL_SELF_ENTITY_ID "self" locally vs. SELF_ENTITY_ID "0" for
-    // Supabase — the two were never reconciled, see memory
+    // (LOCAL_SELF_ENTITY_ID "self" locally vs. a per-account entity_type
+    // match for Synced — the two were never reconciled, see memory
     // project_self_entity_convention). Moments attributed to Self locally
     // get re-attributed to the Synced vault's own Self instead of creating
     // a duplicate "Self" person.
     let mut id_map: HashMap<String, String> = HashMap::new();
     let mut entities_imported = 0usize;
 
-    for entity in local_entities.iter().filter(|e| !is_self_entity(&e.id)) {
+    for entity in local_entities.iter().filter(|e| !is_self_entity(e)) {
         let new_entity = NewEntityType {
             name: entity.name.clone(),
             entity_type_id: entity.entity_type_id.clone(),
@@ -63,8 +67,8 @@ pub async fn import_local_into_synced(token: String) -> Result<ImportSummary, St
     let mut reactions_imported = 0usize;
 
     for moment in local_moments.iter() {
-        let target_entity_id = if is_self_entity(&moment.entity_id) {
-            SELF_ENTITY_ID.to_string()
+        let target_entity_id = if moment.entity_id == LOCAL_SELF_ENTITY_ID {
+            synced_self_id.clone()
         } else {
             match id_map.get(&moment.entity_id) {
                 Some(id) => id.clone(),
