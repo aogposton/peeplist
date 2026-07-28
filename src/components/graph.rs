@@ -103,11 +103,15 @@ pub fn GraphViewCmp() -> Element {
             let max_distance = distances.iter().map(|(_, d)| *d).fold(f64::NEG_INFINITY, f64::max);
             let span = max_distance - min_distance;
             let nodes_in: Vec<GraphNodeIn> = distances.iter().map(|(id, distance)| {
-                // Inverted on purpose: highest raw distance value renders closest
-                // to center, lowest renders farthest. Per-user call, not a
-                // "distance == literal pixel distance" mapping.
+                // Highest raw distance value renders farthest from center,
+                // lowest renders closest — flipped back to this (the intuitive
+                // direction) 2026-07-23. Was briefly inverted the other way
+                // per an earlier explicit call; that stopped matching what was
+                // actually wanted once real data made the effect visible (a
+                // cluster of drifted-but-otherwise-untouched entities all
+                // rendering suspiciously close to Self).
                 let ratio = if span > f64::EPSILON { (distance - min_distance) / span } else { 0.5 };
-                let radius = MAX_RADIUS - ratio * (MAX_RADIUS - MIN_RADIUS);
+                let radius = MIN_RADIUS + ratio * (MAX_RADIUS - MIN_RADIUS);
                 GraphNodeIn { id: id.clone(), target_radius: radius }
             }).collect();
 

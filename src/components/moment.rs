@@ -14,6 +14,7 @@ use lumen_blocks::components::dropdown::{
 };
 use lumen_blocks::components::collapsible::{Collapsible, CollapsibleTrigger, CollapsibleContent};
 use lumen_blocks::components::label::{Label, LabelSize};
+use crate::components::context_menu::{ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger};
 use web_sys::window;
 use crate::quick_capture::{self, TokenKind};
 
@@ -73,16 +74,12 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
     if !props.moments.iter().any(|m| m.moment_type_id == 3i64) {
         return rsx! {};
     }
-    let mut show_menu = use_signal(|| false);
-    let mut menu_coords = use_signal(|| (0.0, 0.0));
-    let mut last_moment_right_clicked_id = use_signal(String::new);
     let state = use_context::<AppState>();
     let mut moments = state.moments;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
 
-    let onConvertTo = move |mType: i64| {
-        let id = last_moment_right_clicked_id.read().clone();
+    let onConvertTo = move |id: String, mType: i64| {
         let token = auth_token;
                         let vault = active_vault;
         let note_type = mType;
@@ -100,7 +97,44 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
         });
     };
 
-    const MENU_ITEM_CLASS: &str = "px-2 py-1.5 text-sm rounded-sm hover:bg-muted transition-colors cursor-pointer";
+    let onDelete = move |m: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let id = m.id.clone();
+            match storage.delete_moment(m).await {
+                Ok(()) => { moments.write().retain(|mm| mm.id != id); }
+                Err(e) => log::info!("Error deleting moment: {}", e),
+            }
+        });
+    };
+
+    let onDuplicate = move |m: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let new_moment = NewMomentType {
+                title: m.title.clone(),
+                description: m.description.clone(),
+                gravity: m.gravity,
+                entity_id: m.entity_id.clone(),
+                moment_type_id: m.moment_type_id,
+                deleted_at: None,
+            };
+            match storage.create_moment(new_moment).await {
+                Ok(mut created) => {
+                    if let Some(meta) = m.metadata.clone() {
+                        let _ = storage.update_moment_field(created.id.clone(), "metadata", serde_json::json!(meta)).await;
+                        created.metadata = Some(meta);
+                    }
+                    moments.write().insert(0, created);
+                }
+                Err(e) => log::info!("Error duplicating moment: {}", e),
+            }
+        });
+    };
 
     rsx! {
         div {
@@ -115,44 +149,36 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
                         class: "flex flex-col divide-y divide-border",
                         for moment in props.moments.iter() {
                             if  moment.moment_type_id == 3i64 {
-                                {
-                                    let moment_id = moment.id.clone();
-                                    rsx! {
+                                ContextMenu {
+                                    key: "{moment.id}",
+                                    ContextMenuTrigger {
                                         MomentCmp {
                                             moment: moment.clone(),
                                             is_note: true,
-                                            oncontextmenu: move |evt: MouseEvent| {
-                                                evt.prevent_default();
-                                                let coords = evt.client_coordinates();
-                                                last_moment_right_clicked_id.set(moment_id.clone());
-                                                menu_coords.set((coords.x, coords.y));
-                                                show_menu.set(true);
-                                            },
+                                        }
+                                    }
+                                    ContextMenuContent {
+                                        ContextMenuItem {
+                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 1i64) },
+                                            "Convert to task"
+                                        }
+                                        ContextMenuItem {
+                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 2i64) },
+                                            "Convert to promise"
+                                        }
+                                        ContextMenuItem {
+                                            on_select: { let m = moment.clone(); move |_| onDuplicate(m.clone()) },
+                                            "Duplicate"
+                                        }
+                                        ContextMenuItem {
+                                            destructive: true,
+                                            on_select: { let m = moment.clone(); move |_| onDelete(m.clone()) },
+                                            "Delete"
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                }
-            }
-        }
-        if show_menu() {
-            div {
-                class: "fixed bg-popover text-popover-foreground border border-border shadow-md rounded-md p-1 z-50 min-w-40",
-                style: "top: {menu_coords().1}px; left: {menu_coords().0}px;",
-                onclick: move |_| { show_menu.set(false); },
-                ul {
-                    class: "flex flex-col",
-                    li {
-                        class: MENU_ITEM_CLASS,
-                        onclick: move |_| onConvertTo(1i64),
-                        "Convert to Task"
-                    }
-                    li {
-                        class: MENU_ITEM_CLASS,
-                        onclick: move |_| onConvertTo(2i64),
-                        "Convert to Promise"
                     }
                 }
             }
@@ -164,9 +190,55 @@ pub fn CompletedSectionCmp(props: MomentListProps) -> Element {
     if !props.moments.iter().any(|m| m.completed_at.is_some()) {
         return rsx! {};
     }
-    let mut show_menu = use_signal(|| false);
-    let mut menu_coords = use_signal(|| (0.0, 0.0));
-    //
+    let state = use_context::<AppState>();
+    let mut moments = state.moments;
+    let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
+
+    // This section never actually rendered a menu at all before (it tracked
+    // show_menu/menu_coords on right-click but nothing consumed them) — so
+    // this is a real gap being filled, not just a dismiss-bug fix like the
+    // other two. Delete/Duplicate only, no "convert type" — that's not a
+    // meaningful action on something already completed.
+    let onDelete = move |m: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let id = m.id.clone();
+            match storage.delete_moment(m).await {
+                Ok(()) => { moments.write().retain(|mm| mm.id != id); }
+                Err(e) => log::info!("Error deleting moment: {}", e),
+            }
+        });
+    };
+
+    let onDuplicate = move |m: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let new_moment = NewMomentType {
+                title: m.title.clone(),
+                description: m.description.clone(),
+                gravity: m.gravity,
+                entity_id: m.entity_id.clone(),
+                moment_type_id: m.moment_type_id,
+                deleted_at: None,
+            };
+            match storage.create_moment(new_moment).await {
+                Ok(mut created) => {
+                    if let Some(meta) = m.metadata.clone() {
+                        let _ = storage.update_moment_field(created.id.clone(), "metadata", serde_json::json!(meta)).await;
+                        created.metadata = Some(meta);
+                    }
+                    moments.write().insert(0, created);
+                }
+                Err(e) => log::info!("Error duplicating moment: {}", e),
+            }
+        });
+    };
+
     rsx! {
         div {
             class: "mx-4 mb-3 rounded-lg border border-border bg-background overflow-hidden",
@@ -180,14 +252,24 @@ pub fn CompletedSectionCmp(props: MomentListProps) -> Element {
                         class: "flex flex-col divide-y divide-border",
                         for moment in props.moments.iter() {
                             if moment.completed_at.is_some() {
-                                MomentCmp {
-                                    moment: moment.clone(),
-                                    oncontextmenu: move |evt: MouseEvent| {
-                                        evt.prevent_default();
-                                        let coords = evt.client_coordinates();
-                                        menu_coords.set((coords.x, coords.y));
-                                        show_menu.set(true);
-                                    },
+                                ContextMenu {
+                                    key: "{moment.id}",
+                                    ContextMenuTrigger {
+                                        MomentCmp {
+                                            moment: moment.clone(),
+                                        }
+                                    }
+                                    ContextMenuContent {
+                                        ContextMenuItem {
+                                            on_select: { let m = moment.clone(); move |_| onDuplicate(m.clone()) },
+                                            "Duplicate"
+                                        }
+                                        ContextMenuItem {
+                                            destructive: true,
+                                            on_select: { let m = moment.clone(); move |_| onDelete(m.clone()) },
+                                            "Delete"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -240,31 +322,51 @@ pub fn moment_history_cmp() -> Element {
 
 #[component]
 pub fn MomentListCmp(props: MomentListProps) -> Element {
-    let mut show_menu = use_signal(|| false);
-    let mut menu_coords = use_signal(|| (0.0, 0.0));
-    let mut last_moment_right_clicked_id = use_signal(String::new);
-    let mut last_moment_right_clicked_type = use_signal(|| 0);
     let mut dragged_id = use_signal(|| None::<String>);
     let state = use_context::<AppState>();
     let mut moments = state.moments;
     let mut sort_mode = state.sort_mode;
+    let mut sort_descending = state.sort_descending;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
+    let entities = state.entities;
 
     let moments_list = props.moments.clone();
 
+    // Case-insensitive, same convention as the sidebar's own entity
+    // ordering — used by the "By entity" sort below to both order the
+    // groups and label each one.
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
     let mut set_sort_mode = move |mode: SortMode| {
+        // Clicking the mode that's already active flips direction instead
+        // of being a no-op; clicking a different mode switches to it and
+        // resets to ascending (matches clicking a different table column
+        // header — you don't inherit the old column's direction).
+        if *sort_mode.read() == mode {
+            let flipped = !*sort_descending.read();
+            sort_descending.set(flipped);
+            #[cfg(not(feature = "desktop"))]
+            if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                storage.set("sort_descending", if flipped { "true" } else { "false" }).ok();
+            }
+            return;
+        }
         sort_mode.set(mode);
+        sort_descending.set(false);
         // Desktop has no preference persistence yet — see main.rs's startup
         // effect.
         #[cfg(not(feature = "desktop"))]
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
             storage.set("sort_mode", mode.as_storage_str()).ok();
+            storage.set("sort_descending", "false").ok();
         }
     };
 
-    let onConvertTo = move |mType:i64| {
-        let id = last_moment_right_clicked_id.read().clone();
+    let onConvertTo = move |id: String, mType: i64| {
         let token = auth_token;
                         let vault = active_vault;
         let note_type = mType;
@@ -279,6 +381,53 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                     clog!("helloo?");
                 }
                 Err(e) => log::info!("Error updating moment: {}", e),
+            }
+        });
+    };
+
+    let onDelete = move |m: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let id = m.id.clone();
+            match storage.delete_moment(m).await {
+                Ok(()) => { moments.write().retain(|mm| mm.id != id); }
+                Err(e) => log::info!("Error deleting moment: {}", e),
+            }
+        });
+    };
+
+    // Copies the core content (title, description, gravity, type, entity,
+    // tags/project/due date via metadata) into a brand-new moment. Doesn't
+    // carry over completion, depends_on, or reactions — a duplicate is a
+    // fresh instance of the same content, not a clone of its history/state.
+    let onDuplicate = move |m: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let new_moment = NewMomentType {
+                title: m.title.clone(),
+                description: m.description.clone(),
+                gravity: m.gravity,
+                entity_id: m.entity_id.clone(),
+                moment_type_id: m.moment_type_id,
+                deleted_at: None,
+            };
+            match storage.create_moment(new_moment).await {
+                Ok(mut created) => {
+                    if let Some(due) = m.due_at.clone() {
+                        let _ = storage.update_moment_field(created.id.clone(), "due_at", serde_json::json!(due)).await;
+                        created.due_at = Some(due);
+                    }
+                    if let Some(meta) = m.metadata.clone() {
+                        let _ = storage.update_moment_field(created.id.clone(), "metadata", serde_json::json!(meta)).await;
+                        created.metadata = Some(meta);
+                    }
+                    moments.write().insert(0, created);
+                }
+                Err(e) => log::info!("Error duplicating moment: {}", e),
             }
         });
     };
@@ -307,14 +456,35 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
             let bx = b.metadata.as_ref().and_then(|m| m.sort_index).unwrap_or_else(|| id_as_f64(&b.id));
             ax.partial_cmp(&bx).unwrap_or(std::cmp::Ordering::Equal)
         }),
+        SortMode::ByEntity => display_list.sort_by(|a, b| {
+            let na = entity_name(&a.entity_id).to_lowercase();
+            let nb = entity_name(&b.entity_id).to_lowercase();
+            na.cmp(&nb).then_with(|| id_as_f64(&a.id).partial_cmp(&id_as_f64(&b.id)).unwrap_or(std::cmp::Ordering::Equal))
+        }),
+    }
+    // A plain reverse keeps By entity's groups contiguous (reversing a
+    // list sorted by key reverses both group order and order-within-group,
+    // never interleaves them), so this works uniformly for every mode
+    // without needing per-mode-aware logic.
+    if *sort_descending.read() {
+        display_list.reverse();
     }
     let is_custom = current_sort_mode == SortMode::Custom;
+    let is_by_entity = current_sort_mode == SortMode::ByEntity;
+    let mut last_header_entity_id: Option<String> = None;
 
-    const MENU_ITEM_CLASS: &str = "px-2 py-1.5 text-sm rounded-sm hover:bg-muted transition-colors cursor-pointer";
     let sort_btn_class = |active: bool| if active {
         "px-2 py-1 text-xs rounded-md bg-muted text-foreground font-medium cursor-pointer"
     } else {
         "px-2 py-1 text-xs rounded-md text-muted-foreground hover:bg-muted transition-colors cursor-pointer"
+    };
+
+    // Click the active mode again to flip direction — same "click a
+    // table header twice" convention, no separate control.
+    let dir_arrow = |mode: SortMode| if current_sort_mode == mode {
+        if *sort_descending.read() { " ▼" } else { " ▲" }
+    } else {
+        ""
     };
 
     rsx! {
@@ -324,17 +494,22 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
             span {
                 class: sort_btn_class(current_sort_mode == SortMode::Default),
                 onclick: move |_| set_sort_mode(SortMode::Default),
-                "Default"
+                "Default{dir_arrow(SortMode::Default)}"
             }
             span {
                 class: sort_btn_class(current_sort_mode == SortMode::DueDate),
                 onclick: move |_| set_sort_mode(SortMode::DueDate),
-                "Due date"
+                "Due date{dir_arrow(SortMode::DueDate)}"
             }
             span {
                 class: sort_btn_class(current_sort_mode == SortMode::Custom),
                 onclick: move |_| set_sort_mode(SortMode::Custom),
-                "Custom (drag to reorder)"
+                "Custom (drag to reorder){dir_arrow(SortMode::Custom)}"
+            }
+            span {
+                class: sort_btn_class(current_sort_mode == SortMode::ByEntity),
+                onclick: move |_| set_sort_mode(SortMode::ByEntity),
+                "By entity{dir_arrow(SortMode::ByEntity)}"
             }
         }
         div {
@@ -344,7 +519,18 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                     let moment = moment.clone();
                     let target_id = moment.id.clone();
                     let list_snapshot = display_list.clone();
+                    let show_header = is_by_entity && last_header_entity_id.as_deref() != Some(moment.entity_id.as_str());
+                    if show_header {
+                        last_header_entity_id = Some(moment.entity_id.clone());
+                    }
+                    let header_name = if show_header { Some(entity_name(&moment.entity_id)) } else { None };
                     rsx! {
+                        if let Some(name) = header_name {
+                            div {
+                                class: "px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground bg-muted/50",
+                                "{name}"
+                            }
+                        }
                         div {
                             key: "{target_id}",
                             draggable: is_custom,
@@ -385,61 +571,41 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                                     });
                                 }
                             },
-                            MomentCmp {
-                                moment: moment.clone(),
-                                oncontextmenu: move |evt: MouseEvent| {
-                                    evt.prevent_default();
-                                    let coords = evt.client_coordinates();
-                                    last_moment_right_clicked_id.set(moment.id.clone());
-                                    last_moment_right_clicked_type.set(moment.moment_type_id);
-                                    menu_coords.set((coords.x, coords.y));
-                                    show_menu.set(true);
-                                },
+                            ContextMenu {
+                                ContextMenuTrigger {
+                                    MomentCmp {
+                                        moment: moment.clone(),
+                                    }
+                                }
+                                ContextMenuContent {
+                                    if moment.moment_type_id == 1i64 {
+                                        ContextMenuItem {
+                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 2i64) },
+                                            "Convert to promise"
+                                        }
+                                    }
+                                    if moment.moment_type_id == 2i64 {
+                                        ContextMenuItem {
+                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 1i64) },
+                                            "Convert to task"
+                                        }
+                                    }
+                                    ContextMenuItem {
+                                        on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 3i64) },
+                                        "Convert to note"
+                                    }
+                                    ContextMenuItem {
+                                        on_select: { let m = moment.clone(); move |_| onDuplicate(m.clone()) },
+                                        "Duplicate"
+                                    }
+                                    ContextMenuItem {
+                                        destructive: true,
+                                        on_select: { let m = moment.clone(); move |_| onDelete(m.clone()) },
+                                        "Delete"
+                                    }
+                                }
                             }
                         }
-                    }
-                }
-            }
-        }
-        if show_menu() {
-            if last_moment_right_clicked_type.read().clone() == 1i64 { //task
-                div {
-                    class: "fixed bg-popover text-popover-foreground border border-border shadow-md rounded-md p-1 z-50 min-w-40",
-                    style: "top: {menu_coords().1}px; left: {menu_coords().0}px;",
-                    onclick: move |_| { show_menu.set(false); }, // Close menu on click
-                    ul {
-                        class: "flex flex-col",
-                        li {
-                            class: MENU_ITEM_CLASS,
-                            onclick: move |_| onConvertTo(2i64),
-                            "Convert to promise"
-                        }
-                        li {
-                            class: MENU_ITEM_CLASS,
-                            onclick: move |_| onConvertTo(3i64),
-                            "Convert to Note"
-                        }
-                    }
-                }
-            }
-            if last_moment_right_clicked_type.read().clone() == 2i64 { //promise
-                div {
-                    class: "fixed bg-popover text-popover-foreground border border-border shadow-md rounded-md p-1 z-50 min-w-40",
-                    style: "top: {menu_coords().1}px; left: {menu_coords().0}px;",
-                    onclick: move |_| { show_menu.set(false); }, // Close menu on click
-                    ul {
-                        class: "flex flex-col",
-                        li {
-                            class: MENU_ITEM_CLASS,
-                            onclick: move |_| onConvertTo(1i64),
-                            "Convert to Task"
-                        }
-                        li {
-                            class: MENU_ITEM_CLASS,
-                            onclick: move |_| onConvertTo(3i64),
-                            "Convert to Note"
-                        }
-                        li { class: MENU_ITEM_CLASS, "Convert to Promise" }
                     }
                 }
             }
@@ -561,7 +727,6 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
                 backdropTgl.set(true);
                 activity_bar_tgl.set(true);
             },
-            oncontextmenu: move |e| props.oncontextmenu.call(e),
             div {
                 onclick: move |e| e.stop_propagation(),
                 if !props.is_note.clone().unwrap_or(false) {
@@ -695,7 +860,14 @@ pub fn MomentInputCmp() -> Element {
                 title: parsed.title.clone(),
                 entity_id,
                 description: Some(form_data.description.clone()),
-                gravity: Some(1),
+                // 0, not 1 — matches both the "unset" default read elsewhere
+                // (live_moment.gravity.unwrap_or(0)) and the new -10..10
+                // select's step-of-10 grid (see ui.rs's gravity_select); a
+                // raw 1 doesn't land on any option in that grid, so new
+                // moments were visually showing gravity as "-10" (the
+                // browser's fallback to the first out-of-range option)
+                // instead of looking unset.
+                gravity: Some(0),
                 moment_type_id: parsed.moment_type_id.unwrap_or(1),
                 deleted_at: None,
             };
@@ -873,6 +1045,24 @@ pub fn MomentInputCmp() -> Element {
                 value: "{form.read().description}",
                 onmounted: move |e| description_el.set(Some(e.data())),
                 oninput: move |e| form.write().description = e.value(),
+            }
+
+            // Desktop-only counterpart to the "Add Moment" button below
+            // (that one's xl:hidden — mobile only). Tabbing into the
+            // description textarea had nowhere to go from there: Enter in a
+            // textarea means newline, not submit, and there was no visible
+            // button on desktop to tab to or click — so finishing a moment
+            // that had a description meant tabbing/clicking all the way
+            // back up to the title field. Only shown once the description
+            // is actually open, same visibility condition as the textarea
+            // itself.
+            if *description_open.read() {
+                button {
+                    class: "hidden xl:block w-full mt-2 rounded-md py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer",
+                    style: "background-color:{HL};",
+                    onclick: move |_| submit_moment(),
+                    "Add Moment",
+                }
             }
 
             button {
@@ -1173,6 +1363,22 @@ pub fn ab_task_cmp() -> Element {
     let active_vault = state.active_vault;
     let entities = state.entities;
     let mut reassign_error = use_signal(|| None::<String>);
+    // Searchable depends-on picker state (replaces a plain <select> that
+    // used to be scoped to only the current entity's own moments — see the
+    // dependency_candidates comment below). Reset whenever the panel
+    // switches to a different moment, same pattern as entity.rs's
+    // confirming_delete reset.
+    let mut depends_search = use_signal(String::new);
+    let mut depends_dropdown_open = use_signal(|| false);
+    // Full-screen title+description editor (desktop only — mobile already
+    // gets a full-width slide-out panel for this) — the compact panel's own
+    // title input and ~8-row textarea aren't enough room to actually read
+    // or write a real note. Modal overlay, not a route change: quick in/out,
+    // same moment, same save handlers as the compact fields below. The
+    // signal lives on AppState and the modal itself renders from
+    // FullScreenEditorModalCmp at the top level (see its own doc comment
+    // for why) — this component only sets the flag.
+    let mut full_editor_open = state.full_editor_open;
 
     // Every call site that opens this panel sets current_moment in the same
     // handler, so this shouldn't be reachable — but that's a convention, not
@@ -1251,12 +1457,24 @@ pub fn ab_task_cmp() -> Element {
     // reopening the panel. That staleness previously meant a freshly-set
     // dependency didn't actually block completion (or show as selected in
     // the dropdown) until the panel was closed and reopened.
-    let entity_id = moment.entity_id.clone();
+    // Any open task/promise can be a dependency, regardless of which entity
+    // it's attributed to — a moment scoped to "only this entity's own
+    // moments" (the old behavior) doesn't match how depends_on is actually
+    // used; a thing you're waiting on is a thing you're waiting on no
+    // matter whose it is.
     let dependency_candidates: Vec<MomentType> = moments.read().iter()
-        .filter(|m| m.entity_id == entity_id && m.id != id && m.completed_at.is_none())
+        .filter(|m| m.id != id && m.completed_at.is_none())
         .cloned()
         .collect();
     let current_depends_on = moments.read().iter().find(|m| m.id == id).and_then(|m| m.depends_on.clone());
+
+    use_effect(move || {
+        let dep_title = current_moment.read().as_ref()
+            .and_then(|m| m.depends_on.clone())
+            .and_then(|dep_id| moments.read().iter().find(|mm| mm.id == dep_id).map(|mm| mm.title.clone()));
+        depends_search.set(dep_title.unwrap_or_default());
+        depends_dropdown_open.set(false);
+    });
     let blocked_on = current_depends_on.clone().and_then(|dep_id| {
         moments.read().iter().find(|m| m.id == dep_id).cloned()
     });
@@ -1362,23 +1580,72 @@ pub fn ab_task_cmp() -> Element {
                             }
                         }
                         }
+                        // A single `datetime-local` input can't be set from
+                        // just a date — the browser treats it as incomplete
+                        // (and reports an empty value) until both the date
+                        // and time sub-fields are filled in, which is what
+                        // "setting a due date without a time doesn't work"
+                        // actually was. Split into two real inputs instead;
+                        // time is optional and defaults to midnight, date is
+                        // still required to have a due_at at all. Combining
+                        // reuses whichever half didn't just change from the
+                        // moment's current due_at, same bare
+                        // "YYYY-MM-DDTHH:MM" storage format as before.
                         input {
-                            r#type: "datetime-local",
-                            class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 min-w-[12rem] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                            value: "{due_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
+                            r#type: "date",
+                            class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            value: "{due_at.clone().unwrap_or_default().chars().take(10).collect::<String>()}",
                             onchange: {
                                 let id = id.clone();
+                                let due_at = due_at.clone();
                                 move |e: Event<FormData>| {
                                     let id = id.clone();
                                     let token = auth_token;
-                        let vault = active_vault;
+                                    let vault = active_vault;
+                                    let date = e.value();
+                                    let time = due_at.as_deref().and_then(|d| d.get(11..16)).unwrap_or("00:00").to_string();
+                                    let new_due = if date.is_empty() { None } else { Some(format!("{date}T{time}")) };
                                     spawn(async move {
                                         let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                        match storage.update_moment_field(id.clone(), "due_at", serde_json::json!(Some(e.value()))).await {
+                                        match storage.update_moment_field(id.clone(), "due_at", serde_json::json!(new_due)).await {
                                             Ok(_) => {
                                                 let mut list = moments.write();
                                                 if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                    m.due_at = Some(e.value());
+                                                    m.due_at = new_due;
+                                                }
+                                            }
+                                            Err(e) => log::info!("Error updating moment: {}", e),
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                        input {
+                            r#type: "time",
+                            class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            value: "{due_at.clone().and_then(|d| d.get(11..16).map(str::to_string)).unwrap_or_default()}",
+                            onchange: {
+                                let id = id.clone();
+                                let due_at = due_at.clone();
+                                move |e: Event<FormData>| {
+                                    let id = id.clone();
+                                    let token = auth_token;
+                                    let vault = active_vault;
+                                    let date = due_at.as_deref().map(|d| d.chars().take(10).collect::<String>()).unwrap_or_default();
+                                    if date.is_empty() {
+                                        // No date set yet — a bare time means
+                                        // nothing, so there's nothing to save.
+                                        return;
+                                    }
+                                    let time = if e.value().is_empty() { "00:00".to_string() } else { e.value() };
+                                    let new_due = Some(format!("{date}T{time}"));
+                                    spawn(async move {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        match storage.update_moment_field(id.clone(), "due_at", serde_json::json!(new_due)).await {
+                                            Ok(_) => {
+                                                let mut list = moments.write();
+                                                if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                    m.due_at = new_due;
                                                 }
                                             }
                                             Err(e) => log::info!("Error updating moment: {}", e),
@@ -1390,57 +1657,73 @@ pub fn ab_task_cmp() -> Element {
                     }
                 }
 
-                input {
-                    class: "text-xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1",
-                    value: "{title}",
-                    // Commit on blur, not every keystroke — a local-vault write
-                    // rewrites the whole entity file (see api/vault_format.rs),
-                    // and this cuts Supabase chatter today too.
-                    onchange: {
-                        let id = id.clone();
-                        move |e| {
-                            let id = id.clone();
-                            let token = auth_token;
-                        let vault = active_vault;
-                            spawn(async move {
-                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                match storage.update_moment_field(id.clone(), "title", serde_json::json!(e.value())).await {
-                                    Ok(_) => {
-                                        let mut list = moments.write();
-                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                            m.title = e.value();
-                                        }
+                {
+                    rsx! {
+                        div {
+                            class: "flex items-center gap-1",
+                            input {
+                                class: "text-xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1",
+                                value: "{title}",
+                                // Commit on blur, not every keystroke — a local-vault write
+                                // rewrites the whole entity file (see api/vault_format.rs),
+                                // and this cuts Supabase chatter today too.
+                                onchange: {
+                                    let id = id.clone();
+                                    move |e| {
+                                        let id = id.clone();
+                                        let token = auth_token;
+                                        let vault = active_vault;
+                                        let val = e.value();
+                                        spawn(async move {
+                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                            match storage.update_moment_field(id.clone(), "title", serde_json::json!(val)).await {
+                                                Ok(_) => {
+                                                    let mut list = moments.write();
+                                                    if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                        m.title = val;
+                                                    }
+                                                }
+                                                Err(e) => log::info!("Error updating moment: {}", e),
+                                            }
+                                        });
                                     }
-                                    Err(e) => log::info!("Error updating moment: {}", e),
-                                }
-                            });
+                                },
+                            }
+                            button {
+                                class: "hidden xl:flex shrink-0 h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer",
+                                title: "Expand to full-screen editor",
+                                onclick: move |_| full_editor_open.set(true),
+                                fa_expand {}
+                            }
                         }
-                    }
-                }
 
-                textarea {
-                    class: "w-full min-h-32 rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y",
-                    placeholder: "Add a description...",
-                    value: "{description.clone().unwrap_or_default()}",
-                    onchange: {
-                        let id = id.clone();
-                        move |e| {
-                            let id = id.clone();
-                            let token = auth_token;
-                        let vault = active_vault;
-                            spawn(async move {
-                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                match storage.update_moment_field(id.clone(), "description", serde_json::json!(e.value())).await {
-                                    Ok(_) => {
-                                        let mut list = moments.write();
-                                        if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                            m.description = Some(e.value());
+                        textarea {
+                            class: "w-full min-h-32 rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y",
+                            placeholder: "Add a description...",
+                            value: "{description.clone().unwrap_or_default()}",
+                            onchange: {
+                                let id = id.clone();
+                                move |e| {
+                                    let id = id.clone();
+                                    let token = auth_token;
+                                    let vault = active_vault;
+                                    let val = e.value();
+                                    spawn(async move {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        match storage.update_moment_field(id.clone(), "description", serde_json::json!(val)).await {
+                                            Ok(_) => {
+                                                let mut list = moments.write();
+                                                if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                    m.description = Some(val);
+                                                }
+                                            }
+                                            Err(e) => log::info!("Error updating moment: {}", e),
                                         }
-                                    }
-                                    Err(e) => log::info!("Error updating moment: {}", e),
+                                    });
                                 }
-                            });
+                            },
                         }
+
                     }
                 }
 
@@ -1541,7 +1824,7 @@ pub fn ab_task_cmp() -> Element {
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
-                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Priority" }
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Expedite" }
                                     select {
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         oninput: {
@@ -1720,36 +2003,99 @@ pub fn ab_task_cmp() -> Element {
                                             "Blocking {blocking_count} other open moment(s)"
                                         }
                                     }
-                                    select {
-                                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                        oninput: {
-                                            let id = id.clone();
-                                            move |e| {
-                                                let val = e.value();
-                                                let new_dep: Option<String> = if val.is_empty() { None } else { Some(val) };
-                                                let id = id.clone();
-                                                let token = auth_token;
-                                let vault = active_vault;
-                                                spawn(async move {
-                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                                    match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(new_dep)).await {
-                                                        Ok(_) => {
-                                                            let mut list = moments.write();
-                                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                                m.depends_on = new_dep;
+                                    div {
+                                        class: "relative",
+                                        input {
+                                            r#type: "text",
+                                            class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                            placeholder: "Search open tasks/promises...",
+                                            value: "{depends_search.read()}",
+                                            onfocus: move |_| depends_dropdown_open.set(true),
+                                            oninput: move |e| {
+                                                depends_search.set(e.value());
+                                                depends_dropdown_open.set(true);
+                                            },
+                                        }
+                                        if *depends_dropdown_open.read() {
+                                            // Same invisible-backdrop outside-click-dismiss
+                                            // pattern as components/context_menu — a click
+                                            // anywhere outside the list closes it.
+                                            div {
+                                                class: "fixed inset-0 z-40",
+                                                onclick: move |_| depends_dropdown_open.set(false),
+                                            }
+                                            div {
+                                                class: "absolute z-50 mt-1 w-full max-h-56 overflow-y-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg p-1",
+                                                onclick: move |e| e.stop_propagation(),
+                                                div {
+                                                    class: "flex items-center rounded-sm px-2 py-1.5 text-sm text-muted-foreground cursor-pointer hover:bg-accent transition-colors",
+                                                    onclick: {
+                                                        let id = id.clone();
+                                                        move |_| {
+                                                            depends_search.set(String::new());
+                                                            depends_dropdown_open.set(false);
+                                                            let id = id.clone();
+                                                            let token = auth_token;
+                                                            let vault = active_vault;
+                                                            spawn(async move {
+                                                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                                match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(None::<String>)).await {
+                                                                    Ok(_) => {
+                                                                        if let Some(m) = moments.write().iter_mut().find(|m| m.id == id) {
+                                                                            m.depends_on = None;
+                                                                        }
+                                                                    }
+                                                                    Err(e) => log::info!("Error updating depends_on: {}", e),
+                                                                }
+                                                            });
+                                                        }
+                                                    },
+                                                    "None"
+                                                }
+                                                {
+                                                    let query = depends_search.read().to_lowercase();
+                                                    let matches: Vec<MomentType> = dependency_candidates.iter()
+                                                        .filter(|m| query.is_empty() || m.title.to_lowercase().contains(&query))
+                                                        .take(8)
+                                                        .cloned()
+                                                        .collect();
+                                                    rsx! {
+                                                        if matches.is_empty() {
+                                                            div { class: "px-2 py-1.5 text-sm text-muted-foreground", "No matches" }
+                                                        }
+                                                        for candidate in matches.into_iter() {
+                                                            div {
+                                                                key: "{candidate.id}",
+                                                                class: "flex items-center rounded-sm px-2 py-1.5 text-sm text-foreground cursor-pointer hover:bg-accent transition-colors",
+                                                                onclick: {
+                                                                    let id = id.clone();
+                                                                    let cand_id = candidate.id.clone();
+                                                                    let cand_title = candidate.title.clone();
+                                                                    move |_| {
+                                                                        depends_search.set(cand_title.clone());
+                                                                        depends_dropdown_open.set(false);
+                                                                        let id = id.clone();
+                                                                        let cand_id = cand_id.clone();
+                                                                        let token = auth_token;
+                                                                        let vault = active_vault;
+                                                                        spawn(async move {
+                                                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                                            match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(Some(cand_id.clone()))).await {
+                                                                                Ok(_) => {
+                                                                                    if let Some(m) = moments.write().iter_mut().find(|m| m.id == id) {
+                                                                                        m.depends_on = Some(cand_id);
+                                                                                    }
+                                                                                }
+                                                                                Err(e) => log::info!("Error updating depends_on: {}", e),
+                                                                            }
+                                                                        });
+                                                                    }
+                                                                },
+                                                                "{candidate.title}"
                                                             }
                                                         }
-                                                        Err(e) => log::info!("Error updating depends_on: {}", e),
                                                     }
-                                                });
-                                            }
-                                        },
-                                        option { value: "", selected: current_depends_on.is_none(), "None" }
-                                        for candidate in dependency_candidates.iter() {
-                                            option {
-                                                value: "{candidate.id}",
-                                                selected: current_depends_on == Some(candidate.id.clone()),
-                                                "{candidate.title}"
+                                                }
                                             }
                                         }
                                     }
@@ -1996,6 +2342,115 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
     }
 }
 
+// Rendered at the top level (layouts/navbar.rs, sibling to the activity bar
+// panel, same as EntityModalCmp) rather than nested inside ab_task_cmp
+// where the trigger button lives — the activity bar panel is itself a
+// `translate-x-0` sliding drawer, and any position:fixed descendant of a
+// transformed ancestor gets contained to that ancestor's box instead of
+// the real viewport (confirmed live: the modal rendered correctly-styled
+// but pinned inside the 384px activity-bar panel instead of covering the
+// screen). Reads current_moment/moments live off AppState, same as
+// ab_task_cmp, so it always reflects whichever moment is actually open.
+#[component]
+pub fn FullScreenEditorModalCmp() -> Element {
+    let state = use_context::<AppState>();
+    let mut moments = state.moments;
+    let current_moment = state.current_moment;
+    let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
+    let mut full_editor_open = state.full_editor_open;
+
+    if !*full_editor_open.read() {
+        return rsx! {};
+    }
+    let Some(moment) = current_moment.read().clone() else {
+        return rsx! {};
+    };
+    let id = moment.id.clone();
+    let live_moment = moments.read().iter().find(|m| m.id == id).cloned().unwrap_or(moment);
+    let title = live_moment.title.clone();
+    let description = live_moment.description.clone();
+    let moment_kind = match live_moment.moment_type_id {
+        2i64 => "Promise",
+        3i64 => "Note",
+        _ => "Task",
+    };
+
+    rsx! {
+        div {
+            class: "hidden xl:flex fixed inset-0 bg-black/40 z-100 items-center justify-center p-8",
+            onclick: move |_| full_editor_open.set(false),
+            div {
+                class: "bg-background rounded-lg border border-border shadow-lg w-full max-w-3xl h-full max-h-[85vh] flex flex-col",
+                onclick: move |e| e.stop_propagation(),
+                div {
+                    class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
+                    span { class: "text-sm font-medium text-muted-foreground", "{moment_kind}" }
+                    button {
+                        class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                        onclick: move |_| full_editor_open.set(false),
+                        "×"
+                    }
+                }
+                div {
+                    class: "flex flex-col gap-3 px-6 py-5 flex-1 min-h-0",
+                    input {
+                        class: "text-2xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1 shrink-0",
+                        value: "{title}",
+                        onchange: {
+                            let id = id.clone();
+                            move |e| {
+                                let id = id.clone();
+                                let token = auth_token;
+                                let vault = active_vault;
+                                let val = e.value();
+                                spawn(async move {
+                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    match storage.update_moment_field(id.clone(), "title", serde_json::json!(val)).await {
+                                        Ok(_) => {
+                                            let mut list = moments.write();
+                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                m.title = val;
+                                            }
+                                        }
+                                        Err(e) => log::info!("Error updating moment: {}", e),
+                                    }
+                                });
+                            }
+                        },
+                    }
+                    textarea {
+                        class: "w-full flex-1 min-h-0 rounded-md border border-input bg-background text-base text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none",
+                        placeholder: "Add a description...",
+                        value: "{description.clone().unwrap_or_default()}",
+                        onchange: {
+                            let id = id.clone();
+                            move |e| {
+                                let id = id.clone();
+                                let token = auth_token;
+                                let vault = active_vault;
+                                let val = e.value();
+                                spawn(async move {
+                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    match storage.update_moment_field(id.clone(), "description", serde_json::json!(val)).await {
+                                        Ok(_) => {
+                                            let mut list = moments.write();
+                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                m.description = Some(val);
+                                            }
+                                        }
+                                        Err(e) => log::info!("Error updating moment: {}", e),
+                                    }
+                                });
+                            }
+                        },
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Taskwarrior's "waiting" concept: moments given a future scheduled_at (via
 // the scheduled:/wait: quick-capture keyword) are hidden from every normal
 // view (see is_waiting() in urgency.rs) until that date, with this as the
@@ -2062,6 +2517,125 @@ pub fn ScheduledViewCmp() -> Element {
                         span {
                             class: "text-xs text-muted-foreground shrink-0",
                             "{dt.format(\"%b %d\")}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn BlockingViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut current_moment = state.current_moment;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    // Anyone that's the depends_on target of at least one other still-open
+    // moment — "what's actually blocking other things," so the user can go
+    // free them up. A moment blocking only already-completed things isn't
+    // in anyone's way anymore, so it doesn't count.
+    let all = moments.read().clone();
+    let blocking_ids: std::collections::HashSet<String> = all.iter()
+        .filter(|m| m.completed_at.is_none())
+        .filter_map(|m| m.depends_on.clone())
+        .collect();
+    let mut blocking: Vec<MomentType> = all.iter()
+        .filter(|m| blocking_ids.contains(&m.id) && m.completed_at.is_none())
+        .cloned()
+        .collect();
+    blocking.sort_by(|a, b| a.title.cmp(&b.title));
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+            if blocking.is_empty() {
+                div {
+                    class: "text-sm text-muted-foreground text-center py-8",
+                    "Nothing's blocking anything else right now."
+                }
+            } else {
+                for m in blocking.iter() {
+                    div {
+                        key: "{m.id}",
+                        class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                        onclick: {
+                            let m = m.clone();
+                            move |_| {
+                                current_moment.set(Some(m.clone()));
+                                activity_bar_view.set(ABView::Task);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
+                        },
+                        div {
+                            class: "flex flex-col min-w-0",
+                            span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[component]
+pub fn NotesViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut current_moment = state.current_moment;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    let mut notes: Vec<MomentType> = moments.read().iter()
+        .filter(|m| m.moment_type_id == 3i64)
+        .cloned()
+        .collect();
+    notes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+            if notes.is_empty() {
+                div {
+                    class: "text-sm text-muted-foreground text-center py-8",
+                    "No notes yet."
+                }
+            } else {
+                for m in notes.iter() {
+                    div {
+                        key: "{m.id}",
+                        class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                        onclick: {
+                            let m = m.clone();
+                            move |_| {
+                                current_moment.set(Some(m.clone()));
+                                activity_bar_view.set(ABView::Task);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
+                        },
+                        div {
+                            class: "flex flex-col min-w-0",
+                            span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
                         }
                     }
                 }
@@ -2333,9 +2907,9 @@ pub fn PriorityViewCmp() -> Element {
 fn weight_fields() -> Vec<(&'static str, &'static str, fn(&UrgencyWeights) -> f64, fn(&mut UrgencyWeights, f64))> {
     vec![
         ("Due date", "Ramps up to this value as a due date approaches, maxing out once overdue.", |w| w.due, |w, v| w.due = v),
-        ("Priority: High", "Flat bonus when a task's priority is set to High.", |w| w.priority_high, |w, v| w.priority_high = v),
-        ("Priority: Medium", "Flat bonus when a task's priority is set to Medium.", |w| w.priority_medium, |w, v| w.priority_medium = v),
-        ("Priority: Low", "Flat bonus when a task's priority is set to Low.", |w| w.priority_low, |w, v| w.priority_low = v),
+        ("Expedite: High", "Flat bonus when a task's priority is set to High.", |w| w.priority_high, |w, v| w.priority_high = v),
+        ("Expedite: Medium", "Flat bonus when a task's priority is set to Medium.", |w| w.priority_medium, |w, v| w.priority_medium = v),
+        ("Expedite: Low", "Flat bonus when a task's priority is set to Low.", |w| w.priority_low, |w, v| w.priority_low = v),
         ("Has a project", "Flat bonus when a task has a project assigned.", |w| w.project, |w, v| w.project = v),
         ("Scheduled (active)", "Flat bonus once a task's scheduled date has arrived.", |w| w.scheduled, |w, v| w.scheduled = v),
         ("Gravity", "Scales the task's own -100..100 importance dial.", |w| w.gravity, |w, v| w.gravity = v),
@@ -2382,7 +2956,7 @@ pub fn UrgencySettingsCmp() -> Element {
                     onclick: move |e| e.stop_propagation(),
                     div {
                         class: "flex items-center justify-between h-14 px-4 border-b border-border",
-                        span { class: "text-lg font-semibold text-foreground", "Priority ranking weights" }
+                        span { class: "text-lg font-semibold text-foreground", "Expedite ranking weights" }
                         button {
                             class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
                             onclick: move |_| open.set(false),

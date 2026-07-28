@@ -142,7 +142,7 @@ impl UrgencyBreakdown {
     pub fn describe(&self) -> String {
         let mut parts: Vec<(&str, f64)> = vec![
             ("due", self.due),
-            ("priority", self.priority),
+            ("expedite", self.priority),
             ("project", self.project),
             ("scheduled", self.scheduled),
             ("gravity", self.gravity),
@@ -430,7 +430,7 @@ mod tests {
         m.metadata = Some(MomentMetadata { priority: Some("H".to_string()), ..Default::default() });
         let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         let d = b.describe();
-        assert!(d.contains("priority"));
+        assert!(d.contains("expedite"));
         assert!(!d.contains("due "));
     }
 }

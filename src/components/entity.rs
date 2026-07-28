@@ -4,7 +4,8 @@ use crate::theme::*;
 use crate::AppState;
 use crate::ABView;
 use crate::View;
-use crate::api::{ActiveStorage, is_self_entity};
+use crate::api::{ActiveStorage, VaultKind, is_self_entity};
+use crate::components::GraphViewCmp;
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
 use lumen_blocks::components::input::Input;
@@ -16,6 +17,68 @@ fn stat_row(label: &str, value: &str) -> Element {
             class: "flex justify-between items-center text-sm py-1.5",
             span { class: "text-muted-foreground", "{label}" }
             span { class: "text-foreground font-medium", "{value}" }
+        }
+    }
+}
+
+// The relationship/how-met/birthday/location/why fields were only ever
+// settable in the New Entity modal at creation time — the Info tab (below)
+// just displayed them read-only forever after, with no way back in. Same
+// read-modify-write-the-whole-blob pattern as moment.rs's
+// patch_moment_metadata, since metadata is one jsonb column, not five.
+async fn patch_entity_metadata(
+    storage: &ActiveStorage,
+    mut entities: Signal<Vec<EntityType>>,
+    mut current_entity: Signal<Option<EntityType>>,
+    id: String,
+    mutate: impl FnOnce(&mut EntityMetadata),
+) {
+    let mut new_meta = entities.read().iter().find(|e| e.id == id).and_then(|e| e.metadata.clone()).unwrap_or_default();
+    mutate(&mut new_meta);
+    if storage.update_entity_field(id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
+        if let Some(e) = entities.write().iter_mut().find(|e| e.id == id) {
+            e.metadata = Some(new_meta.clone());
+        }
+        if let Some(cur) = current_entity.write().as_mut() {
+            if cur.id == id {
+                cur.metadata = Some(new_meta);
+            }
+        }
+    }
+}
+
+// Same visual shape as stat_row, but an editable input in place of the
+// static value — used for the metadata fields below now that they're
+// editable post-creation, not just at entity creation.
+fn editable_stat_row(
+    label: &str,
+    value: &str,
+    entity_id: String,
+    entities: Signal<Vec<EntityType>>,
+    current_entity: Signal<Option<EntityType>>,
+    auth_token: Signal<Option<String>>,
+    active_vault: Signal<VaultKind>,
+    mutate: impl Fn(&mut EntityMetadata, String) + Copy + 'static,
+) -> Element {
+    rsx! {
+        div {
+            class: "flex justify-between items-center gap-3 text-sm py-1.5",
+            span { class: "text-muted-foreground shrink-0", "{label}" }
+            input {
+                r#type: "text",
+                class: "flex-1 min-w-0 rounded-md border border-transparent hover:border-input focus:border-input bg-transparent text-right text-sm text-foreground px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                value: "{value}",
+                onchange: move |e| {
+                    let id = entity_id.clone();
+                    let val = e.value();
+                    let token = auth_token;
+                    let vault = active_vault;
+                    spawn(async move {
+                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                        patch_entity_metadata(&storage, entities, current_entity, id, |m| mutate(m, val)).await;
+                    });
+                }
+            }
         }
     }
 }
@@ -104,21 +167,70 @@ fn drift_label(drift: f64) -> &'static str {
     }
 }
 
+// Was "Last contact" — wrong claim. Creating a moment isn't proof you
+// actually interacted with the entity it's attached to, only a *completed*
+// one is even a reasonable proxy for that. Renamed and recomputed off
+// completed_at instead of created_at (see DistanceViewCmp's rows below).
 fn days_ago_label(dt: Option<chrono::DateTime<chrono::Utc>>, now: chrono::DateTime<chrono::Utc>) -> String {
     match dt {
-        None => "No contact logged yet".to_string(),
+        None => "No completed moments yet".to_string(),
         Some(dt) => match (now - dt).num_days() {
-            0 => "Last contact: today".to_string(),
-            1 => "Last contact: 1 day ago".to_string(),
-            d => format!("Last contact: {d} days ago"),
+            0 => "Last completed moment: today".to_string(),
+            1 => "Last completed moment: 1 day ago".to_string(),
+            d => format!("Last completed moment: {d} days ago"),
         },
     }
 }
 
-// A Priority-style ranked list, but for relationships instead of tasks —
-// who you've drifted furthest from, at a glance, without a special trip to
-// Graph View. Reuses compute_distance (already built for Graph View/Stats)
+// A ranked list of everyone you're tracking, closest first — reuses
+// compute_distance (already built for Graph View/Stats)
 // rather than adding a new metric.
+
+#[derive(Clone, Copy, PartialEq)]
+enum AllEntitiesMode {
+    Distance,
+    Graph,
+}
+
+// Replaces the old separate Graph View / Distance sidebar entries
+// (2026-07-23) — see View::AllEntities's doc comment in main.rs for why:
+// the sidebar's own Entities list now auto-hides anyone with nothing
+// currently active, so this is the one place guaranteed to always show
+// literally everyone regardless of that filter, with a plain local toggle
+// between the two ways of looking at "everyone" instead of two separate
+// sidebar links.
+#[component]
+pub fn AllEntitiesViewCmp() -> Element {
+    let mut mode = use_signal(|| AllEntitiesMode::Distance);
+    let tab_class = |active: bool| if active {
+        "px-3 py-1.5 text-sm font-medium rounded-md bg-muted text-foreground cursor-pointer"
+    } else {
+        "px-3 py-1.5 text-sm font-medium rounded-md text-muted-foreground hover:bg-muted transition-colors cursor-pointer"
+    };
+    rsx! {
+        div {
+            class: "px-4 pt-4",
+            div {
+                class: "flex items-start justify-between gap-3 mb-4",
+                div {
+                    h1 { class: "text-2xl font-semibold text-foreground mb-1", "All Entities" }
+                    p { class: "text-sm text-muted-foreground", "Everyone you're tracking, regardless of what's currently active for them." }
+                }
+                div {
+                    class: "flex items-center gap-1 shrink-0",
+                    span { class: tab_class(*mode.read() == AllEntitiesMode::Distance), onclick: move |_| mode.set(AllEntitiesMode::Distance), "Distance" }
+                    span { class: tab_class(*mode.read() == AllEntitiesMode::Graph), onclick: move |_| mode.set(AllEntitiesMode::Graph), "Graph" }
+                }
+            }
+        }
+        if *mode.read() == AllEntitiesMode::Distance {
+            DistanceViewCmp { }
+        } else {
+            GraphViewCmp { }
+        }
+    }
+}
+
 #[component]
 pub fn DistanceViewCmp() -> Element {
     let state = use_context::<AppState>();
@@ -133,7 +245,7 @@ pub fn DistanceViewCmp() -> Element {
     struct Row {
         entity: EntityType,
         distance: f64,
-        last_contact: Option<chrono::DateTime<chrono::Utc>>,
+        last_completed: Option<chrono::DateTime<chrono::Utc>>,
         reaction_score: i32,
     }
 
@@ -141,8 +253,9 @@ pub fn DistanceViewCmp() -> Element {
         .filter(|e| !is_self_entity(e))
         .map(|e| {
             let entity_moments: Vec<&MomentType> = all_moments.iter().filter(|m| m.entity_id == e.id).collect();
-            let last_contact = entity_moments.iter()
-                .filter_map(|m| chrono::DateTime::parse_from_rfc3339(&m.created_at).ok())
+            let last_completed = entity_moments.iter()
+                .filter_map(|m| m.completed_at.as_deref())
+                .filter_map(|dt| chrono::DateTime::parse_from_rfc3339(dt).ok())
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .max();
             let reaction_score: i32 = entity_moments.iter()
@@ -153,12 +266,15 @@ pub fn DistanceViewCmp() -> Element {
             Row {
                 distance: compute_distance(e, &all_moments, now),
                 entity: e.clone(),
-                last_contact,
+                last_completed,
                 reaction_score,
             }
         })
         .collect();
-    rows.sort_by(|a, b| b.distance.partial_cmp(&a.distance).unwrap_or(std::cmp::Ordering::Equal));
+    // Closest first (ascending) — 2026-07-23, was descending (farthest-
+    // drifted first, Priority-view style). Matches the same closest-first
+    // direction as the Graph View's own distance mapping.
+    rows.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
 
     rsx! {
         div {
@@ -183,7 +299,7 @@ pub fn DistanceViewCmp() -> Element {
                         div {
                             class: "flex flex-col min-w-0",
                             span { class: "text-sm font-medium text-foreground truncate", "{row.entity.name}" }
-                            span { class: "text-xs text-muted-foreground", "{days_ago_label(row.last_contact, now)} · {drift_label(row.entity.drift)}" }
+                            span { class: "text-xs text-muted-foreground", "{days_ago_label(row.last_completed, now)} · {drift_label(row.entity.drift)}" }
                         }
                         div {
                             class: "flex items-center gap-3 shrink-0",
@@ -577,7 +693,6 @@ pub fn ab_info_cmp() -> Element {
     let drift_value = entity.as_ref().map(|e| e.drift).unwrap_or(2.0);
 
     let meta = entity.as_ref().and_then(|e| e.metadata.clone()).unwrap_or_default();
-    let display_or_not_set = |s: &str| if s.trim().is_empty() { "Not set".to_string() } else { s.to_string() };
     // Self isn't deletable — there's no "unselect yourself" concept in this
     // app's model, and every un-attributed moment defaults to Self, so
     // removing it would just get silently recreated on next capture anyway.
@@ -607,12 +722,12 @@ pub fn ab_info_cmp() -> Element {
                         {stat_row("Name", &entity_name)}
                         {stat_row("Type", &type_name)}
                         {stat_row("Known since", &known_since)}
-                        if entity.is_some() {
-                            {stat_row("Relationship", &display_or_not_set(&meta.relationship))}
-                            {stat_row("How you met", &display_or_not_set(&meta.how_met))}
-                            {stat_row("Birthday", &display_or_not_set(&meta.birthday))}
-                            {stat_row("Location", &display_or_not_set(&meta.location))}
-                            {stat_row("Why they matter", &display_or_not_set(&meta.why))}
+                        if let Some(e) = entity.as_ref() {
+                            {editable_stat_row("Relationship", &meta.relationship, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.relationship = v)}
+                            {editable_stat_row("How you met", &meta.how_met, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.how_met = v)}
+                            {editable_stat_row("Birthday", &meta.birthday, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.birthday = v)}
+                            {editable_stat_row("Location", &meta.location, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.location = v)}
+                            {editable_stat_row("Why they matter", &meta.why, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.why = v)}
                             div {
                                 class: "flex justify-between items-center text-sm py-1.5",
                                 span { class: "text-muted-foreground", "Drift (days/unit)" }
@@ -668,14 +783,45 @@ pub fn ab_info_cmp() -> Element {
                                     return;
                                 }
                                 let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id.clone()) else { return; };
-                                let token = auth_token;
-                                let vault = active_vault;
+                                let vault = *active_vault.read();
+                                let token = auth_token.read().clone();
+                                // Same fix as the sidebar's right-click delete
+                                // (2026-07-23): Supabase's FK on moments.entity_id
+                                // blocks deleting the entity while anything still
+                                // references it — soft-deleting a moment doesn't
+                                // clear that reference, only reassigning does. So
+                                // every moment gets moved to Self first,
+                                // unconditionally, then soft-deleted there (so
+                                // "goes to trash, not erased outright" above stays
+                                // true), before the entity itself is deleted.
+                                let Some(self_id) = vault.effective(&token).resolve_self_entity_id(&entities.read()) else {
+                                    clog!("Error deleting entity: couldn't resolve Self entity");
+                                    return;
+                                };
+                                let to_move: Vec<MomentType> = moments.read().iter()
+                                    .filter(|m| m.entity_id == entity_id)
+                                    .cloned()
+                                    .collect();
+                                confirming_delete.set(false);
                                 spawn(async move {
-                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    let storage = ActiveStorage::for_vault(vault, token.clone());
+                                    for m in &to_move {
+                                        let mid = m.id.clone();
+                                        if let Err(e) = storage.reassign_moment_entity(mid.clone(), self_id.clone()).await {
+                                            clog!("Error reassigning moment before entity delete: {}", e);
+                                            continue;
+                                        }
+                                        if let Some(mm) = moments.write().iter_mut().find(|mm| mm.id == mid) {
+                                            mm.entity_id = self_id.clone();
+                                        }
+                                        match storage.delete_moment({ let mut m = m.clone(); m.entity_id = self_id.clone(); m }).await {
+                                            Ok(()) => moments.write().retain(|mm| mm.id != mid),
+                                            Err(e) => clog!("Error deleting moment during entity delete: {}", e),
+                                        }
+                                    }
                                     match storage.delete_entity(entity_id.clone()).await {
                                         Ok(()) => {
                                             entities.write().retain(|e| e.id != entity_id);
-                                            moments.write().retain(|m| m.entity_id != entity_id);
                                             current_entity.set(None);
                                             activity_bar_tgl.set(false);
                                             backdropTgl.set(false);

@@ -6,7 +6,7 @@ use crate::AppState;
 use crate::api::{is_self_entity, ActiveStorage};
 use crate::types::{EntityType, MomentType, NewEntityType};
 use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger};
-use lumen_blocks::components::context_menu::{ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger};
+use crate::components::context_menu::{ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger};
 
 const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
 const NAV_LINK_ICON_CLASS: &str = "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
@@ -18,11 +18,12 @@ const NAV_LINK_ICON_CLASS: &str = "flex items-center gap-2 rounded-md px-3 py-2 
 const VIEW_ENTRIES: &[(View, fn() -> Element, &str)] = &[
     (View::Inbox, fa_inbox, "All"),
     (View::SelfEntity, fa_user, "Self"),
-    (View::Priority, fa_bolt, "Priority"),
+    (View::Priority, fa_bolt, "Expedite"),
     (View::Due, fa_calendar, "Due"),
     (View::Scheduled, fa_clock, "Scheduled"),
-    (View::Distance, fa_compass, "Distance"),
-    (View::Graph, fa_circle_nodes, "Graph View"),
+    (View::Blocking, fa_lock, "Blocking"),
+    (View::Notes, fa_note_sticky, "Notes"),
+    (View::AllEntities, fa_circle_nodes, "All Entities"),
     (View::RecentlyDeleted, fa_trash, "Recently Deleted"),
 ];
 
@@ -121,6 +122,7 @@ pub fn entity_list_cmp() -> Element {
     let mut expanded = use_signal(|| true);
     let active_vault = state.active_vault;
     let auth_token = state.auth_token;
+    let autohide_entities = state.autohide_entities;
 
     // Same delete-vs-reassign choice as tag/project deletion (see
     // tag_list_cmp/project_list_cmp) — user asked for entity delete to work
@@ -287,8 +289,25 @@ pub fn entity_list_cmp() -> Element {
     // views_list_cmp's VIEW_ENTRIES / View::SelfEntity), reachable and
     // hideable the same way Due/Priority/etc are, rather than mixed in
     // among real entities here.
+    //
+    // Auto-hide (2026-07-23, on by default, Settings toggle to disable):
+    // an entity with nothing currently active — no open, non-future-
+    // scheduled *task or promise* — drops out of this list entirely. Notes
+    // don't count (2026-07-28, user's own framing): the sidebar is for
+    // "who has things currently being moved around," not for reflection —
+    // that's what All Entities is for. So a note sitting on someone's
+    // record doesn't keep them pinned to the sidebar the way an open task
+    // does. An entity reappears here the instant something of theirs would
+    // actually show up in All, and drops out again the moment nothing
+    // would. Never hides anyone from the Graph View or the All Entities
+    // view (see AllEntitiesViewCmp) — this filter is scoped to this
+    // sidebar list only.
+    let now = chrono::Utc::now();
+    let has_active_moment = |entity_id: &str| moments.read().iter()
+        .any(|m| m.entity_id == entity_id && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now));
     let mut visible_entities: Vec<_> = entities.read().iter()
         .filter(|e| !is_self_entity(e))
+        .filter(|e| !*autohide_entities.read() || has_active_moment(&e.id))
         .cloned()
         .collect();
     // Case-insensitive — a plain sort() puts every uppercase name before
@@ -676,11 +695,27 @@ pub fn project_list_cmp() -> Element {
     let mut expanded = use_signal(|| true);
     let active_vault = state.active_vault;
     let auth_token = state.auth_token;
+    let autohide_entities = state.autohide_entities;
+
+    // Same auto-hide treatment as entities (2026-07-23/28) — "I need
+    // projects to fall off the list the same way as my entities fall off
+    // the list." Shares the one Settings toggle rather than adding a
+    // second, since the user described it as the same behavior, not a
+    // separate one. Same rule too: a project only stays listed while it
+    // has an open task/promise (not a note, not future-scheduled) tagged
+    // to it.
+    let now = chrono::Utc::now();
+    let project_has_active_moment = |project: &str| moments.read().iter()
+        .any(|m| {
+            m.metadata.as_ref().and_then(|meta| meta.project.as_deref()) == Some(project)
+                && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now)
+        });
 
     let mut projects: Vec<String> = moments.read().iter()
         .filter_map(|m| m.metadata.as_ref())
         .filter_map(|meta| meta.project.clone())
         .filter(|p| !p.is_empty())
+        .filter(|p| !*autohide_entities.read() || project_has_active_moment(p))
         .collect();
     // Case-insensitive — see visible_entities' matching comment above.
     projects.sort_by_key(|p| p.to_lowercase());

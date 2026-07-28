@@ -259,7 +259,6 @@ pub struct NewMomentType {
 pub struct MomentCmpProps {
     pub moment: MomentType,
     pub is_note: Option<bool>,
-    pub oncontextmenu: EventHandler<MouseEvent>,
 }
 
 #[derive(Props, Clone, PartialEq)]

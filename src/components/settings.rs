@@ -29,6 +29,7 @@ pub fn SettingsCmp() -> Element {
     let mut hidden_views = state.hidden_views;
     let mut sidebarTgl = state.sidebarTgl;
     let mut backdropTgl = state.backdropTgl;
+    let mut autohide_entities = state.autohide_entities;
 
     let has_synced = user_email.read().is_some();
 
@@ -102,6 +103,35 @@ pub fn SettingsCmp() -> Element {
         }
         div {
             class: "mx-4 mb-3 flex flex-col gap-4",
+            div {
+                class: "rounded-lg border border-border bg-background p-4 flex items-center justify-between gap-3",
+                div {
+                    h3 { class: "text-sm font-semibold text-foreground mb-1", "Auto-hide inactive entities & projects" }
+                    p {
+                        class: "text-sm text-muted-foreground",
+                        "Entities and projects with nothing currently active (open tasks/promises — notes don't count) drop out of the sidebar's lists. Entities are still in Graph View and All Entities — this only affects the sidebar."
+                    }
+                }
+                label {
+                    class: "relative inline-flex items-center cursor-pointer shrink-0",
+                    input {
+                        r#type: "checkbox",
+                        class: "sr-only peer",
+                        checked: *autohide_entities.read(),
+                        onchange: move |e| {
+                            let checked = e.checked();
+                            autohide_entities.set(checked);
+                            #[cfg(not(feature = "desktop"))]
+                            if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                                storage.set("autohide_entities", if checked { "true" } else { "false" }).ok();
+                            }
+                        }
+                    }
+                    div {
+                        class: "w-10 h-6 bg-muted rounded-full peer peer-checked:bg-primary transition-colors relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-background after:rounded-full after:h-5 after:w-5 after:transition-transform peer-checked:after:translate-x-4",
+                    }
+                }
+            }
             if !hidden_views.read().is_empty() {
                 div {
                     class: "rounded-lg border border-border bg-background p-4",

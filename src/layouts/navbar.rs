@@ -14,6 +14,7 @@ use crate::components::{
     MomentListCmp,
     MomentInputCmp,
     EntityModalCmp,
+    FullScreenEditorModalCmp,
     ab_task_cmp,
     ab_history_cmp,
     ab_stats_cmp,
@@ -161,8 +162,71 @@ pub fn vault_switcher_cmp() -> Element {
     };
 
     rsx! {
+        // Below the xl breakpoint (phones, and — per the user, 2026-07-23 —
+        // iPads too, which fall in the same bucket) the Dropdown version
+        // below is unusable: tapping any item inside it closes the menu
+        // instead of selecting it, near-certainly the same class of bug
+        // already root-caused for the right-click ContextMenu (see
+        // components/context_menu/component.rs) — a touch's pointerdown
+        // firing the library's outside-dismiss handler before its own
+        // click/tap handler gets a chance to run. Rather than chase that
+        // down inside a shared lumen_blocks component too, this sidesteps
+        // it entirely on touch-sized viewports: no popup, just always-
+        // visible rows. Revisit properly if this turns out to matter for
+        // more than vault-switching.
         div {
-            class: "px-3",
+            class: "xl:hidden px-3 flex flex-col gap-y-0.5",
+            for entry in entries.iter() {
+                {
+                    let kind = entry.kind;
+                    let is_current = kind == current;
+                    let label = entry.label.clone();
+                    rsx! {
+                        a {
+                            key: "{label}",
+                            class: "flex items-center gap-2 rounded-md px-2 py-2 hover:bg-muted transition-colors cursor-pointer w-full text-sm font-medium text-foreground",
+                            onclick: move |_| select_vault(kind),
+                            span { class: "truncate", if is_current { "✓ " } else { "" } "{label}" }
+                        }
+                    }
+                }
+            }
+            if !has_synced {
+                a {
+                    class: "rounded-md px-2 py-2 hover:bg-muted transition-colors cursor-pointer w-full text-sm text-muted-foreground hover:text-foreground",
+                    onclick: move |_| {
+                        sidebarTgl.set(false);
+                        backdropTgl.set(false);
+                        navigator().push(Route::LoginCMP {});
+                    },
+                    "+ Add a vault"
+                }
+            }
+            if has_synced {
+                a {
+                    class: "rounded-md px-2 py-2 hover:bg-muted transition-colors cursor-pointer w-full text-sm text-muted-foreground hover:text-foreground",
+                    onclick: move |_| {
+                        if *confirming_removal_of.read() == Some(VaultKind::Synced) {
+                            remove_synced();
+                            confirming_removal_of.set(None);
+                        } else {
+                            confirming_removal_of.set(Some(VaultKind::Synced));
+                        }
+                    },
+                    if *confirming_removal_of.read() == Some(VaultKind::Synced) { "Tap again to remove Synced vault" } else { "Remove Synced vault" }
+                }
+            }
+            a {
+                class: "rounded-md px-2 py-2 hover:bg-muted transition-colors cursor-pointer w-full text-sm font-medium text-foreground",
+                onclick: move |_| {
+                    current_entity.set(None);
+                    currentView.set(View::Settings);
+                },
+                "Settings"
+            }
+        }
+        div {
+            class: "hidden xl:block px-3",
             div {
                 class: "w-full sidebar-vault-switcher",
                 Dropdown {
@@ -301,17 +365,58 @@ pub fn Navbar() -> Element {
                     user_email.set(Some(user.email));
                 }
                 Err(e) => {
-                clog!("Session check failed, logging out: {}", e);
-                #[cfg(not(feature = "desktop"))]
-                if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                    storage.set("auth_token", &"").ok();
-                    storage.set("refresh_token", &"").ok();
-                    storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
-                }
-                auth_token.set(None);
-                user_id.set(None);
-                user_email.set(None);
-                active_vault.set(VaultKind::Local);
+                    // This used to log straight out the moment the *cached*
+                    // access token failed this check — which is nearly
+                    // guaranteed to happen on every fresh page load after the
+                    // browser's been closed a while (access tokens are
+                    // short-lived, ~1hr), even though the much longer-lived
+                    // refresh_token sitting right next to it in storage is
+                    // still perfectly valid. The proactive 50-minute refresh
+                    // loop below only helps a tab that's stayed open
+                    // continuously — it does nothing for "closed the browser
+                    // overnight, opened it again" — so this was the actual
+                    // "losing my vault login" bug, not the loop. Try a real
+                    // refresh first; only actually log out if that also
+                    // fails (refresh_token itself expired/revoked).
+                    clog!("Session check failed ({}), attempting token refresh before logging out", e);
+                    #[cfg(not(feature = "desktop"))]
+                    let refreshed = 'refresh: {
+                        let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) else {
+                            break 'refresh false;
+                        };
+                        let Some(refresh_tok) = storage.get_item("refresh_token").ok().flatten().filter(|s| !s.is_empty()) else {
+                            break 'refresh false;
+                        };
+                        match refresh_access_token(refresh_tok).await {
+                            Ok(auth) => {
+                                storage.set("auth_token", &auth.access_token).ok();
+                                storage.set("refresh_token", &auth.refresh_token).ok();
+                                auth_token.set(Some(auth.access_token));
+                                user_id.set(Some(auth.user.id));
+                                user_email.set(Some(auth.user.email));
+                                true
+                            }
+                            Err(e) => {
+                                clog!("Token refresh failed too, logging out: {}", e);
+                                false
+                            }
+                        }
+                    };
+                    #[cfg(feature = "desktop")]
+                    let refreshed = false;
+
+                    if !refreshed {
+                        #[cfg(not(feature = "desktop"))]
+                        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                            storage.set("auth_token", &"").ok();
+                            storage.set("refresh_token", &"").ok();
+                            storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+                        }
+                        auth_token.set(None);
+                        user_id.set(None);
+                        user_email.set(None);
+                        active_vault.set(VaultKind::Local);
+                    }
                 }
             }
         });
@@ -367,10 +472,11 @@ pub fn Navbar() -> Element {
         Inbox => "".to_string(),
         Entity => "".to_string(),
         Priority => "".to_string(),
-        Graph => "".to_string(),
-        Distance => "".to_string(),
+        AllEntities => "".to_string(),
         Due => "".to_string(),
         Scheduled => "".to_string(),
+        Blocking => "".to_string(),
+        Notes => "".to_string(),
         Settings => "".to_string(),
         RecentlyDeleted => "".to_string(),
         SelfEntity => "".to_string(),
@@ -406,6 +512,7 @@ pub fn Navbar() -> Element {
         div {
             style: "background-color:{BG};",
             EntityModalCmp { }
+            FullScreenEditorModalCmp { }
             button {
                 id: "add-moment-button",
                 class: "xl:hidden fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95",

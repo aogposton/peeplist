@@ -67,10 +67,18 @@ pub enum View {
     Entity,
     Inbox,
     Priority,
-    Graph,
-    Distance,
+    // Replaces the old separate Graph/Distance sidebar entries (2026-07-23)
+    // — an entity with no currently-active moments is now auto-hidden from
+    // the sidebar's own Entities list (see sidebar.rs's entity_list_cmp and
+    // AppState::autohide_entities), so "just look at the graph" or "just
+    // look at distances" needed one place that always shows literally
+    // everyone regardless of that filter. AllEntitiesViewCmp (entity.rs)
+    // renders both, toggled locally within the page.
+    AllEntities,
     Due,
     Scheduled,
+    Blocking,
+    Notes,
     Settings,
     RecentlyDeleted,
     // Reuses the same rendering as View::Entity (see views/home.rs's
@@ -94,8 +102,9 @@ impl View {
             View::Priority => Some("priority"),
             View::Due => Some("due"),
             View::Scheduled => Some("scheduled"),
-            View::Distance => Some("distance"),
-            View::Graph => Some("graph"),
+            View::Blocking => Some("blocking"),
+            View::Notes => Some("notes"),
+            View::AllEntities => Some("all_entities"),
             View::RecentlyDeleted => Some("recently_deleted"),
             View::SelfEntity => Some("self_entity"),
             View::Entity | View::Settings => None,
@@ -108,8 +117,9 @@ impl View {
             "priority" => Some(View::Priority),
             "due" => Some(View::Due),
             "scheduled" => Some(View::Scheduled),
-            "distance" => Some(View::Distance),
-            "graph" => Some(View::Graph),
+            "blocking" => Some(View::Blocking),
+            "notes" => Some(View::Notes),
+            "all_entities" => Some(View::AllEntities),
             "recently_deleted" => Some(View::RecentlyDeleted),
             "self_entity" => Some(View::SelfEntity),
             _ => None,
@@ -124,11 +134,12 @@ impl View {
     pub fn sidebar_label(&self) -> Option<&'static str> {
         match self {
             View::Inbox => Some("All"),
-            View::Priority => Some("Priority"),
+            View::Priority => Some("Expedite"),
             View::Due => Some("Due"),
             View::Scheduled => Some("Scheduled"),
-            View::Distance => Some("Distance"),
-            View::Graph => Some("Graph View"),
+            View::Blocking => Some("Blocking"),
+            View::Notes => Some("Notes"),
+            View::AllEntities => Some("All Entities"),
             View::RecentlyDeleted => Some("Recently Deleted"),
             View::SelfEntity => Some("Self"),
             View::Entity | View::Settings => None,
@@ -166,6 +177,7 @@ pub enum SortMode {
     Default,
     DueDate,
     Custom,
+    ByEntity,
 }
 
 impl SortMode {
@@ -174,6 +186,7 @@ impl SortMode {
             SortMode::Default => "default",
             SortMode::DueDate => "due_date",
             SortMode::Custom => "custom",
+            SortMode::ByEntity => "by_entity",
         }
     }
 
@@ -181,6 +194,7 @@ impl SortMode {
         match s {
             "due_date" => SortMode::DueDate,
             "custom" => SortMode::Custom,
+            "by_entity" => SortMode::ByEntity,
             _ => SortMode::Default,
         }
     }
@@ -191,11 +205,12 @@ impl fmt::Display for View {
         match self {
             View::Inbox   => write!(f, "Inbox"),
             View::Entity => write!(f, "Entity"),
-            View::Priority => write!(f, "Priority"),
-            View::Graph => write!(f, "Graph"),
-            View::Distance => write!(f, "Distance"),
+            View::Priority => write!(f, "Expedite"),
+            View::AllEntities => write!(f, "All Entities"),
             View::Due => write!(f, "Due"),
             View::Scheduled => write!(f, "Scheduled"),
+            View::Blocking => write!(f, "Blocking"),
+            View::Notes => write!(f, "Notes"),
             View::Settings => write!(f, "Settings"),
             View::RecentlyDeleted => write!(f, "Recently Deleted"),
             View::SelfEntity => write!(f, "Self"),
@@ -226,6 +241,23 @@ pub struct AppState {
     pub hide_notes: Signal<bool>,
     pub hide_completed: Signal<bool>,
     pub sort_mode: Signal<SortMode>,
+    // Clicking the already-active sort mode's own button again flips this,
+    // rather than a separate control — same "click a table header twice"
+    // convention. Applies uniformly to whichever mode is active (Default,
+    // Due date, Custom, By entity all have a well-defined reverse), so this
+    // is one flag, not per-mode state.
+    pub sort_descending: Signal<bool>,
+    // Full-screen title+description editor toggle (2026-07-28, desktop
+    // only). Has to live here, not as a local signal inside ab_task_cmp —
+    // that panel is nested inside the activity bar's own `translate-x-0`
+    // sliding-drawer container (see layouts/navbar.rs), and any
+    // position:fixed descendant of a transformed ancestor gets contained
+    // to that ancestor's box instead of the real viewport (same class of
+    // bug already fixed once for the desktop sidebar). The modal itself
+    // has to be rendered as a sibling outside that transform, same
+    // approach as EntityModalCmp — which means whatever toggles it needs
+    // to be visible from both places.
+    pub full_editor_open: Signal<bool>,
     // Local-first pivot Phase 1b (see memory reference_local_first_pivot_plan).
     // Defaults to Synced, not Local as the plan's eventual design intends —
     // the Local vault is a stub until Phase 1d/1e build the real flat-file
@@ -244,6 +276,13 @@ pub struct AppState {
     // no persistence yet on desktop, same known gap as everything else
     // in this list).
     pub hidden_views: Signal<Vec<View>>,
+    // Sidebar's own Entities list hides anyone with nothing currently
+    // active (see sidebar.rs's entity_list_cmp) — this is the Settings
+    // toggle to turn that back off. Defaults on: "out of your face once
+    // there's nothing to do for them" is the actual desired behavior, not
+    // an opt-in extra (2026-07-23, replaces a separate "archive" concept
+    // the user considered and dropped in favor of this).
+    pub autohide_entities: Signal<bool>,
     // True until the first moments+entities fetch (see views/home.rs's
     // effect) resolves, or resets to true whenever it re-fetches (vault
     // switch, etc). Everything that reads `moments`/`entities` — Home's own
@@ -281,9 +320,12 @@ fn App() -> Element {
         hide_notes: Signal::new(false),
         hide_completed: Signal::new(false),
         sort_mode: Signal::new(SortMode::Default),
+        sort_descending: Signal::new(false),
+        full_editor_open: Signal::new(false),
         active_vault: Signal::new(VaultKind::Synced),
         urgency_weights: Signal::new(UrgencyWeights::default()),
         hidden_views: Signal::new(vec![]),
+        autohide_entities: Signal::new(true),
         data_loading: Signal::new(true),
     });
     let mut state = use_context::<AppState>();
@@ -321,6 +363,10 @@ fn App() -> Element {
                     state.sort_mode.set(SortMode::from_storage_str(&mode));
                 }
 
+                if let Ok(Some(desc)) = storage.get_item("sort_descending") {
+                    state.sort_descending.set(desc == "true");
+                }
+
                 if let Ok(Some(vault)) = storage.get_item("active_vault") {
                     state.active_vault.set(VaultKind::from_storage_str(&vault));
                 }
@@ -334,6 +380,10 @@ fn App() -> Element {
                         .filter_map(View::from_storage_str)
                         .collect();
                     state.hidden_views.set(views);
+                }
+
+                if let Ok(Some(autohide)) = storage.get_item("autohide_entities") {
+                    state.autohide_entities.set(autohide != "false");
                 }
             } else {
                 clog!("localStorage unavailable — starting with in-memory defaults");

@@ -11,10 +11,11 @@ use crate::components::{
     entity_view_cmp,
     PriorityViewCmp,
     UrgencySettingsCmp,
-    GraphViewCmp,
-    DistanceViewCmp,
+    AllEntitiesViewCmp,
     DueViewCmp,
     ScheduledViewCmp,
+    BlockingViewCmp,
+    NotesViewCmp,
     SettingsCmp,
     RecentlyDeletedViewCmp,
 };
@@ -155,23 +156,15 @@ pub fn Home() -> Element {
                     div {
                         class: "px-4 pt-4 flex items-start justify-between gap-3",
                         div {
-                            h1 { class: "text-2xl font-semibold text-foreground mb-1", "Priority" }
+                            h1 { class: "text-2xl font-semibold text-foreground mb-1", "Expedite" }
                             p { class: "text-sm text-muted-foreground mb-4", "Open tasks and promises across everyone, ranked by urgency." }
                         }
                         UrgencySettingsCmp { }
                     }
                     PriorityViewCmp { }
                 },
-                Graph => rsx! {
-                    GraphViewCmp { }
-                },
-                Distance => rsx! {
-                    div {
-                        class: "px-4 pt-4",
-                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Distance" }
-                        p { class: "text-sm text-muted-foreground mb-4", "Everyone you're tracking, ranked by how far you've drifted." }
-                    }
-                    DistanceViewCmp { }
+                AllEntities => rsx! {
+                    AllEntitiesViewCmp { }
                 },
                 Due => rsx! {
                     div {
@@ -188,6 +181,22 @@ pub fn Home() -> Element {
                         p { class: "text-sm text-muted-foreground mb-4", "Waiting to come back into view — check on these before they arrive." }
                     }
                     ScheduledViewCmp { }
+                },
+                Blocking => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Blocking" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Still open, and standing between other things and done." }
+                    }
+                    BlockingViewCmp { }
+                },
+                Notes => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Notes" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Every note, in one place, newest first." }
+                    }
+                    NotesViewCmp { }
                 },
                 Settings => rsx! {
                     SettingsCmp { }

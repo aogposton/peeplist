@@ -47,6 +47,17 @@ pub fn LoginCMP() -> Element {
     let mut state = use_context::<AppState>();
     let mut loginform = use_signal(LoginForm::default);
     let mut error = use_signal(|| None::<String>);
+    // The email/password Inputs are controlled components (lumen_blocks'
+    // Input has a real `value: String` prop, defaulting to "" when not
+    // passed) — without binding `value` back to loginform, they were
+    // effectively pinned to "", and any re-render that touched the tree
+    // (e.g. error.set(None) at the top of submitform, right before the
+    // async call) would re-sync the DOM input back down to that pinned ""
+    // value, which is what "credentials disappear for a second on submit"
+    // actually was. submitting doubles as both the spinner state and what
+    // stops that same visible flash from mattering even if it still
+    // technically re-renders.
+    let mut submitting = use_signal(|| false);
     // No self-service signup existed before this — only an account created
     // by hand directly in Supabase could ever log in (see the local-first
     // pivot plan's Phase 1f, deliberately deferred until now). One form,
@@ -82,9 +93,13 @@ pub fn LoginCMP() -> Element {
     };
 
     let mut submitform = move || {
+        if *submitting.read() {
+            return;
+        }
         let form = loginform.read().clone();
         error.set(None);
         needs_confirmation.set(false);
+        submitting.set(true);
         spawn(async move {
             if *is_signup.read() {
                 match signup(form.email, form.password).await {
@@ -104,6 +119,7 @@ pub fn LoginCMP() -> Element {
                     }
                 }
             }
+            submitting.set(false);
         });
     };
 
@@ -153,6 +169,8 @@ pub fn LoginCMP() -> Element {
                         name: "email",
                         input_type: "email",
                         full_width: true,
+                        value: loginform.read().email.clone(),
+                        disabled: *submitting.read(),
                         on_input: move |e: Event<FormData>| loginform.write().email = e.value(),
                     }
                 }
@@ -169,6 +187,8 @@ pub fn LoginCMP() -> Element {
                         name: "password",
                         input_type: "password",
                         full_width: true,
+                        value: loginform.read().password.clone(),
+                        disabled: *submitting.read(),
                         variant: if error().is_some() { InputVariant::Error } else { InputVariant::Default },
                         on_input: move |e: Event<FormData>| loginform.write().password = e.value(),
                     }
@@ -182,6 +202,8 @@ pub fn LoginCMP() -> Element {
                 Button {
                     variant: ButtonVariant::Primary,
                     full_width: true,
+                    disabled: *submitting.read(),
+                    loading: *submitting.read(),
                     on_click: move |_| submitform(),
                     if *is_signup.read() { "Create account" } else { "Login" }
                 }

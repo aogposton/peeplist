@@ -10,6 +10,9 @@ pub use moment::ab_task_cmp;
 pub use moment::PriorityViewCmp;
 pub use moment::DueViewCmp;
 pub use moment::ScheduledViewCmp;
+pub use moment::BlockingViewCmp;
+pub use moment::NotesViewCmp;
+pub use moment::FullScreenEditorModalCmp;
 pub use moment::RecentlyDeletedViewCmp;
 pub use moment::UrgencySettingsCmp;
 
@@ -26,6 +29,7 @@ pub use entity::ab_history_cmp;
 pub use entity::ab_stats_cmp;
 pub use entity::ab_info_cmp;
 pub use entity::DistanceViewCmp;
+pub use entity::AllEntitiesViewCmp;
 pub(crate) use entity::compute_distance;
 pub(crate) use entity::backdated_created_at_for_distance;
 
