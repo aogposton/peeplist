@@ -123,7 +123,7 @@ pub fn Home() -> Element {
                 Entity | SelfEntity => {
                     let now = chrono::Utc::now();
                     let visible: Vec<MomentType> = moments.read().iter()
-                        .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.entity_id == e.id))
+                        .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.involves_entity(&e.id)))
                         .filter(|m| !crate::urgency::is_waiting(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
                         .filter(|m| project_filter.read().as_ref().map_or(true, |p| has_project(m, p)))

@@ -200,6 +200,33 @@ impl SortMode {
     }
 }
 
+// Moment list "view options" density (2026-07-28) — Compact is today's
+// existing row (title + inline badges, no description/tags shown) and stays
+// the default so nobody's view changes shape on its own; Full adds a second
+// line per row (description preview + priority/project/tag pills) for
+// anyone who wants more context without opening each moment.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ListDensity {
+    Compact,
+    Full,
+}
+
+impl ListDensity {
+    pub fn as_storage_str(&self) -> &'static str {
+        match self {
+            ListDensity::Compact => "compact",
+            ListDensity::Full => "full",
+        }
+    }
+
+    pub fn from_storage_str(s: &str) -> ListDensity {
+        match s {
+            "full" => ListDensity::Full,
+            _ => ListDensity::Compact,
+        }
+    }
+}
+
 impl fmt::Display for View {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -247,6 +274,9 @@ pub struct AppState {
     // Due date, Custom, By entity all have a well-defined reverse), so this
     // is one flag, not per-mode state.
     pub sort_descending: Signal<bool>,
+    // Moment list "view options" density (Compact/Full) — see ListDensity
+    // above. Persisted the same way as sort_mode/sort_descending.
+    pub list_density: Signal<ListDensity>,
     // Full-screen title+description editor toggle (2026-07-28, desktop
     // only). Has to live here, not as a local signal inside ab_task_cmp —
     // that panel is nested inside the activity bar's own `translate-x-0`
@@ -258,6 +288,17 @@ pub struct AppState {
     // approach as EntityModalCmp — which means whatever toggles it needs
     // to be visible from both places.
     pub full_editor_open: Signal<bool>,
+    // "On the fly" (2026-07-28) — Waffle House-order-completed-outside-the-
+    // flow inspired: jot a task, a full-screen takeover says "go do this
+    // now," go actually do it, come back and mark it done, never letting it
+    // sit buried in the normal list waiting to be rediscovered. The task is
+    // created for real the moment it's captured (not just held in memory)
+    // so getting pulled away mid-flow never loses it — see OnTheFlyCmp.
+    // on_the_fly_open gates the whole overlay; on_the_fly_task is None
+    // while still typing (capture stage) and Some once created (the "go do
+    // it" stage).
+    pub on_the_fly_open: Signal<bool>,
+    pub on_the_fly_task: Signal<Option<MomentType>>,
     // Local-first pivot Phase 1b (see memory reference_local_first_pivot_plan).
     // Defaults to Synced, not Local as the plan's eventual design intends —
     // the Local vault is a stub until Phase 1d/1e build the real flat-file
@@ -291,6 +332,13 @@ pub struct AppState {
     // data arrived. This is the single shared flag they all key a loading
     // skeleton off, instead of each view doing its own separate fetch/flag.
     pub data_loading: Signal<bool>,
+    // Bumped by the global "n" keyboard shortcut (see layouts::Navbar) to ask
+    // whichever MomentInputCmp instance is actually visible (mobile popup vs
+    // desktop composer — exactly one is display:none at any given viewport
+    // width) to focus its title field. A counter, not a bool, so two
+    // presses in a row without an intervening render still register as two
+    // distinct requests.
+    pub focus_composer: Signal<u32>,
 }
 
 fn main() {
@@ -321,12 +369,16 @@ fn App() -> Element {
         hide_completed: Signal::new(false),
         sort_mode: Signal::new(SortMode::Default),
         sort_descending: Signal::new(false),
+        list_density: Signal::new(ListDensity::Compact),
         full_editor_open: Signal::new(false),
+        on_the_fly_open: Signal::new(false),
+        on_the_fly_task: Signal::new(None),
         active_vault: Signal::new(VaultKind::Synced),
         urgency_weights: Signal::new(UrgencyWeights::default()),
         hidden_views: Signal::new(vec![]),
         autohide_entities: Signal::new(true),
         data_loading: Signal::new(true),
+        focus_composer: Signal::new(0),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -365,6 +417,10 @@ fn App() -> Element {
 
                 if let Ok(Some(desc)) = storage.get_item("sort_descending") {
                     state.sort_descending.set(desc == "true");
+                }
+
+                if let Ok(Some(density)) = storage.get_item("list_density") {
+                    state.list_density.set(ListDensity::from_storage_str(&density));
                 }
 
                 if let Ok(Some(vault)) = storage.get_item("active_vault") {

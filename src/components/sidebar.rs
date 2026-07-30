@@ -304,7 +304,7 @@ pub fn entity_list_cmp() -> Element {
     // sidebar list only.
     let now = chrono::Utc::now();
     let has_active_moment = |entity_id: &str| moments.read().iter()
-        .any(|m| m.entity_id == entity_id && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now));
+        .any(|m| m.involves_entity(entity_id) && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now));
     let mut visible_entities: Vec<_> = entities.read().iter()
         .filter(|e| !is_self_entity(e))
         .filter(|e| !*autohide_entities.read() || has_active_moment(&e.id))

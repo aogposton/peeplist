@@ -36,18 +36,31 @@ slug = "0.1"
 # Desktop-only: cross-platform resolution of the default vault root
 # (~/Documents/Peeplist/ or platform equivalent). See src/api/local_desktop.rs.
 directories = { version = "5", optional = true }
+# CLI-only: masked password entry for `bsb login` (native feature only —
+# never linked into the web/wasm build).
+rpassword = { version = "7", optional = true }
+# CLI-only: the GUI never needs its own top-level async runtime — Dioxus's
+# desktop build bundles one internally — but a standalone `bsb` binary has
+# nothing driving `peeplist::api`'s async fns (or reqwest's own internal
+# I/O) without this.
+tokio = { version = "1", features = ["rt", "macros"], optional = true }
 
 [[bin]]
-name = "pltask"
-path = "src/bin/pltask.rs"
-required-features = ["desktop"]
+name = "bsb"
+path = "src/bin/bsb.rs"
+required-features = ["native"]
 
 [features]
 default = ["web"]
 # The feature that are only required for the web = ["dioxus/web"] build target should be optional and only enabled in the web = ["dioxus/web"] feature
 web = ["dioxus/web"]
+# Native filesystem support (real ~/Documents/Peeplist files via `directories`)
+# — shared by the desktop GUI and the standalone `bsb` CLI binary. Split out
+# from `desktop` below so the CLI doesn't have to pull in webview deps
+# (wry/tao/webview2-com) just to resolve a home directory.
+native = ["dep:directories", "dep:rpassword", "dep:tokio"]
 # The feature that are only required for the desktop = ["dioxus/desktop"] build target should be optional and only enabled in the desktop = ["dioxus/desktop"] feature
-desktop = ["dioxus/desktop", "dep:directories"]
+desktop = ["dioxus/desktop", "native"]
 # The feature that are only required for the mobile = ["dioxus/mobile"] build target should be optional and only enabled in the mobile = ["dioxus/mobile"] feature
 mobile = ["dioxus/mobile"]
 # The feature that are only required for the server = ["dioxus/server"] build target should be optional and only enabled in the server = ["dioxus/server"] feature

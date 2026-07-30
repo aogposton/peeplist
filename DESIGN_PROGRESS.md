@@ -2,6 +2,64 @@
 
 Working doc for an ongoing UI redesign pass on peeplist (Dioxus 0.7 Rust app). Read this first before touching styling in this repo again — it has context that isn't obvious from the code alone.
 
+**Naming note (2026-07-28):** the app is now called **Black Server Book** ("bsb" for short) — so far this only applies to the CLI binary (`src/bin/bsb.rs`, replacing `pltask.rs`); the crate name (`peeplist`), repo, and GUI haven't been renamed. If the user wants the rename to go further, that's a separate ask.
+
+## 🎯 FULL BACKLOG — consolidated, current as of 2026-07-28
+
+This section exists so the backlog survives a chat context clear — everything below is pulled together from the "Product vision" section further down (stale since 07-15), `src/todo.md` (the user's own original notes, stale since 07-21), and the active session task list. **This section is the one to trust for current status; treat the older sections below it as historical narrative, not a live source of truth.** Update this section, don't just append to it, whenever backlog status changes meaningfully.
+
+### Pre-launch priority (2026-07-28 direction) — read this before suggesting "what's next"
+The user does not want to share/market this publicly (post to a community, etc.) until this is solid — "I want to come with a package... a full offering," not a partial one people churn off of. In priority order:
+1. **Get Phase 2 of the existing architecture plan right** — `/Users/aogposton/.claude/plans/joyful-brewing-feather.md`, "Paid sync (Stripe + Supabase Edge Functions)." This *is* "the file/sync + paid model" the user means — already fully designed (Stripe Checkout via Edge Functions, webhook-driven `subscription_active` flag, RLS-enforced not just client-hidden), not built yet. Treat this plan as current and read it before any sync/payment work, don't re-derive the design from scratch.
+2. **Platform scope, confirmed 2026-07-28**: CLI + web (+ web-responsive/"web-mobile") **and desktop-native** are all in scope. Native mobile app is explicitly not — not ready for that yet, don't suggest it. This matches the existing plan's original desktop-native+web day-one call; CLI just moved up in priority alongside them, it didn't replace them.
+3. **Notifications: deliberately out of near-term scope.** User's own reasoning: doesn't make sense in a browser context, only plausibly makes sense in a desktop app or mobile — and mobile isn't happening yet. Don't build a notification system, don't suggest one, until platform scope changes.
+
+### Core product pillars (the north star, not feature-by-feature)
+- Broad compatibility, not locked to one platform/ecosystem.
+- **End-to-end encryption — NOT implemented at all.** No crypto anywhere in the codebase. Real architectural decision needed (what's encrypted — moments/entities content? — and how key management works for local-first + Synced both) before this is buildable, not a quick add.
+- **Native CLI client (`src/bin/bsb.rs`, binary name `bsb`) — now a genuinely standalone binary with real login + Synced-vault access (2026-07-28).** Was Local-vault-only (`pltask`); now: `bsb add "<text>" [--synced]`, `bsb list [--synced]`, `bsb login`, `bsb logout`, `bsb whoami`. Build with `cargo build --features native --bin bsb` — deliberately does NOT require the `desktop` feature/webview deps (`directories`/`rpassword`/`tokio` were split into a new shared `native` feature so the CLI stays lightweight). Reuses the same `peeplist::api` (`ActiveStorage`/`auth`) the GUI uses — no separate/duplicated storage logic, no drift risk between CLI and GUI Local-vault behavior. Session (Supabase access/refresh token) persists as a plain JSON file (chmod 600 on Unix) under the OS config dir (e.g. `~/Library/Application Support/peeplist/session.json`), deliberately outside the vault root. Not yet built: `bsb` commands for delete/complete/edit, and the Synced vault still has no local file-caching (network-only, by design for this pass — see plan `/Users/aogposton/.claude/plans/graceful-wiggling-eich.md`).
+- **Developer-facing API for third-party tooling — NOT implemented.**
+- **Mobile app — NOT implemented as a native app, deliberately deferred.** The web build is responsive/works in a mobile browser, but there's no packaged mobile app (Dioxus does support a `mobile` platform target per `Cargo.toml` feature gates — never built/tested). User's stated sequencing (2026-07-28): ship CLI + web + desktop-native first, share publicly, **then** port to mobile quickly as a fast-follow — not scoped for the pre-launch package itself.
+- Taskwarrior-style quick-capture syntax (`@mention`, `pri:H`, `due:`, `+tag`, `project:`, `depends:`, `scheduled:`/`wait:`) — **shipped**, both in the main composer and (as of 2026-07-28) "On the fly."
+- Graph/orbit view — **shipped** (single mode; the original spec wanted three switchable modes — overview/gravity/reaction — plus timeline scrubbing through graph history; neither built). As of 2026-07-23 this lives under the "All Entities" view alongside Distance, not its own sidebar link.
+
+### Done this project (major items, not exhaustive — see git log for full detail)
+- Local-first architecture: Local vault (real flat-file storage, web + desktop) and Synced (Supabase) vault, switchable.
+- Taskwarrior-style attributes: priority, due/scheduled/wait dates, tags, projects, single-dependency `depends_on`, quick-capture parsing.
+- Distance/Drift relationship-health model, Graph View, Priority ("Expedite") urgency ranking (now factors in Drift).
+- Promise entity type, Notes, entity individuation (v1, no moment-transfer yet).
+- Row-level security / per-account data isolation (was completely broken until 2026-07-22 — see memory `project_rls_data_isolation_fix_2026_07_22`).
+- Session-expiry bug fix (web only — desktop still has zero login persistence, a separate known gap).
+- Entity/tag/project/moment right-click menus (self-contained replacement, not lumen_blocks), Delete/Duplicate on moments.
+- Auto-hide for inactive entities/projects in the sidebar; All Entities / Blocking / Notes views.
+- "On the fly" quick-capture-and-immediately-complete flow, full-screen markdown-preview editor.
+- Marketing site copy (`marketing/index.html`, not yet deployed as of last check).
+
+### Open — from `src/todo.md` (your original notes), current status
+- **Urgency Engine** — due date/gravity/blocked/blocking all built (`compute_urgency`); "promise age" and "drift velocity" (Distance/Drift) factored in as of 2026-07-22. Ranked queue = Priority/Expedite view. Coefficients still an untuned first draft.
+- **Account and Settings** — create/log in/log out: done. **Delete account + all data: NOT built.** **Export data: NOT built** (was built once, then explicitly removed same day per your call). Default-entity-to-self: the app already defaults un-attributed moments to Self, no separate setting exists. Notification preferences / reminder frequency: **deliberately out of scope for now** — see "Pre-launch priority" above, doesn't make sense in a browser context and mobile isn't happening yet.
+- **Social and Sharing — NOT built.** Share a moment with another user, invite someone from an entity profile: neither exists.
+- **Paid Tier — NOT built.** No entity-count limits, no feature gating, no monetization model decided at all.
+- **Crisis View** (the *dashboard* concept from todo.md — closest entities at a glance, recent moments logged by/for others, open promises, recent positive reactions) — this is a different thing than "Graph View" (which used to be named Crisis View and got renamed/repurposed). The dashboard concept itself has never been built and currently has no nav slot.
+
+### Open — from this session's task list (2026-07-28)
+All items from this session's "run it" backlog pass are now done except the two deliberately paused ones below:
+- ~~Drag-and-drop drop-position preview line while reordering (Custom sort mode)~~ — done, plus a follow-up lag fix: `ondragover` fires continuously during a drag and was unconditionally writing to a signal read by every row, forcing dozens of full-list re-renders/sec even while hovering one still row; fixed by only writing when the hovered row actually changes (guard-before-set).
+- ~~Moment list "view options" density menu (Full / Compact)~~ — done. Compact (default, unchanged from before) is today's single-line row; Full adds a second line with description preview + priority/project/tag pills. Toggle lives in the sort row, persisted to localStorage (web only, same as sort_mode).
+- ~~Blocking view: nested tree of what each blocking moment actually blocks~~ — done.
+- ~~New DAG (directed acyclic graph) view for moment dependency chains~~ — done, toggle inside Blocking view.
+- ~~Inline/TickTick-style markdown rendering~~ — done (pure-Rust markdown-lite subset + side-by-side preview in the full-screen editor).
+- ~~Remove the asc/desc sort toggle from Custom order specifically~~ — done.
+- ~~CLI feature inventory~~ — done (report only).
+- ~~CLI: standalone binary + login/whoami/Synced-vault `add`~~ — done, 2026-07-28. Renamed `pltask` → `bsb` (see plan `/Users/aogposton/.claude/plans/graceful-wiggling-eich.md` for full detail). Still open for a future pass: `bsb` delete/complete/edit commands, and real local file-caching for the Synced vault (deliberately out of scope this round — network-only was the explicit call).
+- **Duplicate-reactions bug** — low priority, waiting to see if it recurs before investigating.
+- Self-hostability (local DB/schema setup) — long-standing, never built; `docker/` self-host stack is gitignored and mostly never actually committed
+
+### Known bugs, flagged but not fixed
+- Desktop build has **zero session persistence** — every restart requires logging back in again (separate, bigger issue than the web refresh-token bug fixed 2026-07-28).
+- Opening a per-entity activity-bar panel (Info/Stats/History) then navigating away without closing it leaves stale content showing — nothing resets `activity_bar_tgl`/`activity_bar_view` when `currentView`/`current_entity` changes out from under it.
+- `ABView::Graphs`/the per-entity "Graphs" tab concept was removed from the UI, but flagged historically as possibly overlapping with the sidebar Graph View — moot now since that tab's gone, leaving as a historical note only.
+
 ## 🚨 Major architecture pivot in progress — Phase 1a/1b/1d/1e done (2026-07-15)
 
 A full local-first + paid-sync architecture pivot was designed and approved in a separate session, saved to a standalone plan file (Claude Code's plan-mode mechanism, outside this repo): **`/Users/aogposton/.claude/plans/joyful-brewing-feather.md`**. That file is fully self-contained (context, phases, exact technical design) — read it before doing any further work on this app, since it changes fundamentals: IDs move from `i64` to UUID strings app-wide, a pluggable storage layer replaces direct Supabase calls everywhere, a local flat-file vault (YAML frontmatter + markdown, one file per person) becomes the default zero-account experience on both web (`localStorage`) and a new desktop-native build (real files), and "having an account" becomes synonymous with a paid Stripe subscription that unlocks a separate "Synced" vault via Supabase Edge Functions.

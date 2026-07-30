@@ -7,22 +7,25 @@ pub mod vault_format;
 pub mod import;
 // Two concrete Local vault backends, sharing vault_format — `dx build`
 // compiles in `desktop` regardless of whether default features (which
-// include `web`) are also active, so this has to key off `desktop` being
-// *present*, not `web` being absent. See storage.rs's `pub use` below,
-// which picks whichever of these is actually compiled in as `LocalStorage`.
-#[cfg(feature = "desktop")]
+// include `web`) are also active, so this has to key off `native` being
+// *present*, not `web` being absent. `native` is shared by both the
+// desktop GUI (`desktop` feature) and the standalone `bsb` CLI binary, so
+// either one gets the real std::fs-backed vault. See storage.rs's `pub
+// use` below, which picks whichever of these is actually compiled in as
+// `LocalStorage`.
+#[cfg(feature = "native")]
 pub mod local_desktop;
-#[cfg(not(feature = "desktop"))]
+#[cfg(not(feature = "native"))]
 pub mod local;
 
 pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_token, update_password};
 pub use storage::{ActiveStorage, VaultKind, StorageError, is_self_entity};
 pub use import::{import_local_into_synced, ImportSummary};
 
-// Desktop already writes real files under ~/Documents/Peeplist — this is
+// Desktop/CLI already write real files under ~/Documents/Peeplist — this is
 // specifically the web build's missing "get my data back out" path, since
 // a web Local vault only ever exists inside localStorage otherwise.
-#[cfg(not(feature = "desktop"))]
+#[cfg(not(feature = "native"))]
 pub async fn export_local_vault() -> Result<Vec<(String, String)>, StorageError> {
     local::LocalStorage::new().export_all().await
 }

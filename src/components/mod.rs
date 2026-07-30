@@ -13,6 +13,7 @@ pub use moment::ScheduledViewCmp;
 pub use moment::BlockingViewCmp;
 pub use moment::NotesViewCmp;
 pub use moment::FullScreenEditorModalCmp;
+pub use moment::OnTheFlyCmp;
 pub use moment::RecentlyDeletedViewCmp;
 pub use moment::UrgencySettingsCmp;
 

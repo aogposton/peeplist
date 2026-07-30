@@ -15,6 +15,7 @@ use crate::components::{
     MomentInputCmp,
     EntityModalCmp,
     FullScreenEditorModalCmp,
+    OnTheFlyCmp,
     ab_task_cmp,
     ab_history_cmp,
     ab_stats_cmp,
@@ -52,16 +53,71 @@ const TOKEN_REFRESH_INTERVAL_MS: u32 = 50 * 60 * 1000;
 //     let height = w.inner_height().unwrap().as_f64().unwrap();
 //     (width, height)
 // }
+// App-wide keyboard shortcuts (2026-07-29): "n" focuses the moment composer,
+// "o" opens On the fly, Escape closes the activity panel. A plain Dioxus
+// onkeydown on some wrapping element can't do this — keydown bubbles from
+// the focused element *up* the DOM, so with nothing focused (the common
+// idle-browsing case, where the focused element defaults to <body>) it
+// would never reach a handler on a descendant div at all. document::eval
+// (same primitive graph.rs already uses for its d3 interop, cross-platform
+// across web and desktop) instead registers a real window-level listener in
+// JS once and streams every keydown back over the eval's channel, so this
+// works regardless of what currently has focus.
+#[derive(serde::Deserialize, Clone)]
+struct GlobalKeyEvent {
+    key: String,
+    ctrl: bool,
+    meta: bool,
+    alt: bool,
+    tag: String,
+    editable: bool,
+}
+
+const GLOBAL_KEYDOWN_SCRIPT: &str = r#"
+    window.addEventListener('keydown', (e) => {
+        const el = document.activeElement;
+        const tag = el ? el.tagName : '';
+        const editable = el ? !!el.isContentEditable : false;
+        const isTyping = editable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+        const noModifiers = !e.ctrlKey && !e.metaKey && !e.altKey;
+        const lower = e.key.toLowerCase();
+        // Stop the browser's own default (typing the letter into whatever
+        // ends up focused) before it can happen at all — deciding this here,
+        // synchronously in the same listener that captured the key, is the
+        // only way to make it race-proof. Rust's focus_composer/on_the_fly
+        // handling below runs asynchronously (a signal update + re-render +
+        // effect), and by the time it actually calls set_focus, the browser
+        // may already be partway through inserting this same keystroke into
+        // the element focus just landed on — that's what caused "n" to both
+        // focus the composer AND type a literal "n" into it.
+        if (noModifiers && !isTyping && (lower === 'n' || lower === 'o')) {
+            e.preventDefault();
+        }
+        dioxus.send({
+            key: e.key,
+            ctrl: e.ctrlKey,
+            meta: e.metaKey,
+            alt: e.altKey,
+            tag: tag,
+            editable: editable,
+        });
+    });
+"#;
+
 #[component]
 pub fn Sidebar() -> Element {
     let state = use_context::<AppState>();
     let mut sidebarTgl = state.sidebarTgl;
     rsx! {
         div {
+            // pb-[200px] (here and on the desktop sidebar/activity bar
+            // below) — scrolled-to-bottom content used to sit flush
+            // against the viewport edge, and the fixed On the fly button
+            // (bottom-6 left-6) sat right on top of whatever was there.
             class: if *sidebarTgl.read() {
-                "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform translate-x-0 transition-transform duration-200 bg-background border-r border-border"
+                "fixed top-0 left-0 h-full overflow-y-auto pb-[200px] w-64 shadow-xl z-40 transform translate-x-0 transition-transform duration-200 bg-background border-r border-border"
             } else {
-                "fixed top-0 left-0 h-full overflow-y-auto w-64 shadow-xl z-40 transform -translate-x-full transition-transform duration-200 bg-background border-r border-border"
+                "fixed top-0 left-0 h-full overflow-y-auto pb-[200px] w-64 shadow-xl z-40 transform -translate-x-full transition-transform duration-200 bg-background border-r border-border"
             },
             div {
                 class:"h-1",
@@ -343,8 +399,45 @@ pub fn Navbar() -> Element {
     let mut user_id = state.user_id;
     let mut user_email = state.user_email;
     let mut active_vault = state.active_vault;
+    let mut focus_composer = state.focus_composer;
+    let mut on_the_fly_open = state.on_the_fly_open;
     let mut refresh_loop_started = use_signal(|| false);
+    let mut keyboard_listener_started = use_signal(|| false);
     let moment = current_moment.read().clone();
+
+    // Started once per mounted session, same guard pattern as the token
+    // refresh loop below.
+    use_effect(move || {
+        if *keyboard_listener_started.read() {
+            return;
+        }
+        keyboard_listener_started.set(true);
+        spawn(async move {
+            let mut eval = document::eval(GLOBAL_KEYDOWN_SCRIPT);
+            while let Ok(payload) = eval.recv::<GlobalKeyEvent>().await {
+                if payload.key == "Escape" {
+                    if *activity_bar_tgl.read() {
+                        activity_bar_tgl.set(false);
+                        backdropTgl.set(false);
+                    }
+                    continue;
+                }
+                let is_typing = payload.editable
+                    || matches!(payload.tag.as_str(), "INPUT" | "TEXTAREA" | "SELECT");
+                if payload.ctrl || payload.meta || payload.alt || is_typing {
+                    continue;
+                }
+                match payload.key.to_lowercase().as_str() {
+                    "n" => {
+                        let current = *focus_composer.read();
+                        focus_composer.set(current + 1);
+                    }
+                    "o" => on_the_fly_open.set(true),
+                    _ => {}
+                }
+            }
+        });
+    });
 
     // On every load of the main app, confirm the token we have cached in
     // localStorage is still actually accepted by Supabase. A token can die
@@ -509,10 +602,26 @@ pub fn Navbar() -> Element {
             }
         }
 
+        // Desktop equivalent of the mobile backdrop above, but invisible —
+        // just asked for "click anywhere else and it closes," not a dimmed
+        // screen. Sits behind the activity bar panel (z-59 vs. its z-[60]),
+        // so a click that actually lands on the panel never reaches this.
+        if *activity_bar_tgl.read() {
+            div {
+                id: "activity-bar-backdrop",
+                class: "hidden xl:block fixed inset-0 z-[59]",
+                onclick: move |_| {
+                    backdropTgl.set(false);
+                    activity_bar_tgl.set(false);
+                }
+            }
+        }
+
         div {
             style: "background-color:{BG};",
             EntityModalCmp { }
             FullScreenEditorModalCmp { }
+            OnTheFlyCmp { }
             button {
                 id: "add-moment-button",
                 class: "xl:hidden fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95",
@@ -555,7 +664,7 @@ pub fn Navbar() -> Element {
                     // confirmation modals in entity_list_cmp/tag_list_cmp/
                     // project_list_cmp), pinning them inside the sidebar's
                     // 256px box instead of centering on the real viewport.
-                    class: "hidden xl:block h-full overflow-y-auto w-64 border-r border-border bg-background",
+                    class: "hidden xl:block h-full overflow-y-auto pb-[200px] w-64 border-r border-border bg-background",
                     div {
                         class:"h-1",
                     }

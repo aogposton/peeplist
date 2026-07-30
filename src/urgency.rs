@@ -142,7 +142,7 @@ impl UrgencyBreakdown {
     pub fn describe(&self) -> String {
         let mut parts: Vec<(&str, f64)> = vec![
             ("due", self.due),
-            ("expedite", self.priority),
+            ("priority", self.priority),
             ("project", self.project),
             ("scheduled", self.scheduled),
             ("gravity", self.gravity),
@@ -247,19 +247,15 @@ pub fn compute_urgency(
         })
         .unwrap_or(0.0);
 
-    let blocked_indicator = match m.depends_on.as_deref() {
-        Some(dep_id) => {
-            let dep_done = all_moments.iter()
-                .find(|x| x.id == dep_id)
-                .map(|x| x.completed_at.is_some())
-                .unwrap_or(true);
-            !dep_done
-        }
-        None => false,
-    };
+    let blocked_indicator = m.dependency_ids().iter().any(|dep_id| {
+        all_moments.iter()
+            .find(|x| &x.id == dep_id)
+            .map(|x| x.completed_at.is_none())
+            .unwrap_or(false)
+    });
 
     let blocking_indicator = all_moments.iter()
-        .any(|x| x.depends_on.as_deref() == Some(m.id.as_str()) && x.completed_at.is_none());
+        .any(|x| x.completed_at.is_none() && x.dependency_ids().contains(&m.id));
 
     let tags_indicator = m.metadata.as_ref()
         .map(|meta| meta.tags.len().min(3) as f64)
@@ -430,7 +426,7 @@ mod tests {
         m.metadata = Some(MomentMetadata { priority: Some("H".to_string()), ..Default::default() });
         let b = compute_urgency(&m, &[], &[], Utc::now(), &UrgencyWeights::default());
         let d = b.describe();
-        assert!(d.contains("expedite"));
+        assert!(d.contains("priority"));
         assert!(!d.contains("due "));
     }
 }

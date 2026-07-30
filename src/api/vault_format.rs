@@ -120,8 +120,9 @@ pub struct MomentEntry {
     pub project: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub completed_at: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub depends_on: Option<String>,
+    // Unlimited, like tags (2026-07-29) — was a single Option<String> before.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub depends_on: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -130,6 +131,11 @@ pub struct MomentEntry {
     pub created_at: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub reactions: Vec<ReactionEntry>,
+    // Multi-entity moments (2026-07-29) — every additional entity this
+    // moment also fully belongs to, besides whichever entity's file it
+    // physically lives under. See MomentType::entity_ids.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub additional_entity_ids: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -194,11 +200,12 @@ pub(crate) fn moment_to_entry(m: &MomentType) -> MomentEntry {
         priority: meta.priority,
         project: meta.project,
         completed_at: m.completed_at.clone(),
-        depends_on: m.depends_on.clone(),
+        depends_on: m.dependency_ids(),
         tags: meta.tags,
         sort_index: meta.sort_index,
         created_at: m.created_at.clone(),
         reactions: m.reactions.as_deref().unwrap_or(&[]).iter().map(reaction_to_entry).collect(),
+        additional_entity_ids: meta.additional_entity_ids,
     }
 }
 
@@ -213,6 +220,8 @@ pub(crate) fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentTyp
         project: entry.project.clone(),
         scheduled_at: entry.scheduled_at.clone(),
         until_at: entry.until_at.clone(),
+        depends_on: entry.depends_on.clone(),
+        additional_entity_ids: entry.additional_entity_ids.clone(),
     };
     let metadata = if meta == MomentMetadata::default() { None } else { Some(meta) };
     let reactions = entry.reactions.iter().map(|r| entry_to_reaction(r, &entry.id)).collect::<Vec<_>>();
@@ -228,7 +237,7 @@ pub(crate) fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentTyp
         deleted_at: None,
         reactions: if reactions.is_empty() { None } else { Some(reactions) },
         created_at: entry.created_at.clone(),
-        depends_on: entry.depends_on.clone(),
+        depends_on: None,
         metadata,
     }
 }
@@ -467,8 +476,22 @@ mod tests {
         let parsed = parse_entity_file(&rendered).expect("valid round-trip");
         assert_eq!(parsed.entity, entity);
         assert_eq!(parsed.moments.len(), moments.len());
+        // A moment using the legacy single-dependency field (like `promise`
+        // above, simulating pre-2026-07-29 data) round-trips with that
+        // dependency migrated into metadata.depends_on instead — that's the
+        // intended upgrade (see MomentType::dependency_ids), not data loss,
+        // so compare the two shapes' meaning rather than raw struct equality.
+        let normalize = |m: &MomentType| -> MomentType {
+            let mut n = m.clone();
+            let deps = n.dependency_ids();
+            n.depends_on = None;
+            let mut meta = n.metadata.unwrap_or_default();
+            meta.depends_on = deps;
+            n.metadata = if meta == MomentMetadata::default() { None } else { Some(meta) };
+            n
+        };
         for (original, back) in moments.iter().zip(parsed.moments.iter()) {
-            assert_eq!(original, back);
+            assert_eq!(&normalize(original), back);
         }
         assert_eq!(parsed.body, BODY_PLACEHOLDER);
     }
@@ -484,6 +507,8 @@ mod tests {
             project: Some("Home.Garden".to_string()),
             scheduled_at: Some("2026-08-01T00:00:00Z".to_string()),
             until_at: Some("2026-09-01T00:00:00Z".to_string()),
+            depends_on: vec![],
+            additional_entity_ids: vec![],
         });
 
         let rendered = render_entity_file(&entity, &[with_attrs.clone()], "");

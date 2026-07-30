@@ -68,7 +68,10 @@ fn editable_stat_row(
                 r#type: "text",
                 class: "flex-1 min-w-0 rounded-md border border-transparent hover:border-input focus:border-input bg-transparent text-right text-sm text-foreground px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                 value: "{value}",
-                onchange: move |e| {
+                // oninput, not onchange — onchange only fires on blur, so closing
+                // the activity panel right after typing (without clicking away
+                // first) silently discarded the edit.
+                oninput: move |e| {
                     let id = entity_id.clone();
                     let val = e.value();
                     let token = auth_token;
@@ -111,7 +114,10 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
     let drift = if entity.drift > 0.0 { entity.drift } else { 2.0 };
     let grown = BASE_DISTANCE + drift * days_elapsed;
 
-    let entity_moments: Vec<&MomentType> = moments.iter().filter(|m| m.entity_id == entity.id).collect();
+    // involves_entity, not a plain entity_id equality check — a multi-entity
+    // moment (2026-07-29) counts fully toward every entity it's attached to,
+    // including closing their Distance same as a moment solely theirs would.
+    let entity_moments: Vec<&MomentType> = moments.iter().filter(|m| m.involves_entity(&entity.id)).collect();
 
     let closed_gravity: f64 = entity_moments.iter()
         .filter(|m| {
@@ -252,7 +258,7 @@ pub fn DistanceViewCmp() -> Element {
     let mut rows: Vec<Row> = entities.read().iter()
         .filter(|e| !is_self_entity(e))
         .map(|e| {
-            let entity_moments: Vec<&MomentType> = all_moments.iter().filter(|m| m.entity_id == e.id).collect();
+            let entity_moments: Vec<&MomentType> = all_moments.iter().filter(|m| m.involves_entity(&e.id)).collect();
             let last_completed = entity_moments.iter()
                 .filter_map(|m| m.completed_at.as_deref())
                 .filter_map(|dt| chrono::DateTime::parse_from_rfc3339(dt).ok())
@@ -587,7 +593,7 @@ pub fn ab_stats_cmp() -> Element {
         let all_entities = entities.read();
         let mut counts: Vec<(String, usize)> = all_entities.iter()
             .filter(|e| !is_self_entity(e))
-            .map(|e| (e.id.clone(), all_moments.iter().filter(|m| m.entity_id == e.id).count()))
+            .map(|e| (e.id.clone(), all_moments.iter().filter(|m| m.involves_entity(&e.id)).count()))
             .collect();
         counts.sort_by(|a, b| b.1.cmp(&a.1));
         let rank = entity_id.and_then(|id| counts.iter().position(|(eid, _)| *eid == id)).map(|pos| pos + 1);
@@ -737,7 +743,7 @@ pub fn ab_info_cmp() -> Element {
                                     min: "0.1",
                                     class: "w-20 rounded-md border border-input bg-background text-sm text-foreground px-2 py-1 text-right focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                     value: "{drift_value}",
-                                    onchange: move |e| {
+                                    oninput: move |e| {
                                         let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id.clone()) else { return; };
                                         let Ok(new_drift) = e.value().parse::<f64>() else { return; };
                                         let token = auth_token;

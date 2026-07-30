@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use crate::AppState;
 use crate::ABView;
 use crate::SortMode;
+use crate::ListDensity;
 use crate::UrgencyWeights;
 use crate::theme::*;
 use crate::ui::*;
@@ -323,10 +324,17 @@ pub fn moment_history_cmp() -> Element {
 #[component]
 pub fn MomentListCmp(props: MomentListProps) -> Element {
     let mut dragged_id = use_signal(|| None::<String>);
+    // Which row is currently being dragged over — drives the drop-position
+    // preview line (2026-07-28), rendered directly above that row, matching
+    // exactly where ondrop below actually inserts the dragged item (it
+    // always inserts before the target row, so "line above the target" is
+    // never misleading about where the drop will land).
+    let mut drag_over_id = use_signal(|| None::<String>);
     let state = use_context::<AppState>();
     let mut moments = state.moments;
     let mut sort_mode = state.sort_mode;
     let mut sort_descending = state.sort_descending;
+    let mut list_density = state.list_density;
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let entities = state.entities;
@@ -345,8 +353,14 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
         // Clicking the mode that's already active flips direction instead
         // of being a no-op; clicking a different mode switches to it and
         // resets to ascending (matches clicking a different table column
-        // header — you don't inherit the old column's direction).
+        // header — you don't inherit the old column's direction). Custom
+        // is the one exception (2026-07-28, user's call) — it's not a
+        // sortable dimension with a natural reverse, it's just whatever
+        // order you dragged things into, so re-clicking it is a no-op.
         if *sort_mode.read() == mode {
+            if mode == SortMode::Custom {
+                return;
+            }
             let flipped = !*sort_descending.read();
             sort_descending.set(flipped);
             #[cfg(not(feature = "desktop"))]
@@ -465,8 +479,9 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
     // A plain reverse keeps By entity's groups contiguous (reversing a
     // list sorted by key reverses both group order and order-within-group,
     // never interleaves them), so this works uniformly for every mode
-    // without needing per-mode-aware logic.
-    if *sort_descending.read() {
+    // without needing per-mode-aware logic. Custom is excluded outright —
+    // no reverse toggle exists for it (see set_sort_mode above).
+    if *sort_descending.read() && current_sort_mode != SortMode::Custom {
         display_list.reverse();
     }
     let is_custom = current_sort_mode == SortMode::Custom;
@@ -480,36 +495,62 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
     };
 
     // Click the active mode again to flip direction — same "click a
-    // table header twice" convention, no separate control.
-    let dir_arrow = |mode: SortMode| if current_sort_mode == mode {
+    // table header twice" convention, no separate control. Custom never
+    // shows an arrow — it has no direction to flip.
+    let dir_arrow = |mode: SortMode| if mode != SortMode::Custom && current_sort_mode == mode {
         if *sort_descending.read() { " ▼" } else { " ▲" }
     } else {
         ""
     };
 
+    let current_density = *list_density.read();
+    let mut set_density = move |d: ListDensity| {
+        list_density.set(d);
+        #[cfg(not(feature = "desktop"))]
+        if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
+            storage.set("list_density", d.as_storage_str()).ok();
+        }
+    };
+
     rsx! {
         div {
-            class: "mx-4 mb-1 flex items-center gap-1",
-            span { class: "text-xs text-muted-foreground mr-1", "Sort:" }
-            span {
-                class: sort_btn_class(current_sort_mode == SortMode::Default),
-                onclick: move |_| set_sort_mode(SortMode::Default),
-                "Default{dir_arrow(SortMode::Default)}"
+            class: "mx-4 mb-1 flex items-center justify-between gap-1",
+            div {
+                class: "flex items-center gap-1",
+                span { class: "text-xs text-muted-foreground mr-1", "Sort:" }
+                span {
+                    class: sort_btn_class(current_sort_mode == SortMode::Default),
+                    onclick: move |_| set_sort_mode(SortMode::Default),
+                    "Default{dir_arrow(SortMode::Default)}"
+                }
+                span {
+                    class: sort_btn_class(current_sort_mode == SortMode::DueDate),
+                    onclick: move |_| set_sort_mode(SortMode::DueDate),
+                    "Due date{dir_arrow(SortMode::DueDate)}"
+                }
+                span {
+                    class: sort_btn_class(current_sort_mode == SortMode::Custom),
+                    onclick: move |_| set_sort_mode(SortMode::Custom),
+                    "Custom (drag to reorder){dir_arrow(SortMode::Custom)}"
+                }
+                span {
+                    class: sort_btn_class(current_sort_mode == SortMode::ByEntity),
+                    onclick: move |_| set_sort_mode(SortMode::ByEntity),
+                    "By entity{dir_arrow(SortMode::ByEntity)}"
+                }
             }
-            span {
-                class: sort_btn_class(current_sort_mode == SortMode::DueDate),
-                onclick: move |_| set_sort_mode(SortMode::DueDate),
-                "Due date{dir_arrow(SortMode::DueDate)}"
-            }
-            span {
-                class: sort_btn_class(current_sort_mode == SortMode::Custom),
-                onclick: move |_| set_sort_mode(SortMode::Custom),
-                "Custom (drag to reorder){dir_arrow(SortMode::Custom)}"
-            }
-            span {
-                class: sort_btn_class(current_sort_mode == SortMode::ByEntity),
-                onclick: move |_| set_sort_mode(SortMode::ByEntity),
-                "By entity{dir_arrow(SortMode::ByEntity)}"
+            div {
+                class: "flex items-center gap-1",
+                span {
+                    class: sort_btn_class(current_density == ListDensity::Compact),
+                    onclick: move |_| set_density(ListDensity::Compact),
+                    "Compact"
+                }
+                span {
+                    class: sort_btn_class(current_density == ListDensity::Full),
+                    onclick: move |_| set_density(ListDensity::Full),
+                    "Full"
+                }
             }
         }
         div {
@@ -524,84 +565,124 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                         last_header_entity_id = Some(moment.entity_id.clone());
                     }
                     let header_name = if show_header { Some(entity_name(&moment.entity_id)) } else { None };
+                    let show_drop_line = is_custom
+                        && drag_over_id.read().as_deref() == Some(target_id.as_str())
+                        && dragged_id.read().as_deref() != Some(target_id.as_str());
                     rsx! {
-                        if let Some(name) = header_name {
-                            div {
-                                class: "px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground bg-muted/50",
-                                "{name}"
-                            }
-                        }
+                        // Everything for one moment (optional group header, optional
+                        // drop-position line, and the row itself) has to render as a
+                        // single keyed node here — Dioxus's list diffing keys the
+                        // per-iteration output as a unit, so when only the innermost
+                        // div carried the key, a completed moment leaving `display_list`
+                        // could leave its stale, faded-out DOM node in place while the
+                        // next moment's content slid into the wrong slot underneath it.
                         div {
                             key: "{target_id}",
-                            draggable: is_custom,
-                            class: if is_custom { "cursor-move" } else { "" },
-                            ondragstart: {
-                                let target_id = target_id.clone();
-                                move |_| dragged_id.set(Some(target_id.clone()))
-                            },
-                            ondragover: move |e| e.prevent_default(),
-                            ondrop: {
-                                let target_id = target_id.clone();
-                                move |e| {
-                                    e.prevent_default();
-                                    let Some(from_id) = dragged_id.read().clone() else { return; };
-                                    if from_id == target_id { return; }
-                                    let mut order = list_snapshot.clone();
-                                    let Some(from_pos) = order.iter().position(|m| m.id == from_id) else { return; };
-                                    let dragged_item = order.remove(from_pos);
-                                    let to_pos = order.iter().position(|m| m.id == target_id).unwrap_or(order.len());
-                                    order.insert(to_pos, dragged_item);
-                                    let token = auth_token;
-                        let vault = active_vault;
-                                    spawn(async move {
-                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                        for (idx, m) in order.iter().enumerate() {
-                                            // Reorder only ever touches sort_index — preserve everything
-                                            // else already on this moment's metadata (tags, priority, ...)
-                                            // rather than constructing a blank one from scratch.
-                                            let mut new_meta = m.metadata.clone().unwrap_or_default();
-                                            new_meta.sort_index = Some(idx as f64);
-                                            if storage.update_moment_field(m.id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
-                                                let mut list = moments.write();
-                                                if let Some(existing) = list.iter_mut().find(|x| x.id == m.id) {
-                                                    existing.metadata = Some(new_meta);
+                            if let Some(name) = header_name {
+                                div {
+                                    class: "px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground bg-muted/50",
+                                    "{name}"
+                                }
+                            }
+                            if show_drop_line {
+                                div { class: "h-0.5 mx-3 rounded-full bg-primary" }
+                            }
+                            div {
+                                draggable: is_custom,
+                                class: if is_custom { "cursor-move" } else { "" },
+                                ondragstart: {
+                                    let target_id = target_id.clone();
+                                    move |_| dragged_id.set(Some(target_id.clone()))
+                                },
+                                ondragover: {
+                                    let target_id = target_id.clone();
+                                    move |e| {
+                                        e.prevent_default();
+                                        // The actual bug behind "drag and drop
+                                        // is laggy": dragover fires continuously
+                                        // (mousemove-like frequency) the whole
+                                        // time the pointer sits over a row, and
+                                        // every signal .set() here was
+                                        // triggering a full re-render of the
+                                        // entire list (drag_over_id is read by
+                                        // every row's show_drop_line check) —
+                                        // dozens of full-list re-renders per
+                                        // second even while hovering one
+                                        // perfectly still row. Only write when
+                                        // the hovered row actually changes.
+                                        if drag_over_id.read().as_deref() != Some(target_id.as_str()) {
+                                            drag_over_id.set(Some(target_id.clone()));
+                                        }
+                                    }
+                                },
+                                ondragend: move |_| {
+                                    dragged_id.set(None);
+                                    drag_over_id.set(None);
+                                },
+                                ondrop: {
+                                    let target_id = target_id.clone();
+                                    move |e| {
+                                        e.prevent_default();
+                                        drag_over_id.set(None);
+                                        let Some(from_id) = dragged_id.read().clone() else { return; };
+                                        if from_id == target_id { return; }
+                                        let mut order = list_snapshot.clone();
+                                        let Some(from_pos) = order.iter().position(|m| m.id == from_id) else { return; };
+                                        let dragged_item = order.remove(from_pos);
+                                        let to_pos = order.iter().position(|m| m.id == target_id).unwrap_or(order.len());
+                                        order.insert(to_pos, dragged_item);
+                                        let token = auth_token;
+                                        let vault = active_vault;
+                                        spawn(async move {
+                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                            for (idx, m) in order.iter().enumerate() {
+                                                // Reorder only ever touches sort_index — preserve everything
+                                                // else already on this moment's metadata (tags, priority, ...)
+                                                // rather than constructing a blank one from scratch.
+                                                let mut new_meta = m.metadata.clone().unwrap_or_default();
+                                                new_meta.sort_index = Some(idx as f64);
+                                                if storage.update_moment_field(m.id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
+                                                    let mut list = moments.write();
+                                                    if let Some(existing) = list.iter_mut().find(|x| x.id == m.id) {
+                                                        existing.metadata = Some(new_meta);
+                                                    }
                                                 }
                                             }
-                                        }
-                                    });
-                                }
-                            },
-                            ContextMenu {
-                                ContextMenuTrigger {
-                                    MomentCmp {
-                                        moment: moment.clone(),
+                                        });
                                     }
-                                }
-                                ContextMenuContent {
-                                    if moment.moment_type_id == 1i64 {
+                                },
+                                ContextMenu {
+                                    ContextMenuTrigger {
+                                        MomentCmp {
+                                            moment: moment.clone(),
+                                        }
+                                    }
+                                    ContextMenuContent {
+                                        if moment.moment_type_id == 1i64 {
+                                            ContextMenuItem {
+                                                on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 2i64) },
+                                                "Convert to promise"
+                                            }
+                                        }
+                                        if moment.moment_type_id == 2i64 {
+                                            ContextMenuItem {
+                                                on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 1i64) },
+                                                "Convert to task"
+                                            }
+                                        }
                                         ContextMenuItem {
-                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 2i64) },
-                                            "Convert to promise"
+                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 3i64) },
+                                            "Convert to note"
                                         }
-                                    }
-                                    if moment.moment_type_id == 2i64 {
                                         ContextMenuItem {
-                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 1i64) },
-                                            "Convert to task"
+                                            on_select: { let m = moment.clone(); move |_| onDuplicate(m.clone()) },
+                                            "Duplicate"
                                         }
-                                    }
-                                    ContextMenuItem {
-                                        on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 3i64) },
-                                        "Convert to note"
-                                    }
-                                    ContextMenuItem {
-                                        on_select: { let m = moment.clone(); move |_| onDuplicate(m.clone()) },
-                                        "Duplicate"
-                                    }
-                                    ContextMenuItem {
-                                        destructive: true,
-                                        on_select: { let m = moment.clone(); move |_| onDelete(m.clone()) },
-                                        "Delete"
+                                        ContextMenuItem {
+                                            destructive: true,
+                                            on_select: { let m = moment.clone(); move |_| onDelete(m.clone()) },
+                                            "Delete"
+                                        }
                                     }
                                 }
                             }
@@ -635,6 +716,18 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     let is_promise = props.moment.moment_type_id == 2i64;
     let accent_border = if is_promise { HL } else { "transparent" };
     let moment = props.moment.clone();
+
+    // "view options" density (2026-07-28) — Full adds this second line
+    // (description preview + priority/project/tag pills); Compact (the
+    // default) stays exactly what this row always looked like.
+    let is_full = *state.list_density.read() == ListDensity::Full;
+    let desc_preview = description.lines().next().unwrap_or("").trim().to_string();
+    let priority_label = props.moment.metadata.as_ref()
+        .and_then(|m| m.priority.as_deref())
+        .map(|p| match p { "H" => "High", "M" => "Medium", "L" => "Low", other => other }.to_string());
+    let project_label = props.moment.metadata.as_ref().and_then(|m| m.project.clone());
+    let tag_labels: Vec<String> = props.moment.metadata.as_ref().map(|m| m.tags.clone()).unwrap_or_default();
+    let has_full_line = is_full && (!desc_preview.is_empty() || priority_label.is_some() || project_label.is_some() || !tag_labels.is_empty());
 
     // Deliberately NOT a separate use_signal seeded once at mount — this
     // component instance persists across re-renders (same list position),
@@ -671,16 +764,18 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     // reference/context link — "this task depends on what's in that note"),
     // it just never actually blocks completion the way depending on an
     // open task or promise does.
-    let is_blocked = props.moment.depends_on.as_ref().is_some_and(|dep_id| {
+    // A moment can depend on more than one thing now (2026-07-29, see
+    // MomentType::dependency_ids) — blocked until every one of them is done.
+    let unfinished_blockers: Vec<String> = props.moment.dependency_ids().iter().filter_map(|dep_id| {
         moments.read().iter().find(|m| &m.id == dep_id)
-            .is_some_and(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none())
-    });
+            .filter(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none())
+            .map(|dep| dep.title.clone())
+    }).collect();
+    let is_blocked = !unfinished_blockers.is_empty();
     // The list row only ever said "Blocked" with no way to tell what by —
-    // the detail panel already names the blocker (see ab_task_cmp's
+    // the detail panel already names the blocker(s) (see ab_task_cmp's
     // "Blocked by" line), the row itself just never did.
-    let blocked_on_title = props.moment.depends_on.as_ref().and_then(|dep_id| {
-        moments.read().iter().find(|m| &m.id == dep_id).map(|m| m.title.clone())
-    });
+    let blocked_on_title = if unfinished_blockers.is_empty() { None } else { Some(unfinished_blockers.join(", ")) };
 
     let onCheckClicked = move |checked: bool| {
         if is_blocked {
@@ -757,10 +852,35 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
                         if let Some(t) = &blocked_on_title { "Blocked by \"{t}\"" } else { "Blocked" }
                     }
                 }
-                // p {
-                //     class: "text-slate-400 mt-1",
-                //     "{description}"
-                // }
+                if has_full_line {
+                    div {
+                        class: "flex items-center gap-2 mt-1 flex-wrap",
+                        if !desc_preview.is_empty() {
+                            span {
+                                class: "text-xs text-muted-foreground truncate max-w-full",
+                                "{desc_preview}"
+                            }
+                        }
+                        if let Some(p) = &priority_label {
+                            span {
+                                class: "text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0",
+                                "{p}"
+                            }
+                        }
+                        if let Some(proj) = &project_label {
+                            span {
+                                class: "text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0",
+                                "{proj}"
+                            }
+                        }
+                        for tag in tag_labels.iter() {
+                            span {
+                                class: "text-xs px-1.5 py-0.5 rounded bg-muted text-muted-foreground shrink-0",
+                                "+{tag}"
+                            }
+                        }
+                    }
+                }
             }
             if let Some((label, is_overdue)) = due_display {
                 span {
@@ -795,8 +915,30 @@ pub fn MomentInputCmp() -> Element {
     // real field and focuses it, bound directly to form.description.
     let mut description_open = use_signal(|| false);
     let mut description_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
+    let mut title_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
+    let focus_composer = state.focus_composer;
+    let mut last_seen_focus_req = use_signal(move || *focus_composer.read());
 
-    
+    // Two MomentInputCmp instances are mounted at once (the mobile popup
+    // one here in the layout, and the desktop one in views/home.rs) — only
+    // one is ever actually visible at a given viewport width (Tailwind's
+    // hidden/xl:block vs xl:hidden), so set_focus on the other is a
+    // harmless no-op. Compares against the last-seen counter value instead
+    // of reacting unconditionally, since use_effect also runs once on
+    // mount and this must not steal focus on first render.
+    use_effect(move || {
+        let current = *focus_composer.read();
+        if current != *last_seen_focus_req.read() {
+            last_seen_focus_req.set(current);
+            let el = title_el.read().clone();
+            spawn(async move {
+                if let Some(el) = el {
+                    let _ = el.set_focus(true).await;
+                }
+            });
+        }
+    });
+
     let mut form = use_signal(move || {
         let mut f = MomentForm::default();
 
@@ -846,6 +988,17 @@ pub fn MomentInputCmp() -> Element {
         form.set(reset_form);
         title.set(String::new());
         description_open.set(false);
+        // Refocus the composer so the next moment can be typed straight
+        // away — most noticeable after the expanded (description-open)
+        // bar's "Add Moment" button, which otherwise left focus nowhere.
+        {
+            let el = title_el.read().clone();
+            spawn(async move {
+                if let Some(el) = el {
+                    let _ = el.set_focus(true).await;
+                }
+            });
+        }
         let entity_id = parsed.entity_id.clone().unwrap_or(form_data.entity_sel.clone());
         // Mirrors entity_id's default above: creating a moment while
         // browsing a specific project should land it in that project
@@ -880,24 +1033,22 @@ pub fn MomentInputCmp() -> Element {
                     // depends_on_title is a raw typed string, not yet an id
                     // (quick_capture.rs has no moments list to resolve it
                     // against) — match it against the target entity's open
-                    // moments here, where the real list is available.
-                    if let Some(dep_title) = parsed.depends_on_title.clone() {
-                        let dep_id = moments.read().iter()
-                            .find(|m| m.entity_id == created_entity_id
-                                && m.id != created_id
-                                && m.completed_at.is_none()
-                                && m.title.to_lowercase() == dep_title.to_lowercase())
-                            .map(|m| m.id.clone());
-                        if let Some(dep_id) = dep_id {
-                            if storage.update_moment_field(created_id.clone(), "depends_on", serde_json::json!(Some(dep_id.clone()))).await.is_ok() {
-                                if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
-                                    m.depends_on = Some(dep_id);
-                                }
-                            }
-                        }
-                    }
+                    // moments here, where the real list is available. Feeds
+                    // into metadata.depends_on below rather than the legacy
+                    // single-dependency column (see MomentType::dependency_ids).
+                    let dep_ids: Vec<String> = parsed.depends_on_title.clone()
+                        .and_then(|dep_title| {
+                            moments.read().iter()
+                                .find(|m| m.entity_id == created_entity_id
+                                    && m.id != created_id
+                                    && m.completed_at.is_none()
+                                    && m.title.to_lowercase() == dep_title.to_lowercase())
+                                .map(|m| m.id.clone())
+                        })
+                        .into_iter()
+                        .collect();
                     let effective_project = parsed.project.clone().or_else(|| default_project.clone());
-                    if parsed.has_metadata() || effective_project.is_some() {
+                    if parsed.has_metadata() || effective_project.is_some() || !dep_ids.is_empty() {
                         let meta = MomentMetadata {
                             tags: parsed.tags_add.clone(),
                             sort_index: None,
@@ -905,6 +1056,8 @@ pub fn MomentInputCmp() -> Element {
                             project: effective_project,
                             scheduled_at: parsed.scheduled_at.clone(),
                             until_at: parsed.until_at.clone(),
+                            depends_on: dep_ids,
+                            additional_entity_ids: Vec::new(),
                         };
                         if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
                             if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
@@ -994,6 +1147,7 @@ pub fn MomentInputCmp() -> Element {
                                 }
                             });
                         },
+                        input_el: title_el,
                     }
                 }
                 Dropdown {
@@ -1100,6 +1254,11 @@ pub struct QuickCaptureInputProps {
     // adding someone never requires leaving the composer for the full
     // New Entity form.
     pub on_add_entity: EventHandler<String>,
+    // Lifted up from this component (rather than a purely internal
+    // use_signal) so a parent that just submitted a moment can refocus this
+    // input itself — see MomentInputCmp's submit_moment, which needs to
+    // call set_focus on this exact element after a submission clears it.
+    pub input_el: Signal<Option<std::rc::Rc<MountedData>>>,
 }
 
 // The title input for MomentInputCmp, with live taskwarrior-style syntax
@@ -1148,7 +1307,7 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     // the input box: the overlay text the user was actually looking at
     // wasn't moving while the real (invisible) input + native caret
     // scrolled correctly underneath it.
-    let mut input_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
+    let mut input_el = props.input_el;
     let mut scroll_x = use_signal(|| 0.0f64);
     let sync_scroll = move || {
         spawn(async move {
@@ -1370,6 +1529,11 @@ pub fn ab_task_cmp() -> Element {
     // confirming_delete reset.
     let mut depends_search = use_signal(String::new);
     let mut depends_dropdown_open = use_signal(|| false);
+    // Multi-entity moments (2026-07-29) — same searchable chip-add pattern,
+    // for entities besides the primary one this moment also fully belongs
+    // to (see MomentType::entity_ids).
+    let mut additional_search = use_signal(String::new);
+    let mut additional_dropdown_open = use_signal(|| false);
     // Full-screen title+description editor (desktop only — mobile already
     // gets a full-width slide-out panel for this) — the compact panel's own
     // title input and ~8-row textarea aren't enough room to actually read
@@ -1446,52 +1610,102 @@ pub fn ab_task_cmp() -> Element {
         });
     };
 
-    // Taskwarrior-style single dependency (see MomentType::depends_on).
-    // Read the current moment's own depends_on live off the `moments`
-    // signal by id, rather than off the `moment` snapshot taken once from
-    // current_moment at panel-open time — the depends-on <select>'s own
-    // handler below updates `moments` (so the list view and this panel's
-    // dependency_candidates/blocking_count already reflect it live) but
-    // never updates `current_moment` itself, so `moment.depends_on` goes
-    // stale the instant you change the dependency without closing and
-    // reopening the panel. That staleness previously meant a freshly-set
-    // dependency didn't actually block completion (or show as selected in
-    // the dropdown) until the panel was closed and reopened.
+    // Taskwarrior-style dependencies (see MomentType::dependency_ids) — a
+    // moment can depend on more than one thing now (2026-07-29), unlimited
+    // like tags. Read live off the `moments` signal by id rather than off
+    // the `moment` snapshot taken once from current_moment at panel-open
+    // time — save_deps below updates `moments` but never `current_moment`
+    // itself, so a snapshot read would go stale the instant a dependency
+    // changes without closing and reopening the panel.
     // Any open task/promise can be a dependency, regardless of which entity
     // it's attributed to — a moment scoped to "only this entity's own
     // moments" (the old behavior) doesn't match how depends_on is actually
     // used; a thing you're waiting on is a thing you're waiting on no
     // matter whose it is.
+    let current_dep_ids: Vec<String> = moments.read().iter().find(|m| m.id == id)
+        .map(|m| m.dependency_ids())
+        .unwrap_or_default();
     let dependency_candidates: Vec<MomentType> = moments.read().iter()
-        .filter(|m| m.id != id && m.completed_at.is_none())
+        .filter(|m| m.id != id && m.completed_at.is_none() && !current_dep_ids.contains(&m.id))
         .cloned()
         .collect();
-    let current_depends_on = moments.read().iter().find(|m| m.id == id).and_then(|m| m.depends_on.clone());
 
-    use_effect(move || {
-        let dep_title = current_moment.read().as_ref()
-            .and_then(|m| m.depends_on.clone())
-            .and_then(|dep_id| moments.read().iter().find(|mm| mm.id == dep_id).map(|mm| mm.title.clone()));
-        depends_search.set(dep_title.unwrap_or_default());
-        depends_dropdown_open.set(false);
-    });
-    let blocked_on = current_depends_on.clone().and_then(|dep_id| {
-        moments.read().iter().find(|m| m.id == dep_id).cloned()
-    });
+    let id_for_deps = id.clone();
+    let mut save_deps = move |new_deps: Vec<String>| {
+        let id = id_for_deps.clone();
+        let token = auth_token;
+        let vault = active_vault;
+        // Same "read the live metadata by id, don't clobber another field
+        // edited earlier this panel session" pattern as save_tags above.
+        let mut new_meta = moments.read().iter().find(|m| m.id == id).and_then(|m| m.metadata.clone()).unwrap_or_default();
+        new_meta.depends_on = new_deps;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.update_moment_field(id.clone(), "metadata", serde_json::json!(new_meta)).await {
+                Ok(_) => {
+                    let mut list = moments.write();
+                    if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                        m.metadata = Some(new_meta.clone());
+                    }
+                }
+                Err(e) => log::info!("Error updating dependencies: {}", e),
+            }
+        });
+    };
+
+    let blocked_on: Vec<MomentType> = current_dep_ids.iter().filter_map(|dep_id| {
+        moments.read().iter().find(|m| &m.id == dep_id).cloned()
+    }).collect();
     // Notes have no completion state (no checkbox is ever rendered for
     // one), so a dependency on a note can never resolve. Depending on a
     // note is still allowed — useful as a reference/context link — it just
     // never actually blocks completion the way a task/promise dependency
     // does. Symmetrically, a note can't "block" anything it's depended on
     // by either, for the same reason.
-    let is_blocked = blocked_on.as_ref().is_some_and(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none());
+    let is_blocked = blocked_on.iter().any(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none());
     let blocking_count = if moment.moment_type_id == 3 {
         0
     } else {
         moments.read().iter()
-            .filter(|m| m.depends_on == Some(id.clone()) && m.completed_at.is_none())
+            .filter(|m| m.dependency_ids().contains(&id) && m.completed_at.is_none())
             .count()
     };
+
+    // Multi-entity moments (2026-07-29) — additional entities this moment
+    // also fully belongs to, besides the primary one above (full peers, not
+    // lightweight tag-alongs: see MomentType::entity_ids/involves_entity).
+    // Same live-by-id-read/save-to-metadata pattern as dependencies above.
+    let current_additional_ids: Vec<String> = moments.read().iter().find(|m| m.id == id)
+        .map(|m| m.metadata.as_ref().map(|meta| meta.additional_entity_ids.clone()).unwrap_or_default())
+        .unwrap_or_default();
+    let additional_entity_candidates: Vec<EntityType> = entities.read().iter()
+        .filter(|e| !is_self_entity(e) && e.id != live_moment.entity_id && !current_additional_ids.contains(&e.id))
+        .cloned()
+        .collect();
+
+    let id_for_additional = id.clone();
+    let mut save_additional_entities = move |new_ids: Vec<String>| {
+        let id = id_for_additional.clone();
+        let token = auth_token;
+        let vault = active_vault;
+        let mut new_meta = moments.read().iter().find(|m| m.id == id).and_then(|m| m.metadata.clone()).unwrap_or_default();
+        new_meta.additional_entity_ids = new_ids;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.update_moment_field(id.clone(), "metadata", serde_json::json!(new_meta)).await {
+                Ok(_) => {
+                    let mut list = moments.write();
+                    if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                        m.metadata = Some(new_meta.clone());
+                    }
+                }
+                Err(e) => log::info!("Error updating additional entities: {}", e),
+            }
+        });
+    };
+    let current_additional_entities: Vec<EntityType> = current_additional_ids.iter().filter_map(|eid| {
+        entities.read().iter().find(|e| &e.id == eid).cloned()
+    }).collect();
 
     // Taskwarrior-style attributes, part 2 (priority/project/scheduled/
     // until) — same live-by-id read as current_depends_on above, for the
@@ -1522,7 +1736,7 @@ pub fn ab_task_cmp() -> Element {
             }
 
             div {
-                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1 min-h-0",
+                class: "flex flex-col gap-4 px-4 py-4 pb-[200px] overflow-y-auto flex-1 min-h-0",
 
                 if moment.moment_type_id != 3i64 {
                     div {
@@ -1595,7 +1809,10 @@ pub fn ab_task_cmp() -> Element {
                             r#type: "date",
                             class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                             value: "{due_at.clone().unwrap_or_default().chars().take(10).collect::<String>()}",
-                            onchange: {
+                            // oninput, not onchange — onchange only fires on blur, so
+                            // closing the activity panel right after picking a date
+                            // (without clicking elsewhere first) silently dropped it.
+                            oninput: {
                                 let id = id.clone();
                                 let due_at = due_at.clone();
                                 move |e: Event<FormData>| {
@@ -1624,7 +1841,7 @@ pub fn ab_task_cmp() -> Element {
                             r#type: "time",
                             class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                             value: "{due_at.clone().and_then(|d| d.get(11..16).map(str::to_string)).unwrap_or_default()}",
-                            onchange: {
+                            oninput: {
                                 let id = id.clone();
                                 let due_at = due_at.clone();
                                 move |e: Event<FormData>| {
@@ -1664,10 +1881,10 @@ pub fn ab_task_cmp() -> Element {
                             input {
                                 class: "text-xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1",
                                 value: "{title}",
-                                // Commit on blur, not every keystroke — a local-vault write
-                                // rewrites the whole entity file (see api/vault_format.rs),
-                                // and this cuts Supabase chatter today too.
-                                onchange: {
+                                // Live, not on blur — closing the activity panel right
+                                // after typing (without clicking away first) was silently
+                                // discarding the edit.
+                                oninput: {
                                     let id = id.clone();
                                     move |e| {
                                         let id = id.clone();
@@ -1701,7 +1918,7 @@ pub fn ab_task_cmp() -> Element {
                             class: "w-full min-h-32 rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-y",
                             placeholder: "Add a description...",
                             value: "{description.clone().unwrap_or_default()}",
-                            onchange: {
+                            oninput: {
                                 let id = id.clone();
                                 move |e| {
                                     let id = id.clone();
@@ -1824,7 +2041,99 @@ pub fn ab_task_cmp() -> Element {
 
                                 div {
                                     class: "flex flex-col gap-y-1.5",
-                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Expedite" }
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Also involves" }
+                                    // Multi-entity moments (2026-07-29) — every entity
+                                    // added here is a full peer of the primary one above:
+                                    // this moment counts fully toward their Distance/
+                                    // Drift and urgency too, not just a cross-reference.
+                                    if !current_additional_entities.is_empty() {
+                                        div {
+                                            class: "flex flex-wrap gap-1.5 mb-2",
+                                            for entity in current_additional_entities.iter() {
+                                                span {
+                                                    key: "{entity.id}",
+                                                    class: "inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground",
+                                                    "{entity.name}"
+                                                    button {
+                                                        class: "text-muted-foreground hover:text-destructive cursor-pointer leading-none",
+                                                        onclick: {
+                                                            let eid = entity.id.clone();
+                                                            let mut save_additional_entities = save_additional_entities.clone();
+                                                            let current_additional_ids = current_additional_ids.clone();
+                                                            move |_| {
+                                                                let updated: Vec<String> = current_additional_ids.iter().filter(|d| **d != eid).cloned().collect();
+                                                                save_additional_entities(updated);
+                                                            }
+                                                        },
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        class: "relative",
+                                        input {
+                                            r#type: "text",
+                                            class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                            placeholder: "Search entities to add...",
+                                            value: "{additional_search.read()}",
+                                            onfocus: move |_| additional_dropdown_open.set(true),
+                                            oninput: move |e| {
+                                                additional_search.set(e.value());
+                                                additional_dropdown_open.set(true);
+                                            },
+                                        }
+                                        if *additional_dropdown_open.read() {
+                                            div {
+                                                class: "fixed inset-0 z-40",
+                                                onclick: move |_| additional_dropdown_open.set(false),
+                                            }
+                                            div {
+                                                class: "absolute z-50 mt-1 w-full max-h-56 overflow-y-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg p-1",
+                                                onclick: move |e| e.stop_propagation(),
+                                                {
+                                                    let query = additional_search.read().to_lowercase();
+                                                    let matches: Vec<EntityType> = additional_entity_candidates.iter()
+                                                        .filter(|e| query.is_empty() || e.name.to_lowercase().contains(&query))
+                                                        .take(8)
+                                                        .cloned()
+                                                        .collect();
+                                                    rsx! {
+                                                        if matches.is_empty() {
+                                                            div { class: "px-2 py-1.5 text-sm text-muted-foreground", "No matches" }
+                                                        }
+                                                        for candidate in matches.into_iter() {
+                                                            div {
+                                                                key: "{candidate.id}",
+                                                                class: "flex items-center rounded-sm px-2 py-1.5 text-sm text-foreground cursor-pointer hover:bg-accent transition-colors",
+                                                                onclick: {
+                                                                    let cand_id = candidate.id.clone();
+                                                                    let mut save_additional_entities = save_additional_entities.clone();
+                                                                    let current_additional_ids = current_additional_ids.clone();
+                                                                    move |_| {
+                                                                        additional_search.set(String::new());
+                                                                        additional_dropdown_open.set(false);
+                                                                        let mut updated = current_additional_ids.clone();
+                                                                        if !updated.contains(&cand_id) {
+                                                                            updated.push(cand_id.clone());
+                                                                            save_additional_entities(updated);
+                                                                        }
+                                                                    }
+                                                                },
+                                                                "{candidate.name}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                div {
+                                    class: "flex flex-col gap-y-1.5",
+                                    label { class: "block mb-1.5 text-xs font-medium text-foreground", "Priority" }
                                     select {
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         oninput: {
@@ -1857,7 +2166,7 @@ pub fn ab_task_cmp() -> Element {
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         placeholder: "e.g. Home.Garden",
                                         value: "{current_metadata.project.clone().unwrap_or_default()}",
-                                        onchange: {
+                                        oninput: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
@@ -1882,7 +2191,7 @@ pub fn ab_task_cmp() -> Element {
                                         r#type: "datetime-local",
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         value: "{current_metadata.scheduled_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
-                                        onchange: {
+                                        oninput: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
@@ -1907,7 +2216,7 @@ pub fn ab_task_cmp() -> Element {
                                         r#type: "datetime-local",
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                                         value: "{current_metadata.until_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
-                                        onchange: {
+                                        oninput: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
@@ -1936,7 +2245,7 @@ pub fn ab_task_cmp() -> Element {
                                             for tag in moment_tags.read().iter() {
                                                 span {
                                                     class: "inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground",
-                                                    "#{tag}"
+                                                    "+{tag}"
                                                     button {
                                                         class: "text-muted-foreground hover:text-destructive cursor-pointer leading-none",
                                                         onclick: {
@@ -1994,7 +2303,7 @@ pub fn ab_task_cmp() -> Element {
                                         div {
                                             class: "flex items-center gap-1.5 mb-2 text-xs text-destructive",
                                             span { class: "h-1.5 w-1.5 rounded-full bg-destructive shrink-0" }
-                                            "Blocked by \"{blocked_on.as_ref().map(|d| d.title.clone()).unwrap_or_default()}\""
+                                            "Blocked by \"{blocked_on.iter().filter(|d| d.moment_type_id != 3 && d.completed_at.is_none()).map(|d| d.title.clone()).collect::<Vec<_>>().join(\"\\\", \\\"\")}\""
                                         }
                                     }
                                     if blocking_count > 0 {
@@ -2003,12 +2312,40 @@ pub fn ab_task_cmp() -> Element {
                                             "Blocking {blocking_count} other open moment(s)"
                                         }
                                     }
+                                    // Chips + search-to-add, same shape as the Tags
+                                    // section above — no limit on how many dependencies
+                                    // a moment can have (2026-07-29), matching tags.
+                                    if !blocked_on.is_empty() {
+                                        div {
+                                            class: "flex flex-wrap gap-1.5 mb-2",
+                                            for dep in blocked_on.iter() {
+                                                span {
+                                                    key: "{dep.id}",
+                                                    class: "inline-flex items-center gap-1 rounded-full bg-muted px-2 py-0.5 text-xs text-foreground",
+                                                    "{dep.title}"
+                                                    button {
+                                                        class: "text-muted-foreground hover:text-destructive cursor-pointer leading-none",
+                                                        onclick: {
+                                                            let dep_id = dep.id.clone();
+                                                            let mut save_deps = save_deps.clone();
+                                                            let current_dep_ids = current_dep_ids.clone();
+                                                            move |_| {
+                                                                let updated: Vec<String> = current_dep_ids.iter().filter(|d| **d != dep_id).cloned().collect();
+                                                                save_deps(updated);
+                                                            }
+                                                        },
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
                                     div {
                                         class: "relative",
                                         input {
                                             r#type: "text",
                                             class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                            placeholder: "Search open tasks/promises...",
+                                            placeholder: "Search open tasks/promises to add...",
                                             value: "{depends_search.read()}",
                                             onfocus: move |_| depends_dropdown_open.set(true),
                                             oninput: move |e| {
@@ -2027,31 +2364,6 @@ pub fn ab_task_cmp() -> Element {
                                             div {
                                                 class: "absolute z-50 mt-1 w-full max-h-56 overflow-y-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg p-1",
                                                 onclick: move |e| e.stop_propagation(),
-                                                div {
-                                                    class: "flex items-center rounded-sm px-2 py-1.5 text-sm text-muted-foreground cursor-pointer hover:bg-accent transition-colors",
-                                                    onclick: {
-                                                        let id = id.clone();
-                                                        move |_| {
-                                                            depends_search.set(String::new());
-                                                            depends_dropdown_open.set(false);
-                                                            let id = id.clone();
-                                                            let token = auth_token;
-                                                            let vault = active_vault;
-                                                            spawn(async move {
-                                                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                                                match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(None::<String>)).await {
-                                                                    Ok(_) => {
-                                                                        if let Some(m) = moments.write().iter_mut().find(|m| m.id == id) {
-                                                                            m.depends_on = None;
-                                                                        }
-                                                                    }
-                                                                    Err(e) => log::info!("Error updating depends_on: {}", e),
-                                                                }
-                                                            });
-                                                        }
-                                                    },
-                                                    "None"
-                                                }
                                                 {
                                                     let query = depends_search.read().to_lowercase();
                                                     let matches: Vec<MomentType> = dependency_candidates.iter()
@@ -2068,27 +2380,17 @@ pub fn ab_task_cmp() -> Element {
                                                                 key: "{candidate.id}",
                                                                 class: "flex items-center rounded-sm px-2 py-1.5 text-sm text-foreground cursor-pointer hover:bg-accent transition-colors",
                                                                 onclick: {
-                                                                    let id = id.clone();
                                                                     let cand_id = candidate.id.clone();
-                                                                    let cand_title = candidate.title.clone();
+                                                                    let mut save_deps = save_deps.clone();
+                                                                    let current_dep_ids = current_dep_ids.clone();
                                                                     move |_| {
-                                                                        depends_search.set(cand_title.clone());
+                                                                        depends_search.set(String::new());
                                                                         depends_dropdown_open.set(false);
-                                                                        let id = id.clone();
-                                                                        let cand_id = cand_id.clone();
-                                                                        let token = auth_token;
-                                                                        let vault = active_vault;
-                                                                        spawn(async move {
-                                                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                                                            match storage.update_moment_field(id.clone(), "depends_on", serde_json::json!(Some(cand_id.clone()))).await {
-                                                                                Ok(_) => {
-                                                                                    if let Some(m) = moments.write().iter_mut().find(|m| m.id == id) {
-                                                                                        m.depends_on = Some(cand_id);
-                                                                                    }
-                                                                                }
-                                                                                Err(e) => log::info!("Error updating depends_on: {}", e),
-                                                                            }
-                                                                        });
+                                                                        let mut updated = current_dep_ids.clone();
+                                                                        if !updated.contains(&cand_id) {
+                                                                            updated.push(cand_id.clone());
+                                                                            save_deps(updated);
+                                                                        }
                                                                     }
                                                                 },
                                                                 "{candidate.title}"
@@ -2311,6 +2613,29 @@ async fn patch_moment_metadata(
     }
 }
 
+// Drag-and-drop dependency authoring in BlockingDagViewCmp (2026-07-29):
+// `target_id` becomes blocked by `source_id`. Folds in dependency_ids()
+// (not just the raw metadata field) before appending, so a moment still on
+// the legacy single-dependency column doesn't silently lose it the first
+// time a link is drawn to it — same "read the full current state before
+// patching metadata" rule as everywhere else dependencies are written.
+async fn add_dependency(storage: &ActiveStorage, mut moments: Signal<Vec<MomentType>>, target_id: String, source_id: String) {
+    let Some(current) = moments.read().iter().find(|m| m.id == target_id).cloned() else { return; };
+    let mut deps = current.dependency_ids();
+    if deps.contains(&source_id) {
+        return;
+    }
+    deps.push(source_id);
+    let mut new_meta = current.metadata.clone().unwrap_or_default();
+    new_meta.depends_on = deps;
+    if storage.update_moment_field(target_id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
+        let mut list = moments.write();
+        if let Some(m) = list.iter_mut().find(|m| m.id == target_id) {
+            m.metadata = Some(new_meta);
+        }
+    }
+}
+
 // "Completed" has to mean something real: a moment that's blocked by an
 // incomplete dependency can't be completed (see CheckboxCmp's `disabled`
 // handling above) — so the reverse has to hold too, or completion status
@@ -2327,7 +2652,7 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
             continue;
         }
         let dependents: Vec<String> = moments.read().iter()
-            .filter(|m| m.depends_on.as_deref() == Some(current.as_str()) && m.completed_at.is_some())
+            .filter(|m| m.dependency_ids().contains(&current) && m.completed_at.is_some())
             .map(|m| m.id.clone())
             .collect();
         for dep_id in dependents {
@@ -2342,6 +2667,199 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
     }
 }
 
+// "On the fly" (2026-07-28) — inspired by a Waffle House order getting
+// completed outside the normal flow: jot the task, a full-screen takeover
+// says "go do this now," go actually do it, come back and mark it done.
+// The moment is created for real the instant it's captured (not held only
+// in memory) — getting pulled away mid-errand should never lose it, even
+// if "mark done" never happens. Rendered at the top level (navbar.rs),
+// same reasoning as FullScreenEditorModalCmp: needs true position:fixed
+// full-viewport coverage, not contained by a transformed ancestor.
+#[component]
+pub fn OnTheFlyCmp() -> Element {
+    let state = use_context::<AppState>();
+    let mut open = state.on_the_fly_open;
+    let mut task = state.on_the_fly_task;
+    let mut moments = state.moments;
+    let mut entities = state.entities;
+    let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
+    let mut title_input = use_signal(String::new);
+    let title_input_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
+    let mut was_open = use_signal(|| *open.read());
+
+    // Resets whenever this transitions closed -> open, regardless of what
+    // triggered it (this button, or the global "o" keyboard shortcut in
+    // layouts::Navbar) — one place for the reset instead of duplicating it
+    // at every place that can set on_the_fly_open.
+    use_effect(move || {
+        let now_open = *open.read();
+        if now_open && !*was_open.read() {
+            title_input.set(String::new());
+            task.set(None);
+        }
+        was_open.set(now_open);
+    });
+
+    rsx! {
+        button {
+            class: "fixed bottom-6 left-6 z-51 rounded-full shadow-lg h-12 px-4 flex items-center gap-2 text-sm font-semibold text-white transition-transform hover:scale-105 active:scale-95 cursor-pointer",
+            style: "background-color:{HL};",
+            onclick: move |_| open.set(true),
+            fa_bolt {}
+            "On the fly"
+        }
+        if *open.read() {
+            div {
+                class: "fixed inset-0 bg-black z-100 flex items-center justify-center p-8",
+                if let Some(t) = task.read().clone() {
+                    // "Go do it" stage — the moment already exists.
+                    div {
+                        class: "flex flex-col items-center gap-8 text-center max-w-2xl",
+                        span { class: "text-sm font-semibold uppercase tracking-widest text-white/50", "Go do this now" }
+                        h1 { class: "text-4xl font-bold text-white", "{t.title}" }
+                        div {
+                            class: "flex items-center gap-3",
+                            button {
+                                class: "rounded-md border border-transparent bg-white text-black text-base px-6 py-2.5 font-semibold hover:opacity-90 transition-opacity cursor-pointer",
+                                onclick: {
+                                    let id = t.id.clone();
+                                    move |_| {
+                                        let id = id.clone();
+                                        let token = auth_token;
+                                        let vault = active_vault;
+                                        spawn(async move {
+                                            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                            let now = chrono::Utc::now().to_rfc3339();
+                                            match storage.update_moment_field(id.clone(), "completed_at", serde_json::json!(Some(now.clone()))).await {
+                                                Ok(_) => {
+                                                    if let Some(m) = moments.write().iter_mut().find(|m| m.id == id) {
+                                                        m.completed_at = Some(now);
+                                                    }
+                                                }
+                                                Err(e) => log::info!("Error completing on-the-fly task: {}", e),
+                                            }
+                                        });
+                                        open.set(false);
+                                        task.set(None);
+                                    }
+                                },
+                                "Done"
+                            }
+                            button {
+                                class: "rounded-md border border-white/30 text-white text-base px-6 py-2.5 font-semibold hover:bg-white/10 transition-colors cursor-pointer",
+                                title: "Closes this screen — the task stays on your list like normal, nothing is lost.",
+                                onclick: move |_| {
+                                    open.set(false);
+                                    task.set(None);
+                                },
+                                "Not now"
+                            }
+                        }
+                    }
+                } else {
+                    // Capture stage — nothing exists yet. Full quick-capture
+                    // power here (2026-07-28, upgraded from a plain <input>)
+                    // — @mention, pri:/due:/+tags/project:, the same parser
+                    // MomentInputCmp uses, so "@admissions office send them
+                    // a reply about my hold" actually attaches to that
+                    // entity instead of landing as a literal title string.
+                    div {
+                        class: "flex flex-col items-center gap-3 w-full max-w-xl",
+                        h2 { class: "text-2xl font-semibold text-white text-center mb-1", "What do you need to do?" }
+                        div {
+                            class: "w-full rounded-xl border border-input bg-background shadow-sm p-3",
+                            QuickCaptureInput {
+                                value: title_input.read().clone(),
+                                placeholder: "@mention, pri:H, due:today, +tag all work here...".to_string(),
+                                entities: entities.read().clone(),
+                                moments: moments.read().clone(),
+                                on_input: move |v: String| title_input.set(v),
+                                on_submit: move |_| {
+                                    let raw_title = title_input.read().clone();
+                                    if raw_title.trim().is_empty() { return; }
+                                    let entities_snapshot = entities.read().clone();
+                                    let parsed = quick_capture::parse(&raw_title, &entities_snapshot);
+                                    let token = auth_token;
+                                    let vault = active_vault;
+                                    let self_id = vault.read().effective(&token.read()).resolve_self_entity_id(&entities.read()).unwrap_or_default();
+                                    let entity_id = parsed.entity_id.clone().unwrap_or(self_id);
+                                    title_input.set(String::new());
+                                    spawn(async move {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        let new_moment = NewMomentType {
+                                            title: parsed.title.clone(),
+                                            entity_id,
+                                            description: None,
+                                            gravity: Some(0),
+                                            moment_type_id: parsed.moment_type_id.unwrap_or(1),
+                                            deleted_at: None,
+                                        };
+                                        match storage.create_moment(new_moment).await {
+                                            Ok(created) => {
+                                                let created_id = created.id.clone();
+                                                moments.write().insert(0, created.clone());
+                                                if parsed.has_metadata() {
+                                                    let meta = MomentMetadata {
+                                                        tags: parsed.tags_add.clone(),
+                                                        sort_index: None,
+                                                        priority: parsed.priority.clone(),
+                                                        project: parsed.project.clone(),
+                                                        scheduled_at: parsed.scheduled_at.clone(),
+                                                        until_at: parsed.until_at.clone(),
+                                                        depends_on: Vec::new(),
+                                                        additional_entity_ids: Vec::new(),
+                                                    };
+                                                    if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
+                                                        if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
+                                                            m.metadata = Some(meta);
+                                                        }
+                                                    }
+                                                }
+                                                task.set(Some(created));
+                                            }
+                                            Err(e) => log::info!("Error creating on-the-fly task: {}", e),
+                                        }
+                                    });
+                                },
+                                // No description field in this flow — Tab
+                                // just does nothing extra here.
+                                on_tab: move |_| {},
+                                on_add_entity: move |name: String| {
+                                    let token = auth_token;
+                                    let vault = active_vault;
+                                    spawn(async move {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        let new_entity = NewEntityType {
+                                            name,
+                                            entity_type_id: None,
+                                            parent_entity_id: None,
+                                            user_id: None,
+                                            archived_at: None,
+                                            metadata: None,
+                                        };
+                                        match storage.create_entity(new_entity).await {
+                                            Ok(created) => { entities.write().insert(0, created); }
+                                            Err(e) => log::info!("Error creating entity: {}", e),
+                                        }
+                                    });
+                                },
+                                input_el: title_input_el,
+                            }
+                        }
+                        span { class: "text-xs text-white/40", "Press Enter to go do it" }
+                        button {
+                            class: "rounded-md border border-white/30 text-white text-sm px-5 py-2 font-semibold hover:bg-white/10 transition-colors cursor-pointer mt-2",
+                            onclick: move |_| open.set(false),
+                            "Cancel"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Rendered at the top level (layouts/navbar.rs, sibling to the activity bar
 // panel, same as EntityModalCmp) rather than nested inside ab_task_cmp
 // where the trigger button lives — the activity bar panel is itself a
@@ -2351,6 +2869,149 @@ async fn cascade_uncomplete(storage: &ActiveStorage, mut moments: Signal<Vec<Mom
 // but pinned inside the 384px activity-bar panel instead of covering the
 // screen). Reads current_moment/moments live off AppState, same as
 // ab_task_cmp, so it always reflects whichever moment is actually open.
+// A deliberately small markdown subset, not full CommonMark — headers,
+// bold/italic, inline code, links, and bullet lists, which covers what
+// people actually type in a quick note. HTML-escaped first (this goes
+// straight into dangerous_inner_html below), then transformed line by
+// line so nothing needs real parser-combinator machinery or a new crate
+// dependency just for this.
+fn render_markdown_lite(src: &str) -> String {
+    fn escape_html(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+    // Inline spans: code first (so its contents aren't further mangled by
+    // bold/italic/link matching), then links, then bold, then italic.
+    fn inline(s: &str) -> String {
+        let mut out = String::new();
+        let mut chars = s.char_indices().peekable();
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'`' {
+                if let Some(end) = s[i + 1..].find('`') {
+                    out.push_str("<code>");
+                    out.push_str(&s[i + 1..i + 1 + end]);
+                    out.push_str("</code>");
+                    i = i + 1 + end + 1;
+                    continue;
+                }
+            }
+            if bytes[i] == b'[' {
+                if let Some(close) = s[i..].find(']') {
+                    if s[i..].as_bytes().get(close + 1) == Some(&b'(') {
+                        if let Some(paren_end) = s[i + close + 2..].find(')') {
+                            let text = &s[i + 1..i + close];
+                            let url = &s[i + close + 2..i + close + 2 + paren_end];
+                            out.push_str(&format!("<a href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"underline\">{text}</a>"));
+                            i = i + close + 2 + paren_end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+            if bytes[i..].starts_with(b"**") {
+                if let Some(end) = s[i + 2..].find("**") {
+                    out.push_str("<strong>");
+                    out.push_str(&s[i + 2..i + 2 + end]);
+                    out.push_str("</strong>");
+                    i = i + 2 + end + 2;
+                    continue;
+                }
+            }
+            if bytes[i] == b'*' {
+                if let Some(end) = s[i + 1..].find('*') {
+                    out.push_str("<em>");
+                    out.push_str(&s[i + 1..i + 1 + end]);
+                    out.push_str("</em>");
+                    i = i + 1 + end + 1;
+                    continue;
+                }
+            }
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+        let _ = &mut chars;
+        out
+    }
+
+    let escaped = escape_html(src);
+    let mut html = String::new();
+    let mut in_list = false;
+    for line in escaped.lines() {
+        let trimmed = line.trim_start();
+        let is_bullet = trimmed.starts_with("- ") || trimmed.starts_with("* ");
+        if is_bullet && !in_list {
+            html.push_str("<ul class=\"list-disc pl-5\">");
+            in_list = true;
+        } else if !is_bullet && in_list {
+            html.push_str("</ul>");
+            in_list = false;
+        }
+        if is_bullet {
+            html.push_str("<li>");
+            html.push_str(&inline(&trimmed[2..]));
+            html.push_str("</li>");
+        } else if let Some(rest) = trimmed.strip_prefix("### ") {
+            html.push_str("<h3 class=\"text-base font-semibold mt-2 mb-1\">"); html.push_str(&inline(rest)); html.push_str("</h3>");
+        } else if let Some(rest) = trimmed.strip_prefix("## ") {
+            html.push_str("<h2 class=\"text-lg font-semibold mt-2 mb-1\">"); html.push_str(&inline(rest)); html.push_str("</h2>");
+        } else if let Some(rest) = trimmed.strip_prefix("# ") {
+            html.push_str("<h1 class=\"text-xl font-semibold mt-2 mb-1\">"); html.push_str(&inline(rest)); html.push_str("</h1>");
+        } else if trimmed.is_empty() {
+            html.push_str("<br>");
+        } else {
+            html.push_str("<p class=\"mb-1\">"); html.push_str(&inline(trimmed)); html.push_str("</p>");
+        }
+    }
+    if in_list {
+        html.push_str("</ul>");
+    }
+    html
+}
+
+#[cfg(test)]
+mod markdown_lite_tests {
+    use super::render_markdown_lite;
+
+    #[test]
+    fn renders_bold_and_italic() {
+        let html = render_markdown_lite("**bold** and *italic*");
+        assert!(html.contains("<strong>bold</strong>"));
+        assert!(html.contains("<em>italic</em>"));
+    }
+
+    #[test]
+    fn renders_headers() {
+        assert!(render_markdown_lite("# Big").contains("<h1"));
+        assert!(render_markdown_lite("## Medium").contains("<h2"));
+        assert!(render_markdown_lite("### Small").contains("<h3"));
+    }
+
+    #[test]
+    fn renders_inline_code_and_links() {
+        let html = render_markdown_lite("`code` and [text](https://example.com)");
+        assert!(html.contains("<code>code</code>"));
+        assert!(html.contains("href=\"https://example.com\""));
+        assert!(html.contains(">text</a>"));
+    }
+
+    #[test]
+    fn renders_bullet_lists() {
+        let html = render_markdown_lite("- one\n- two");
+        assert!(html.contains("<ul"));
+        assert!(html.contains("<li>one</li>"));
+        assert!(html.contains("<li>two</li>"));
+    }
+
+    #[test]
+    fn escapes_raw_html_to_prevent_injection() {
+        let html = render_markdown_lite("<script>alert(1)</script>");
+        assert!(!html.contains("<script>"));
+        assert!(html.contains("&lt;script&gt;"));
+    }
+}
+
 #[component]
 pub fn FullScreenEditorModalCmp() -> Element {
     let state = use_context::<AppState>();
@@ -2376,16 +3037,28 @@ pub fn FullScreenEditorModalCmp() -> Element {
         _ => "Task",
     };
 
+    // Live markdown preview needs to update on every keystroke, not just on
+    // blur (that's what "live" means) — so this tracks the textarea
+    // separately from `description` (which only reflects the last *saved*
+    // value) and resets whenever the modal opens on a different moment,
+    // same pattern as ab_task_cmp's depends_search reset.
+    let mut live_description = use_signal(|| description.clone().unwrap_or_default());
+    use_effect(move || {
+        let d = current_moment.read().as_ref().and_then(|m| m.description.clone()).unwrap_or_default();
+        live_description.set(d);
+    });
+    let preview_html = render_markdown_lite(&live_description.read());
+
     rsx! {
         div {
-            class: "hidden xl:flex fixed inset-0 bg-black/40 z-100 items-center justify-center p-8",
+            class: "hidden xl:flex fixed inset-0 bg-black/40 z-100 items-center justify-center",
             onclick: move |_| full_editor_open.set(false),
             div {
-                class: "bg-background rounded-lg border border-border shadow-lg w-full max-w-3xl h-full max-h-[85vh] flex flex-col",
+                class: "bg-background w-full h-full flex flex-col",
                 onclick: move |e| e.stop_propagation(),
                 div {
                     class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
-                    span { class: "text-sm font-medium text-muted-foreground", "{moment_kind}" }
+                    span { class: "text-sm font-medium text-muted-foreground", "{moment_kind} · Markdown preview" }
                     button {
                         class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
                         onclick: move |_| full_editor_open.set(false),
@@ -2397,7 +3070,10 @@ pub fn FullScreenEditorModalCmp() -> Element {
                     input {
                         class: "text-2xl font-semibold text-foreground w-full bg-transparent border-none outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md -mx-1 px-1 py-1 shrink-0",
                         value: "{title}",
-                        onchange: {
+                        // oninput, not onchange — onchange only fires on blur, so
+                        // hitting the × to close this editor right after typing
+                        // (without clicking away first) silently discarded the edit.
+                        oninput: {
                             let id = id.clone();
                             move |e| {
                                 let id = id.clone();
@@ -2419,31 +3095,41 @@ pub fn FullScreenEditorModalCmp() -> Element {
                             }
                         },
                     }
-                    textarea {
-                        class: "w-full flex-1 min-h-0 rounded-md border border-input bg-background text-base text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none",
-                        placeholder: "Add a description...",
-                        value: "{description.clone().unwrap_or_default()}",
-                        onchange: {
-                            let id = id.clone();
-                            move |e| {
+                    div {
+                        class: "flex gap-4 flex-1 min-h-0",
+                        textarea {
+                            class: "w-1/2 h-full rounded-md border border-input bg-background text-base text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring resize-none font-mono",
+                            placeholder: "Add a description... (markdown: **bold**, *italic*, # headers, `code`, [links](url), - lists)",
+                            value: "{live_description.read()}",
+                            // Live, not just on blur — both for the preview pane and
+                            // so closing the editor right after typing doesn't drop it.
+                            oninput: {
                                 let id = id.clone();
-                                let token = auth_token;
-                                let vault = active_vault;
-                                let val = e.value();
-                                spawn(async move {
-                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                                    match storage.update_moment_field(id.clone(), "description", serde_json::json!(val)).await {
-                                        Ok(_) => {
-                                            let mut list = moments.write();
-                                            if let Some(m) = list.iter_mut().find(|m| m.id == id) {
-                                                m.description = Some(val);
+                                move |e: Event<FormData>| {
+                                    let id = id.clone();
+                                    let token = auth_token;
+                                    let vault = active_vault;
+                                    let val = e.value();
+                                    live_description.set(val.clone());
+                                    spawn(async move {
+                                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                        match storage.update_moment_field(id.clone(), "description", serde_json::json!(val)).await {
+                                            Ok(_) => {
+                                                let mut list = moments.write();
+                                                if let Some(m) = list.iter_mut().find(|m| m.id == id) {
+                                                    m.description = Some(val);
+                                                }
                                             }
+                                            Err(e) => log::info!("Error updating moment: {}", e),
                                         }
-                                        Err(e) => log::info!("Error updating moment: {}", e),
-                                    }
-                                });
-                            }
-                        },
+                                    });
+                                }
+                            },
+                        }
+                        div {
+                            class: "w-1/2 h-full overflow-y-auto rounded-md border border-input bg-background px-4 py-2 text-foreground",
+                            dangerous_inner_html: "{preview_html}",
+                        }
                     }
                 }
             }
@@ -2525,62 +3211,471 @@ pub fn ScheduledViewCmp() -> Element {
     }
 }
 
-#[component]
-pub fn BlockingViewCmp() -> Element {
-    let state = use_context::<AppState>();
-    let moments = state.moments;
-    let entities = state.entities;
-    let mut current_moment = state.current_moment;
-    let mut activity_bar_view = state.activity_bar_view;
-    let mut activity_bar_tgl = state.activity_bar_tgl;
-    let mut backdropTgl = state.backdropTgl;
-
-    // Anyone that's the depends_on target of at least one other still-open
-    // moment — "what's actually blocking other things," so the user can go
-    // free them up. A moment blocking only already-completed things isn't
-    // in anyone's way anymore, so it doesn't count.
-    let all = moments.read().clone();
-    let blocking_ids: std::collections::HashSet<String> = all.iter()
-        .filter(|m| m.completed_at.is_none())
-        .filter_map(|m| m.depends_on.clone())
-        .collect();
-    let mut blocking: Vec<MomentType> = all.iter()
-        .filter(|m| blocking_ids.contains(&m.id) && m.completed_at.is_none())
-        .cloned()
-        .collect();
-    blocking.sort_by(|a, b| a.title.cmp(&b.title));
-
-    let entity_name = move |entity_id: &str| entities.read().iter()
-        .find(|e| e.id == entity_id)
+// One row of the blocking tree, recursive — renders `m`, then recurses
+// into everything that depends on it (any open moment whose dependency_ids()
+// contains m.id — 2026-07-29: a moment can have more than one dependency
+// now, so a moment blocked on two different blockers renders once under
+// each of them; a true tree can't represent multiple parents without
+// duplicating, which is exactly what BlockingDagViewCmp exists to show
+// correctly instead), indented one level further each time. A plain function rather
+// than a #[component]: it doesn't need hooks, and recursion through a
+// #[component] would need its Props to derive PartialEq on a Vec of
+// borrowed data, which is more friction than it's worth here. Signals are
+// Copy, so threading them through recursive calls directly (rather than a
+// generic closure prop) is simplest.
+#[allow(clippy::too_many_arguments)]
+fn render_blocking_node(
+    m: MomentType,
+    all: std::rc::Rc<Vec<MomentType>>,
+    entities: std::rc::Rc<Vec<EntityType>>,
+    depth: usize,
+    mut current_moment: Signal<Option<MomentType>>,
+    mut activity_bar_view: Signal<ABView>,
+    mut activity_bar_tgl: Signal<bool>,
+    mut backdropTgl: Signal<bool>,
+) -> Element {
+    let entity_name = entities.iter()
+        .find(|e| e.id == m.entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    let mut children: Vec<MomentType> = all.iter()
+        .filter(|c| c.completed_at.is_none() && c.dependency_ids().contains(&m.id))
+        .cloned()
+        .collect();
+    children.sort_by(|a, b| a.title.cmp(&b.title));
+    let indent = 16 + depth * 24;
 
     rsx! {
         div {
-            class: "mx-4 mb-3 rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
-            if blocking.is_empty() {
+            key: "{m.id}",
+            style: "padding-left: {indent}px;",
+            class: "flex items-center gap-2 pr-4 py-2.5 cursor-pointer hover:bg-muted/50 transition-colors border-b border-border last:border-b-0",
+            onclick: {
+                let m = m.clone();
+                move |_| {
+                    current_moment.set(Some(m.clone()));
+                    activity_bar_view.set(ABView::Task);
+                    backdropTgl.set(true);
+                    activity_bar_tgl.set(true);
+                }
+            },
+            if depth > 0 {
+                span { class: "text-muted-foreground text-xs shrink-0", "└─" }
+            }
+            div {
+                class: "flex flex-col min-w-0",
+                span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                span { class: "text-xs text-muted-foreground", "{entity_name}" }
+            }
+        }
+        for child in children.into_iter() {
+            {
+                let el = render_blocking_node(child, all.clone(), entities.clone(), depth + 1, current_moment, activity_bar_view, activity_bar_tgl, backdropTgl);
+                el
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BlockingMode {
+    Tree,
+    Graph,
+}
+
+#[component]
+pub fn BlockingViewCmp() -> Element {
+    let mut mode = use_signal(|| BlockingMode::Tree);
+    let tab_class = |active: bool| if active {
+        "px-3 py-1.5 text-sm font-medium rounded-md bg-muted text-foreground cursor-pointer"
+    } else {
+        "px-3 py-1.5 text-sm font-medium rounded-md text-muted-foreground hover:bg-muted transition-colors cursor-pointer"
+    };
+    rsx! {
+        div {
+            class: "mx-4 mb-3 flex items-center gap-1",
+            span { class: tab_class(*mode.read() == BlockingMode::Tree), onclick: move |_| mode.set(BlockingMode::Tree), "Tree" }
+            span { class: tab_class(*mode.read() == BlockingMode::Graph), onclick: move |_| mode.set(BlockingMode::Graph), "Graph" }
+        }
+        if *mode.read() == BlockingMode::Tree {
+            BlockingTreeViewCmp {}
+        } else {
+            BlockingDagViewCmp {}
+        }
+    }
+}
+
+#[component]
+fn BlockingTreeViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let entities = state.entities;
+    let current_moment = state.current_moment;
+    let activity_bar_view = state.activity_bar_view;
+    let activity_bar_tgl = state.activity_bar_tgl;
+    let backdropTgl = state.backdropTgl;
+
+    // Anyone that's a dependency target of at least one other still-open
+    // moment — "what's actually blocking other things," so the user can go
+    // free them up. A moment blocking only already-completed things isn't
+    // in anyone's way anymore, so it doesn't count.
+    let all = std::rc::Rc::new(moments.read().clone());
+    let entities_snapshot = std::rc::Rc::new(entities.read().clone());
+    let blocking_ids: std::collections::HashSet<String> = all.iter()
+        .filter(|m| m.completed_at.is_none())
+        .flat_map(|m| m.dependency_ids())
+        .collect();
+    // Roots only — a blocking moment that's itself blocking-something-
+    // else's-blocker (i.e. any of its own dependencies is also in the
+    // blocking set) gets skipped here and picked up as a nested child
+    // instead (possibly under more than one parent now — see
+    // render_blocking_node), so nothing renders twice at the top level.
+    let mut roots: Vec<MomentType> = all.iter()
+        .filter(|m| blocking_ids.contains(&m.id) && m.completed_at.is_none())
+        .filter(|m| !m.dependency_ids().iter().any(|dep_id| blocking_ids.contains(dep_id)))
+        .cloned()
+        .collect();
+    roots.sort_by(|a, b| a.title.cmp(&b.title));
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 rounded-lg border border-border bg-background overflow-hidden",
+            if roots.is_empty() {
                 div {
                     class: "text-sm text-muted-foreground text-center py-8",
                     "Nothing's blocking anything else right now."
                 }
             } else {
-                for m in blocking.iter() {
-                    div {
-                        key: "{m.id}",
-                        class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
-                        onclick: {
-                            let m = m.clone();
-                            move |_| {
-                                current_moment.set(Some(m.clone()));
-                                activity_bar_view.set(ABView::Task);
-                                backdropTgl.set(true);
-                                activity_bar_tgl.set(true);
+                for m in roots.into_iter() {
+                    {
+                        let el = render_blocking_node(m, all.clone(), entities_snapshot.clone(), 0, current_moment, activity_bar_view, activity_bar_tgl, backdropTgl);
+                        el
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[derive(serde::Serialize, Clone)]
+struct DagNodeIn {
+    id: String,
+    connected: bool,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct DagLinkIn {
+    source: String,
+    target: String,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct DagLayoutIn {
+    nodes: Vec<DagNodeIn>,
+    links: Vec<DagLinkIn>,
+}
+
+#[derive(serde::Deserialize, Clone)]
+struct DagNodeOut {
+    id: String,
+    x: f64,
+    y: f64,
+}
+
+const DAG_CANVAS_W: f64 = 900.0;
+const DAG_CANVAS_H: f64 = 560.0;
+const DAG_MIN_ZOOM: f64 = 0.3;
+const DAG_MAX_ZOOM: f64 = 3.0;
+
+// Every open moment gets a node — most aren't part of any dependency chain
+// at all, and per the user's own framing that's fine, even the point:
+// "every moment but not every moment is in the flow of the graph." Two
+// forceY targets (connected nodes pulled toward the top third, isolated
+// ones toward the bottom) is what produces that separation; forceLink only
+// exists between nodes that actually have a depends_on edge, so isolated
+// nodes never get pulled toward the flow by simulation alone.
+const DAG_LAYOUT_SCRIPT: &str = r#"
+    const { nodes, links } = await dioxus.recv();
+    const width = 900, height = 560;
+    nodes.forEach((n) => {
+        n.x = width / 2 + (Math.random() - 0.5) * 200;
+        n.y = n.connected ? height * 0.32 : height * 0.78;
+    });
+    const simulation = d3.forceSimulation(nodes)
+        .force("link", d3.forceLink(links).id((n) => n.id).distance(70).strength(0.7))
+        .force("charge", d3.forceManyBody().strength(-110))
+        .force("x", d3.forceX(width / 2).strength(0.02))
+        .force("y", d3.forceY((n) => n.connected ? height * 0.32 : height * 0.78).strength(0.3))
+        .force("collide", d3.forceCollide(20))
+        .stop();
+    for (let i = 0; i < 300; i++) {
+        simulation.tick();
+    }
+    dioxus.send(nodes.map((n) => ({ id: n.id, x: n.x, y: n.y })));
+"#;
+
+// A real node-link graph, unlike the entity Graph View (components/graph.rs
+// — that one's a pure "distance from center" radial layout with no edges
+// drawn at all). depends_on is a directed edge; arrows point from what's
+// depended on toward what depends on it — same direction as "this has to
+// happen before that." Deliberately no titles baked into the nodes
+// themselves (user's call — "would be annoying to look at") — hover for
+// the title via a native SVG <title> tooltip, click to open in the
+// activity bar, same as every other moment list in the app.
+#[component]
+pub fn BlockingDagViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let mut current_moment = state.current_moment;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+
+    let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
+
+    let mut positions = use_signal(Vec::<DagNodeOut>::new);
+    let mut zoom = use_signal(|| 1.0f64);
+    let mut pan = use_signal(|| (0.0f64, 0.0f64));
+    let mut dragging = use_signal(|| false);
+    let mut drag_start = use_signal(|| (0.0f64, 0.0f64));
+    let mut pan_start = use_signal(|| (0.0f64, 0.0f64));
+    // Drag-and-drop dependency authoring (2026-07-29): drag from the
+    // blocker node and drop on the dependent node — same direction as the
+    // arrows already drawn below (source = what's depended on). Native
+    // HTML5 drag/drop (draggable + ondragstart/ondragover/ondrop), same
+    // primitive already used for Custom-sort-mode list reordering
+    // elsewhere in this file, not raw mousemove coordinate tracking — a
+    // live line following the cursor would need converting screen pixels
+    // into this SVG's viewBox space through the pan/zoom transform below,
+    // which isn't worth the fragility when the browser's own drag session
+    // already suppresses mousemove (so it won't fight with the pan handlers
+    // just below) and a highlighted drop-target ring is clear enough
+    // feedback without it.
+    let mut link_drag_from = use_signal(|| None::<String>);
+    let mut link_drag_over = use_signal(|| None::<String>);
+
+    use_effect(move || {
+        let open: Vec<MomentType> = moments.read().iter()
+            .filter(|m| m.completed_at.is_none())
+            .cloned()
+            .collect();
+
+        if open.is_empty() {
+            positions.set(vec![]);
+            return;
+        }
+
+        let open_ids: std::collections::HashSet<String> = open.iter().map(|m| m.id.clone()).collect();
+        let links: Vec<DagLinkIn> = open.iter()
+            .flat_map(|m| m.dependency_ids().into_iter().filter(|d| open_ids.contains(d)).map(|d| DagLinkIn {
+                source: d,
+                target: m.id.clone(),
+            }))
+            .collect();
+        let connected_ids: std::collections::HashSet<String> = links.iter()
+            .flat_map(|l| [l.source.clone(), l.target.clone()])
+            .collect();
+        let nodes: Vec<DagNodeIn> = open.iter()
+            .map(|m| DagNodeIn { id: m.id.clone(), connected: connected_ids.contains(&m.id) })
+            .collect();
+
+        spawn(async move {
+            let eval = document::eval(DAG_LAYOUT_SCRIPT);
+            if eval.send(DagLayoutIn { nodes, links }).is_ok() {
+                let mut eval = eval;
+                if let Ok(result) = eval.recv::<Vec<DagNodeOut>>().await {
+                    positions.set(result);
+                }
+            }
+        });
+    });
+
+    let open_lookup: std::collections::HashMap<String, MomentType> = moments.read().iter()
+        .filter(|m| m.completed_at.is_none())
+        .map(|m| (m.id.clone(), m.clone()))
+        .collect();
+    let links_for_render: Vec<(String, String)> = open_lookup.values()
+        .flat_map(|m| m.dependency_ids().into_iter().filter(|d| open_lookup.contains_key(d)).map(|d| (d, m.id.clone())))
+        .collect();
+
+    let (pan_x, pan_y) = *pan.read();
+    let zoom_val = *zoom.read();
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3",
+            if open_lookup.is_empty() {
+                div {
+                    class: "rounded-lg border border-border bg-background text-sm text-muted-foreground text-center py-16",
+                    "Nothing open right now."
+                }
+            } else {
+                svg {
+                    width: "100%",
+                    height: "560",
+                    view_box: "0 0 {DAG_CANVAS_W} {DAG_CANVAS_H}",
+                    preserve_aspect_ratio: "xMidYMid meet",
+                    class: if *dragging.read() {
+                        "border border-border rounded-lg bg-background cursor-grabbing select-none"
+                    } else {
+                        "border border-border rounded-lg bg-background cursor-grab select-none"
+                    },
+                    onwheel: move |e: WheelEvent| {
+                        e.prevent_default();
+                        let dy = e.data().delta().strip_units().y;
+                        let factor = if dy < 0.0 { 1.1 } else { 0.9 };
+                        let current = *zoom.read();
+                        zoom.set((current * factor).clamp(DAG_MIN_ZOOM, DAG_MAX_ZOOM));
+                    },
+                    onmousedown: move |e: MouseEvent| {
+                        let coords = e.client_coordinates();
+                        dragging.set(true);
+                        drag_start.set((coords.x, coords.y));
+                        pan_start.set(*pan.read());
+                    },
+                    onmousemove: move |e: MouseEvent| {
+                        if *dragging.read() {
+                            let coords = e.client_coordinates();
+                            let (sx, sy) = *drag_start.read();
+                            let (px, py) = *pan_start.read();
+                            pan.set((px + (coords.x - sx), py + (coords.y - sy)));
+                        }
+                    },
+                    onmouseup: move |_| {
+                        dragging.set(false);
+                        let source = link_drag_from.read().clone();
+                        let target = link_drag_over.read().clone();
+                        link_drag_from.set(None);
+                        link_drag_over.set(None);
+                        if let (Some(source_id), Some(target_id)) = (source, target) {
+                            if source_id != target_id {
+                                let token = auth_token;
+                                let vault = active_vault;
+                                spawn(async move {
+                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                    add_dependency(&storage, moments, target_id, source_id).await;
+                                });
                             }
-                        },
-                        div {
-                            class: "flex flex-col min-w-0",
-                            span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                        }
+                    },
+                    onmouseleave: move |_| {
+                        dragging.set(false);
+                        link_drag_from.set(None);
+                        link_drag_over.set(None);
+                    },
+                    defs {
+                        marker {
+                            id: "dag-arrow",
+                            view_box: "0 0 10 10",
+                            ref_x: "17",
+                            ref_y: "5",
+                            marker_width: "6",
+                            marker_height: "6",
+                            orient: "auto-start-reverse",
+                            path {
+                                d: "M 0 0 L 10 5 L 0 10 z",
+                                class: "fill-muted-foreground",
+                            }
+                        }
+                    }
+                    g {
+                        transform: "translate({pan_x}, {pan_y}) scale({zoom_val})",
+                        for (source_id, target_id) in links_for_render.iter() {
+                            {
+                                let sp = positions.read().iter().find(|n| &n.id == source_id).map(|n| (n.x, n.y));
+                                let tp = positions.read().iter().find(|n| &n.id == target_id).map(|n| (n.x, n.y));
+                                match (sp, tp) {
+                                    (Some((sx, sy)), Some((tx, ty))) => rsx! {
+                                        line {
+                                            key: "{source_id}-{target_id}",
+                                            x1: "{sx}", y1: "{sy}", x2: "{tx}", y2: "{ty}",
+                                            class: "stroke-muted-foreground/50",
+                                            stroke_width: "1.5",
+                                            marker_end: "url(#dag-arrow)",
+                                        }
+                                    },
+                                    _ => rsx! {},
+                                }
+                            }
+                        }
+                        for node in positions.read().iter() {
+                            {
+                                let node_id = node.id.clone();
+                                let (nx, ny) = (node.x, node.y);
+                                let Some(m) = open_lookup.get(&node_id).cloned() else { return rsx! {}; };
+                                let is_connected = links_for_render.iter().any(|(s, t)| s == &node_id || t == &node_id);
+                                let is_drag_source = link_drag_from.read().as_deref() == Some(node_id.as_str());
+                                let is_drop_target = link_drag_over.read().as_deref() == Some(node_id.as_str());
+                                rsx! {
+                                    g {
+                                        key: "{node_id}",
+                                        class: "cursor-pointer",
+                                        onclick: {
+                                            let m = m.clone();
+                                            move |_| {
+                                                current_moment.set(Some(m.clone()));
+                                                activity_bar_view.set(ABView::Task);
+                                                backdropTgl.set(true);
+                                                activity_bar_tgl.set(true);
+                                            }
+                                        },
+                                        // Plain mouse events, not HTML5 draggable/dragstart/
+                                        // dragover/drop — SVG elements don't reliably support
+                                        // that attribute family (dioxus_elements doesn't even
+                                        // expose `draggable` on `g`). stop_propagation on
+                                        // mousedown keeps this from also triggering the SVG's
+                                        // own pan-start just below; the actual drop-target
+                                        // detection and commit happen in the SVG's onmouseup.
+                                        onmousedown: {
+                                            let node_id = node_id.clone();
+                                            move |e: Event<MouseData>| {
+                                                e.stop_propagation();
+                                                link_drag_from.set(Some(node_id.clone()));
+                                            }
+                                        },
+                                        onmouseenter: {
+                                            let node_id = node_id.clone();
+                                            move |_| {
+                                                if link_drag_from.read().is_some()
+                                                    && link_drag_over.read().as_deref() != Some(node_id.as_str())
+                                                {
+                                                    link_drag_over.set(Some(node_id.clone()));
+                                                }
+                                            }
+                                        },
+                                        onmouseleave: {
+                                            let node_id = node_id.clone();
+                                            move |_| {
+                                                if link_drag_over.read().as_deref() == Some(node_id.as_str()) {
+                                                    link_drag_over.set(None);
+                                                }
+                                            }
+                                        },
+                                        if is_drop_target {
+                                            circle {
+                                                cx: "{nx}", cy: "{ny}", r: "13",
+                                                class: "fill-none stroke-primary",
+                                                stroke_width: "2",
+                                            }
+                                        }
+                                        circle {
+                                            cx: "{nx}",
+                                            cy: "{ny}",
+                                            r: "7",
+                                            class: if is_drag_source {
+                                                "fill-primary stroke-background opacity-40"
+                                            } else if is_connected {
+                                                "fill-primary stroke-background hover:opacity-80 transition-opacity"
+                                            } else {
+                                                "fill-muted-foreground/40 stroke-background hover:opacity-80 transition-opacity"
+                                            },
+                                            stroke_width: "1.5",
+                                            title { "{m.title} — drag to another node to add a dependency" }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -2907,9 +4002,9 @@ pub fn PriorityViewCmp() -> Element {
 fn weight_fields() -> Vec<(&'static str, &'static str, fn(&UrgencyWeights) -> f64, fn(&mut UrgencyWeights, f64))> {
     vec![
         ("Due date", "Ramps up to this value as a due date approaches, maxing out once overdue.", |w| w.due, |w, v| w.due = v),
-        ("Expedite: High", "Flat bonus when a task's priority is set to High.", |w| w.priority_high, |w, v| w.priority_high = v),
-        ("Expedite: Medium", "Flat bonus when a task's priority is set to Medium.", |w| w.priority_medium, |w, v| w.priority_medium = v),
-        ("Expedite: Low", "Flat bonus when a task's priority is set to Low.", |w| w.priority_low, |w, v| w.priority_low = v),
+        ("Priority: High", "Flat bonus when a task's priority is set to High.", |w| w.priority_high, |w, v| w.priority_high = v),
+        ("Priority: Medium", "Flat bonus when a task's priority is set to Medium.", |w| w.priority_medium, |w, v| w.priority_medium = v),
+        ("Priority: Low", "Flat bonus when a task's priority is set to Low.", |w| w.priority_low, |w, v| w.priority_low = v),
         ("Has a project", "Flat bonus when a task has a project assigned.", |w| w.project, |w, v| w.project = v),
         ("Scheduled (active)", "Flat bonus once a task's scheduled date has arrived.", |w| w.scheduled, |w, v| w.scheduled = v),
         ("Gravity", "Scales the task's own -100..100 importance dial.", |w| w.gravity, |w, v| w.gravity = v),
@@ -2956,7 +4051,7 @@ pub fn UrgencySettingsCmp() -> Element {
                     onclick: move |e| e.stop_propagation(),
                     div {
                         class: "flex items-center justify-between h-14 px-4 border-b border-border",
-                        span { class: "text-lg font-semibold text-foreground", "Expedite ranking weights" }
+                        span { class: "text-lg font-semibold text-foreground", "Priority ranking weights" }
                         button {
                             class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
                             onclick: move |_| open.set(false),

@@ -188,15 +188,57 @@ pub struct MomentType {
     // Server-generated on insert; never sent back on writes (see below).
     #[serde(skip_serializing, default)]
     pub created_at: String,
-    // Single taskwarrior-style dependency. The `moments` table only has room
-    // for one (bare `depends_on bigint`, no join table) — a real multi-dependency
-    // feature would need a `moment_dependencies` join table added later.
+    // Legacy single taskwarrior-style dependency column (bare `depends_on
+    // bigint`, no join table) — superseded 2026-07-29 by the unlimited
+    // `metadata.depends_on` list (see MomentMetadata), same trick as
+    // tags/priority/etc riding the jsonb blob instead of a schema change.
+    // Still read (see MomentType::dependency_ids) for moments dependency-
+    // tagged before that migration; never written to again.
     #[serde(deserialize_with = "de_flex_id_opt", serialize_with = "se_flex_id_opt", default)]
     pub depends_on: Option<String>,
     // Freeform jsonb column, repurposed client-side for tags + manual sort
     // order rather than adding new schema. See MomentMetadata.
     #[serde(default)]
     pub metadata: Option<MomentMetadata>,
+}
+
+impl MomentType {
+    // Canonical accessor for taskwarrior-style dependencies now that a
+    // moment can depend on more than one thing (2026-07-29) — this moment
+    // is blocked until every one of these completes. `metadata.depends_on`
+    // is authoritative once set; the legacy top-level `depends_on` column
+    // is folded in only as a fallback for moments never touched since this
+    // migration (metadata.depends_on still empty for them).
+    pub fn dependency_ids(&self) -> Vec<String> {
+        let from_metadata = self.metadata.as_ref().map(|m| m.depends_on.clone()).unwrap_or_default();
+        if !from_metadata.is_empty() {
+            return from_metadata;
+        }
+        self.depends_on.clone().into_iter().collect()
+    }
+
+    // Every entity this moment counts for — the primary entity_id plus any
+    // additional_entity_ids (2026-07-29 multi-entity decision: additional
+    // entities are full peers, not lightweight cc's — this moment closes
+    // their Distance and factors into their urgency exactly as if it were
+    // solely theirs). Used everywhere a plain `entity_id == X` equality
+    // check used to gate whether a moment belongs to an entity.
+    pub fn entity_ids(&self) -> Vec<String> {
+        let mut ids = vec![self.entity_id.clone()];
+        if let Some(meta) = &self.metadata {
+            for id in &meta.additional_entity_ids {
+                if !ids.contains(id) {
+                    ids.push(id.clone());
+                }
+            }
+        }
+        ids
+    }
+
+    pub fn involves_entity(&self, entity_id: &str) -> bool {
+        self.entity_id == entity_id
+            || self.metadata.as_ref().is_some_and(|m| m.additional_entity_ids.iter().any(|id| id == entity_id))
+    }
 }
 
 // Taskwarrior-style attributes, part 2 (see DESIGN_PROGRESS.md — the user
@@ -222,6 +264,17 @@ pub struct MomentMetadata {
     pub scheduled_at: Option<String>,
     #[serde(default)]
     pub until_at: Option<String>,
+    // Taskwarrior-style dependencies, unlimited like tags (2026-07-29) — see
+    // MomentType::dependency_ids for how this combines with the legacy
+    // single-dependency `depends_on` column below.
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    // Multi-entity moments (2026-07-29): a moment can affect more than one
+    // relationship at once (e.g. meeting Alle about a zine also involves
+    // the zine's audience entity). These are full peers of the primary
+    // entity_id, not lightweight tag-alongs — see MomentType::entity_ids.
+    #[serde(default)]
+    pub additional_entity_ids: Vec<String>,
 }
 
 
