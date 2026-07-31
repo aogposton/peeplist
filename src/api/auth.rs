@@ -18,10 +18,24 @@ pub enum SignupOutcome {
     NeedsConfirmation,
 }
 
-pub async fn signup(email: String, password: String) -> Result<SignupOutcome, String> {
+// Folds an optional Cloudflare Turnstile token into a request body as
+// `gotrue_meta_security.captcha_token` — the shape Supabase's own
+// signup/login/recover endpoints expect once "Enable CAPTCHA protection"
+// is turned on in that project's Auth settings. Omitted entirely (not just
+// null) when there's no token, so this is a no-op until that setting is
+// actually turned on — see views/auth.rs's Turnstile widget wiring.
+fn with_captcha(mut body: serde_json::Value, captcha_token: Option<String>) -> serde_json::Value {
+    if let Some(token) = captcha_token {
+        body["gotrue_meta_security"] = serde_json::json!({ "captcha_token": token });
+    }
+    body
+}
+
+pub async fn signup(email: String, password: String, captcha_token: Option<String>) -> Result<SignupOutcome, String> {
+    let body = with_captcha(serde_json::json!({ "email": email, "password": password }), captcha_token);
     let response = SupabaseClient::new("".to_string())
         .auth_post("signup")
-        .json(&LoginRequest { email, password })
+        .json(&body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -39,10 +53,11 @@ pub async fn signup(email: String, password: String) -> Result<SignupOutcome, St
     }
 }
 
-pub async fn login(email: String, password: String) -> Result<LoginResponse, String> {
+pub async fn login(email: String, password: String, captcha_token: Option<String>) -> Result<LoginResponse, String> {
+    let body = with_captcha(serde_json::json!({ "email": email, "password": password }), captcha_token);
     let response = SupabaseClient::new("".to_string())
         .auth_post("token?grant_type=password")
-        .json(&LoginRequest { email, password })
+        .json(&body)
         .send()
         .await
         .map_err(|e| e.to_string())?;
@@ -92,6 +107,40 @@ pub async fn update_password(token: String, new_password: String) -> Result<(), 
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
         return Err(format!("Password update failed ({}): {}", status, text));
+    }
+    Ok(())
+}
+
+/// Sends a Supabase password-recovery email. `redirect_to` is where the
+/// emailed link lands (must be in the Supabase project's Auth > URL
+/// Configuration allow-list) — Supabase appends the actual recovery tokens
+/// as a URL *fragment* on that link (`#access_token=...&type=recovery`),
+/// which `ResetPasswordCmp` (views/auth.rs) reads and feeds into
+/// `update_password` above to actually set the new password. Always
+/// returns Ok on a well-formed request regardless of whether the email is
+/// registered — that's Supabase's own anti-enumeration behavior, not
+/// something to work around.
+pub async fn request_password_reset(email: String, redirect_to: String, captcha_token: Option<String>) -> Result<(), String> {
+    // Manual percent-encoding rather than reqwest's `.query()` builder (not
+    // available on this reqwest version's RequestBuilder) — redirect_to is
+    // a full URL (scheme, host, path), which needs its reserved characters
+    // encoded to sit safely inside another URL's query string.
+    let encoded_redirect: String = redirect_to.bytes().map(|b| match b {
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+        _ => format!("%{:02X}", b),
+    }).collect();
+    let body = with_captcha(serde_json::json!({ "email": email }), captcha_token);
+    let response = SupabaseClient::new("".to_string())
+        .auth_post(&format!("recover?redirect_to={encoded_redirect}"))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!("Password reset request failed ({}): {}", status, text));
     }
     Ok(())
 }

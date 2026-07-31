@@ -25,6 +25,6 @@ pub mod quick_capture;
 // already declares `pub mod vault_format;` itself (api/local_desktop.rs
 // imports it as `crate::api::vault_format`), and Rust treats two separate
 // `#[path]` declarations pointing at the same file as two distinct,
-// non-interchangeable types. Reach it via `peeplist::api::vault_format`.
+// non-interchangeable types. Reach it via `black_server_book::api::vault_format`.
 #[path = "api/mod.rs"]
 pub mod api;

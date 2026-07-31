@@ -3,7 +3,7 @@
 [web.app]
 
 # HTML title tag content
-title = "peeplist"
+title = "Black Server Book"
 
 # include `assets` in web platform
 [web.resource]

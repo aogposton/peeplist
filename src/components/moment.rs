@@ -1048,7 +1048,7 @@ pub fn MomentInputCmp() -> Element {
                         .into_iter()
                         .collect();
                     let effective_project = parsed.project.clone().or_else(|| default_project.clone());
-                    if parsed.has_metadata() || effective_project.is_some() || !dep_ids.is_empty() {
+                    if parsed.has_metadata() || effective_project.is_some() || !dep_ids.is_empty() || !parsed.additional_entity_ids.is_empty() {
                         let meta = MomentMetadata {
                             tags: parsed.tags_add.clone(),
                             sort_index: None,
@@ -1057,7 +1057,7 @@ pub fn MomentInputCmp() -> Element {
                             scheduled_at: parsed.scheduled_at.clone(),
                             until_at: parsed.until_at.clone(),
                             depends_on: dep_ids,
-                            additional_entity_ids: Vec::new(),
+                            additional_entity_ids: parsed.additional_entity_ids.clone(),
                         };
                         if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
                             if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
@@ -2692,13 +2692,25 @@ pub fn OnTheFlyCmp() -> Element {
     // triggered it (this button, or the global "o" keyboard shortcut in
     // layouts::Navbar) — one place for the reset instead of duplicating it
     // at every place that can set on_the_fly_open.
+    //
+    // The unconditional `was_open.set(now_open)` this used to end with was a
+    // real bug, not just style: this effect reads `was_open` (the guard
+    // above) and then writes it every single run regardless of whether the
+    // value actually changed. Dioxus signals don't dedupe writes against the
+    // current value, so that write re-marked this same effect dirty on
+    // every run, which reran it, which wrote again — an infinite effect
+    // loop that pinned the tab's CPU hard enough that even a page refresh
+    // couldn't get in (had to force-close the tab). Only writing when the
+    // value actually changed breaks the cycle.
     use_effect(move || {
         let now_open = *open.read();
         if now_open && !*was_open.read() {
             title_input.set(String::new());
             task.set(None);
         }
-        was_open.set(now_open);
+        if *was_open.read() != now_open {
+            was_open.set(now_open);
+        }
     });
 
     rsx! {
@@ -2799,7 +2811,7 @@ pub fn OnTheFlyCmp() -> Element {
                                             Ok(created) => {
                                                 let created_id = created.id.clone();
                                                 moments.write().insert(0, created.clone());
-                                                if parsed.has_metadata() {
+                                                if parsed.has_metadata() || !parsed.additional_entity_ids.is_empty() {
                                                     let meta = MomentMetadata {
                                                         tags: parsed.tags_add.clone(),
                                                         sort_index: None,
@@ -2808,7 +2820,7 @@ pub fn OnTheFlyCmp() -> Element {
                                                         scheduled_at: parsed.scheduled_at.clone(),
                                                         until_at: parsed.until_at.clone(),
                                                         depends_on: Vec::new(),
-                                                        additional_entity_ids: Vec::new(),
+                                                        additional_entity_ids: parsed.additional_entity_ids.clone(),
                                                     };
                                                     if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
                                                         if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
@@ -3172,6 +3184,10 @@ pub fn ScheduledViewCmp() -> Element {
         .find(|e| e.id == entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    // Multi-entity moments (2026-07-29) — this is a global, cross-entity
+    // view, so a moment attached to more than one entity needs to actually
+    // say so here rather than only naming the primary one.
+    let entity_names_for = move |m: &MomentType| m.entity_ids().iter().map(|id| entity_name(id)).collect::<Vec<_>>().join(", ");
 
     rsx! {
         div {
@@ -3198,7 +3214,7 @@ pub fn ScheduledViewCmp() -> Element {
                         div {
                             class: "flex flex-col min-w-0",
                             span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_names_for(m)}" }
                         }
                         span {
                             class: "text-xs text-muted-foreground shrink-0",
@@ -3211,18 +3227,19 @@ pub fn ScheduledViewCmp() -> Element {
     }
 }
 
-// One row of the blocking tree, recursive — renders `m`, then recurses
-// into everything that depends on it (any open moment whose dependency_ids()
-// contains m.id — 2026-07-29: a moment can have more than one dependency
-// now, so a moment blocked on two different blockers renders once under
-// each of them; a true tree can't represent multiple parents without
-// duplicating, which is exactly what BlockingDagViewCmp exists to show
-// correctly instead), indented one level further each time. A plain function rather
-// than a #[component]: it doesn't need hooks, and recursion through a
-// #[component] would need its Props to derive PartialEq on a Vec of
-// borrowed data, which is more friction than it's worth here. Signals are
-// Copy, so threading them through recursive calls directly (rather than a
-// generic closure prop) is simplest.
+// One row of the blocking tree, recursive — renders `m`, then recurses into
+// everything `m` itself depends on (its own dependency_ids(), filtered to
+// still-open ones — 2026-07-29, reversed per user request: root is now the
+// *blocked* moment, limbs cascade down into what it's waiting on, not the
+// other way around). A moment can have more than one dependency, so a
+// moment blocked on two different things renders once under each of them;
+// a true tree can't represent multiple parents without duplicating, which
+// is exactly what BlockingDagViewCmp exists to show correctly instead.
+// A plain function rather than a #[component]: it doesn't need hooks, and
+// recursion through a #[component] would need its Props to derive
+// PartialEq on a Vec of borrowed data, which is more friction than it's
+// worth here. Signals are Copy, so threading them through recursive calls
+// directly (rather than a generic closure prop) is simplest.
 #[allow(clippy::too_many_arguments)]
 fn render_blocking_node(
     m: MomentType,
@@ -3234,12 +3251,13 @@ fn render_blocking_node(
     mut activity_bar_tgl: Signal<bool>,
     mut backdropTgl: Signal<bool>,
 ) -> Element {
-    let entity_name = entities.iter()
-        .find(|e| e.id == m.entity_id)
-        .map(|e| e.name.clone())
-        .unwrap_or_else(|| "Unknown".to_string());
+    let entity_name = m.entity_ids().iter()
+        .map(|id| entities.iter().find(|e| &e.id == id).map(|e| e.name.clone()).unwrap_or_else(|| "Unknown".to_string()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let dep_ids: std::collections::HashSet<String> = m.dependency_ids().into_iter().collect();
     let mut children: Vec<MomentType> = all.iter()
-        .filter(|c| c.completed_at.is_none() && c.dependency_ids().contains(&m.id))
+        .filter(|c| c.completed_at.is_none() && dep_ids.contains(&c.id))
         .cloned()
         .collect();
     children.sort_by(|a, b| a.title.cmp(&b.title));
@@ -3315,24 +3333,44 @@ fn BlockingTreeViewCmp() -> Element {
     let activity_bar_tgl = state.activity_bar_tgl;
     let backdropTgl = state.backdropTgl;
 
-    // Anyone that's a dependency target of at least one other still-open
-    // moment — "what's actually blocking other things," so the user can go
-    // free them up. A moment blocking only already-completed things isn't
-    // in anyone's way anymore, so it doesn't count.
+    // Reversed 2026-07-29 per user request: root is now the *blocked*
+    // moment, limbs cascade down into what it's waiting on (was the other
+    // way around — root used to be the free blocker, limbs the things it
+    // blocked).
+    //
+    // Anyone still open with at least one dependency that's ALSO still
+    // open — a dependency that's already completed isn't actually blocking
+    // anything anymore (see MomentCmp's own is_blocked check, same rule),
+    // so a moment whose only listed dependency is done doesn't count as
+    // "blocked" here even though dependency_ids() still names it.
     let all = std::rc::Rc::new(moments.read().clone());
     let entities_snapshot = std::rc::Rc::new(entities.read().clone());
-    let blocking_ids: std::collections::HashSet<String> = all.iter()
-        .filter(|m| m.completed_at.is_none())
+    let all_lookup: std::collections::HashMap<String, MomentType> = all.iter()
+        .map(|m| (m.id.clone(), m.clone()))
+        .collect();
+    let is_actually_blocked = |m: &MomentType| -> bool {
+        m.dependency_ids().iter().any(|dep_id| {
+            all_lookup.get(dep_id).is_some_and(|dep| dep.completed_at.is_none())
+        })
+    };
+    let blocked_ids: std::collections::HashSet<String> = all.iter()
+        .filter(|m| m.completed_at.is_none() && is_actually_blocked(m))
+        .map(|m| m.id.clone())
+        .collect();
+    // What's depended on by some other blocked moment — those already show
+    // up nested under that moment (see render_blocking_node's children,
+    // now "what do I depend on" instead of "who depends on me"), so a root
+    // that's also someone else's dependency would otherwise render twice.
+    let depended_on_by_blocked: std::collections::HashSet<String> = all.iter()
+        .filter(|m| blocked_ids.contains(&m.id))
         .flat_map(|m| m.dependency_ids())
         .collect();
-    // Roots only — a blocking moment that's itself blocking-something-
-    // else's-blocker (i.e. any of its own dependencies is also in the
-    // blocking set) gets skipped here and picked up as a nested child
-    // instead (possibly under more than one parent now — see
+    // Roots only — a blocked moment that's itself the dependency of
+    // another blocked moment gets skipped here and picked up as a nested
+    // child instead (possibly under more than one parent now — see
     // render_blocking_node), so nothing renders twice at the top level.
     let mut roots: Vec<MomentType> = all.iter()
-        .filter(|m| blocking_ids.contains(&m.id) && m.completed_at.is_none())
-        .filter(|m| !m.dependency_ids().iter().any(|dep_id| blocking_ids.contains(dep_id)))
+        .filter(|m| blocked_ids.contains(&m.id) && !depended_on_by_blocked.contains(&m.id))
         .cloned()
         .collect();
     roots.sort_by(|a, b| a.title.cmp(&b.title));
@@ -3343,7 +3381,7 @@ fn BlockingTreeViewCmp() -> Element {
             if roots.is_empty() {
                 div {
                     class: "text-sm text-muted-foreground text-center py-8",
-                    "Nothing's blocking anything else right now."
+                    "Nothing's blocked on anything else right now."
                 }
             } else {
                 for m in roots.into_iter() {
@@ -3357,62 +3395,171 @@ fn BlockingTreeViewCmp() -> Element {
     }
 }
 
-#[derive(serde::Serialize, Clone)]
-struct DagNodeIn {
-    id: String,
-    connected: bool,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct DagLinkIn {
-    source: String,
-    target: String,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct DagLayoutIn {
-    nodes: Vec<DagNodeIn>,
-    links: Vec<DagLinkIn>,
-}
-
-#[derive(serde::Deserialize, Clone)]
-struct DagNodeOut {
-    id: String,
-    x: f64,
-    y: f64,
-}
-
-const DAG_CANVAS_W: f64 = 900.0;
-const DAG_CANVAS_H: f64 = 560.0;
+const DAG_NODE_SPACING: f64 = 60.0;
+const DAG_LAYER_SPACING: f64 = 80.0;
+const DAG_COMPONENT_GAP: f64 = 70.0;
+const DAG_MARGIN: f64 = 40.0;
+const DAG_MIN_CANVAS_W: f64 = 900.0;
+const DAG_MIN_CANVAS_H: f64 = 400.0;
 const DAG_MIN_ZOOM: f64 = 0.3;
 const DAG_MAX_ZOOM: f64 = 3.0;
 
-// Every open moment gets a node — most aren't part of any dependency chain
-// at all, and per the user's own framing that's fine, even the point:
-// "every moment but not every moment is in the flow of the graph." Two
-// forceY targets (connected nodes pulled toward the top third, isolated
-// ones toward the bottom) is what produces that separation; forceLink only
-// exists between nodes that actually have a depends_on edge, so isolated
-// nodes never get pulled toward the flow by simulation alone.
-const DAG_LAYOUT_SCRIPT: &str = r#"
-    const { nodes, links } = await dioxus.recv();
-    const width = 900, height = 560;
-    nodes.forEach((n) => {
-        n.x = width / 2 + (Math.random() - 0.5) * 200;
-        n.y = n.connected ? height * 0.32 : height * 0.78;
-    });
-    const simulation = d3.forceSimulation(nodes)
-        .force("link", d3.forceLink(links).id((n) => n.id).distance(70).strength(0.7))
-        .force("charge", d3.forceManyBody().strength(-110))
-        .force("x", d3.forceX(width / 2).strength(0.02))
-        .force("y", d3.forceY((n) => n.connected ? height * 0.32 : height * 0.78).strength(0.3))
-        .force("collide", d3.forceCollide(20))
-        .stop();
-    for (let i = 0; i < 300; i++) {
-        simulation.tick();
+// Longest-path-from-a-root layer assignment (standard layered/Sugiyama-
+// style DAG drawing) within one connected component — a node's layer is one
+// past the deepest of its own blockers, so blockers always render above
+// what they block, matching the arrow direction below. Cycle-safe via an
+// in-progress guard: nothing in this app actually prevents a dependency
+// cycle (the drag-and-drop authoring in the DAG view below doesn't check
+// for one), so a node that loops back on itself just falls back to layer 0
+// rather than recursing forever.
+fn dag_layer(
+    node: &str,
+    incoming: &std::collections::HashMap<String, Vec<String>>,
+    comp: &std::collections::HashSet<String>,
+    layers: &mut std::collections::HashMap<String, usize>,
+    in_progress: &mut std::collections::HashSet<String>,
+) -> usize {
+    if let Some(&l) = layers.get(node) {
+        return l;
     }
-    dioxus.send(nodes.map((n) => ({ id: n.id, x: n.x, y: n.y })));
-"#;
+    if !in_progress.insert(node.to_string()) {
+        return 0;
+    }
+    let preds: Vec<String> = incoming.get(node)
+        .map(|v| v.iter().filter(|p| comp.contains(*p)).cloned().collect())
+        .unwrap_or_default();
+    let l = if preds.is_empty() {
+        0
+    } else {
+        1 + preds.iter().map(|p| dag_layer(p, incoming, comp, layers, in_progress)).max().unwrap_or(0)
+    };
+    in_progress.remove(node);
+    layers.insert(node.to_string(), l);
+    l
+}
+
+// Deterministic, grid-snapped layout (2026-07-29, replacing an earlier
+// d3-force simulation — user's own words: "sloppy, hard to read," clusters
+// visually drifting into each other with no guarantee of staying apart).
+// Every open moment gets a node, same as before — most aren't part of any
+// dependency chain at all, and that's fine, even the point: "every moment
+// but not every moment is in the flow of the graph." Each connected
+// component gets its own layered sub-layout (blockers above what they
+// block), packed left-to-right/wrapping so components can never overlap
+// (a guarantee, not just a low-probability outcome the way physics-based
+// repulsion was); isolated moments fill a plain grid underneath, sorted by
+// id so a later re-render — e.g. after a checkbox toggle elsewhere in the
+// app — doesn't reshuffle everyone's position.
+fn compute_dag_layout(open: &[MomentType]) -> (std::collections::HashMap<String, (f64, f64)>, f64, f64) {
+    let open_ids: std::collections::HashSet<String> = open.iter().map(|m| m.id.clone()).collect();
+    let mut undirected: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    let mut incoming: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for m in open {
+        for dep in m.dependency_ids() {
+            if open_ids.contains(&dep) {
+                undirected.entry(m.id.clone()).or_default().push(dep.clone());
+                undirected.entry(dep.clone()).or_default().push(m.id.clone());
+                incoming.entry(m.id.clone()).or_default().push(dep.clone());
+            }
+        }
+    }
+
+    let mut sorted_ids: Vec<String> = open.iter().map(|m| m.id.clone()).collect();
+    sorted_ids.sort();
+
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut components: Vec<Vec<String>> = Vec::new();
+    for id in &sorted_ids {
+        if visited.contains(id) {
+            continue;
+        }
+        let mut comp = Vec::new();
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(id.clone());
+        visited.insert(id.clone());
+        while let Some(cur) = queue.pop_front() {
+            comp.push(cur.clone());
+            if let Some(neighbors) = undirected.get(&cur) {
+                for n in neighbors {
+                    if visited.insert(n.clone()) {
+                        queue.push_back(n.clone());
+                    }
+                }
+            }
+        }
+        comp.sort();
+        components.push(comp);
+    }
+
+    let (isolated, mut connected): (Vec<Vec<String>>, Vec<Vec<String>>) =
+        components.into_iter().partition(|c| c.len() == 1);
+    // Largest first — packs a little more evenly left-to-right than
+    // whatever order components happened to be discovered in.
+    connected.sort_by(|a, b| b.len().cmp(&a.len()).then(a.cmp(b)));
+
+    let mut positions: std::collections::HashMap<String, (f64, f64)> = std::collections::HashMap::new();
+    let mut canvas_w: f64 = DAG_MIN_CANVAS_W;
+    let mut cursor_x = DAG_MARGIN;
+    let mut row_y = DAG_MARGIN;
+    let mut row_max_h: f64 = 0.0;
+
+    for comp in &connected {
+        let comp_set: std::collections::HashSet<String> = comp.iter().cloned().collect();
+        let mut layers: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut in_progress: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for id in comp {
+            dag_layer(id, &incoming, &comp_set, &mut layers, &mut in_progress);
+        }
+        let max_layer = layers.values().copied().max().unwrap_or(0);
+        let mut by_layer: Vec<Vec<String>> = vec![Vec::new(); max_layer + 1];
+        for id in comp {
+            by_layer[layers[id]].push(id.clone());
+        }
+        for layer in by_layer.iter_mut() {
+            layer.sort();
+        }
+        let comp_w = by_layer.iter().map(|l| l.len()).max().unwrap_or(1) as f64 * DAG_NODE_SPACING;
+        let comp_h = (max_layer + 1) as f64 * DAG_LAYER_SPACING;
+
+        // Wrap to a new row if this component won't fit — a guarantee that
+        // no two components ever overlap, not just an unlikely outcome.
+        if cursor_x > DAG_MARGIN && cursor_x + comp_w > DAG_MIN_CANVAS_W - DAG_MARGIN {
+            cursor_x = DAG_MARGIN;
+            row_y += row_max_h + DAG_COMPONENT_GAP;
+            row_max_h = 0.0;
+        }
+
+        for (layer_idx, ids_in_layer) in by_layer.iter().enumerate() {
+            let n = ids_in_layer.len().max(1) as f64;
+            for (i, id) in ids_in_layer.iter().enumerate() {
+                let x = cursor_x + (i as f64 + 0.5) * (comp_w / n);
+                let y = row_y + (layer_idx as f64 + 0.5) * DAG_LAYER_SPACING;
+                positions.insert(id.clone(), (x, y));
+            }
+        }
+
+        cursor_x += comp_w + DAG_COMPONENT_GAP;
+        row_max_h = row_max_h.max(comp_h);
+        canvas_w = canvas_w.max(cursor_x);
+    }
+    let connected_bottom = if connected.is_empty() { DAG_MARGIN } else { row_y + row_max_h };
+
+    let cols = ((canvas_w - 2.0 * DAG_MARGIN) / DAG_NODE_SPACING).floor().max(1.0) as usize;
+    let mut isolated_ids: Vec<String> = isolated.into_iter().flatten().collect();
+    isolated_ids.sort();
+    let isolated_top = connected_bottom + if connected.is_empty() { 0.0 } else { DAG_COMPONENT_GAP };
+    for (i, id) in isolated_ids.iter().enumerate() {
+        let row = i / cols;
+        let col = i % cols;
+        let x = DAG_MARGIN + (col as f64 + 0.5) * DAG_NODE_SPACING;
+        let y = isolated_top + (row as f64 + 0.5) * DAG_NODE_SPACING;
+        positions.insert(id.clone(), (x, y));
+    }
+    let isolated_rows = isolated_ids.len().div_ceil(cols);
+    let canvas_h = (isolated_top + isolated_rows as f64 * DAG_NODE_SPACING).max(DAG_MIN_CANVAS_H);
+
+    (positions, canvas_w, canvas_h)
+}
 
 // A real node-link graph, unlike the entity Graph View (components/graph.rs
 // — that one's a pure "distance from center" radial layout with no edges
@@ -3434,7 +3581,6 @@ pub fn BlockingDagViewCmp() -> Element {
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
 
-    let mut positions = use_signal(Vec::<DagNodeOut>::new);
     let mut zoom = use_signal(|| 1.0f64);
     let mut pan = use_signal(|| (0.0f64, 0.0f64));
     let mut dragging = use_signal(|| false);
@@ -3455,49 +3601,22 @@ pub fn BlockingDagViewCmp() -> Element {
     let mut link_drag_from = use_signal(|| None::<String>);
     let mut link_drag_over = use_signal(|| None::<String>);
 
-    use_effect(move || {
-        let open: Vec<MomentType> = moments.read().iter()
-            .filter(|m| m.completed_at.is_none())
-            .cloned()
-            .collect();
-
-        if open.is_empty() {
-            positions.set(vec![]);
-            return;
-        }
-
-        let open_ids: std::collections::HashSet<String> = open.iter().map(|m| m.id.clone()).collect();
-        let links: Vec<DagLinkIn> = open.iter()
-            .flat_map(|m| m.dependency_ids().into_iter().filter(|d| open_ids.contains(d)).map(|d| DagLinkIn {
-                source: d,
-                target: m.id.clone(),
-            }))
-            .collect();
-        let connected_ids: std::collections::HashSet<String> = links.iter()
-            .flat_map(|l| [l.source.clone(), l.target.clone()])
-            .collect();
-        let nodes: Vec<DagNodeIn> = open.iter()
-            .map(|m| DagNodeIn { id: m.id.clone(), connected: connected_ids.contains(&m.id) })
-            .collect();
-
-        spawn(async move {
-            let eval = document::eval(DAG_LAYOUT_SCRIPT);
-            if eval.send(DagLayoutIn { nodes, links }).is_ok() {
-                let mut eval = eval;
-                if let Ok(result) = eval.recv::<Vec<DagNodeOut>>().await {
-                    positions.set(result);
-                }
-            }
-        });
-    });
-
-    let open_lookup: std::collections::HashMap<String, MomentType> = moments.read().iter()
+    let open: Vec<MomentType> = moments.read().iter()
         .filter(|m| m.completed_at.is_none())
+        .cloned()
+        .collect();
+    let open_lookup: std::collections::HashMap<String, MomentType> = open.iter()
         .map(|m| (m.id.clone(), m.clone()))
         .collect();
     let links_for_render: Vec<(String, String)> = open_lookup.values()
         .flat_map(|m| m.dependency_ids().into_iter().filter(|d| open_lookup.contains_key(d)).map(|d| (d, m.id.clone())))
         .collect();
+    // A pure function of `open` — cheap enough (BFS + a sort or two over
+    // however many moments are open) to just recompute on every render
+    // rather than caching in a signal, and simpler for it: no use_effect,
+    // no async round-trip, no risk of positions lagging one render behind
+    // the data that produced them.
+    let (positions, canvas_w, canvas_h) = compute_dag_layout(&open);
 
     let (pan_x, pan_y) = *pan.read();
     let zoom_val = *zoom.read();
@@ -3514,7 +3633,7 @@ pub fn BlockingDagViewCmp() -> Element {
                 svg {
                     width: "100%",
                     height: "560",
-                    view_box: "0 0 {DAG_CANVAS_W} {DAG_CANVAS_H}",
+                    view_box: "0 0 {canvas_w} {canvas_h}",
                     preserve_aspect_ratio: "xMidYMid meet",
                     class: if *dragging.read() {
                         "border border-border rounded-lg bg-background cursor-grabbing select-none"
@@ -3583,8 +3702,8 @@ pub fn BlockingDagViewCmp() -> Element {
                         transform: "translate({pan_x}, {pan_y}) scale({zoom_val})",
                         for (source_id, target_id) in links_for_render.iter() {
                             {
-                                let sp = positions.read().iter().find(|n| &n.id == source_id).map(|n| (n.x, n.y));
-                                let tp = positions.read().iter().find(|n| &n.id == target_id).map(|n| (n.x, n.y));
+                                let sp = positions.get(source_id).copied();
+                                let tp = positions.get(target_id).copied();
                                 match (sp, tp) {
                                     (Some((sx, sy)), Some((tx, ty))) => rsx! {
                                         line {
@@ -3599,11 +3718,11 @@ pub fn BlockingDagViewCmp() -> Element {
                                 }
                             }
                         }
-                        for node in positions.read().iter() {
+                        for m in open.iter() {
                             {
-                                let node_id = node.id.clone();
-                                let (nx, ny) = (node.x, node.y);
-                                let Some(m) = open_lookup.get(&node_id).cloned() else { return rsx! {}; };
+                                let node_id = m.id.clone();
+                                let Some((nx, ny)) = positions.get(&node_id).copied() else { return rsx! {}; };
+                                let m = m.clone();
                                 let is_connected = links_for_render.iter().any(|(s, t)| s == &node_id || t == &node_id);
                                 let is_drag_source = link_drag_from.read().as_deref() == Some(node_id.as_str());
                                 let is_drop_target = link_drag_over.read().as_deref() == Some(node_id.as_str());
@@ -3704,6 +3823,11 @@ pub fn NotesViewCmp() -> Element {
         .find(|e| e.id == entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    // Multi-entity moments (2026-07-29) — a note attached to more than one
+    // entity still shows up here exactly once (see MomentType::entity_ids/
+    // involves_entity — no duplication across views), but needs to actually
+    // name everyone it's attached to, not just the primary entity.
+    let entity_names_for = move |m: &MomentType| m.entity_ids().iter().map(|id| entity_name(id)).collect::<Vec<_>>().join(", ");
 
     rsx! {
         div {
@@ -3730,7 +3854,7 @@ pub fn NotesViewCmp() -> Element {
                         div {
                             class: "flex flex-col min-w-0",
                             span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_names_for(m)}" }
                         }
                     }
                 }
@@ -3780,6 +3904,7 @@ pub fn RecentlyDeletedViewCmp() -> Element {
         .find(|e| e.id == entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    let entity_names_for = move |m: &MomentType| m.entity_ids().iter().map(|id| entity_name(id)).collect::<Vec<_>>().join(", ");
 
     let mut restore_error = use_signal(|| None::<String>);
     let mut restore_moment = move |moment: MomentType| {
@@ -3835,7 +3960,7 @@ pub fn RecentlyDeletedViewCmp() -> Element {
                             div {
                                 class: "flex flex-col min-w-0",
                                 span { class: "text-sm font-medium text-foreground truncate", "{moment.title}" }
-                                span { class: "text-xs text-muted-foreground", "{entity_name(&moment.entity_id)}" }
+                                span { class: "text-xs text-muted-foreground", "{entity_names_for(&moment)}" }
                             }
                             button {
                                 class: "text-sm text-primary hover:underline cursor-pointer shrink-0",
@@ -3889,6 +4014,7 @@ pub fn DueViewCmp() -> Element {
         .find(|e| e.id == entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    let entity_names_for = move |m: &MomentType| m.entity_ids().iter().map(|id| entity_name(id)).collect::<Vec<_>>().join(", ");
 
     rsx! {
         div {
@@ -3917,7 +4043,7 @@ pub fn DueViewCmp() -> Element {
                             div {
                                 class: "flex flex-col min-w-0",
                                 span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                                span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                                span { class: "text-xs text-muted-foreground", "{entity_names_for(m)}" }
                             }
                             span {
                                 class: "text-xs text-destructive shrink-0",
@@ -3955,6 +4081,7 @@ pub fn PriorityViewCmp() -> Element {
         .find(|e| e.id == entity_id)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
+    let entity_names_for = move |m: &MomentType| m.entity_ids().iter().map(|id| entity_name(id)).collect::<Vec<_>>().join(", ");
 
     rsx! {
         div {
@@ -3981,7 +4108,7 @@ pub fn PriorityViewCmp() -> Element {
                         div {
                             class: "flex flex-col min-w-0",
                             span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
-                            span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                            span { class: "text-xs text-muted-foreground", "{entity_names_for(m)}" }
                         }
                         span {
                             class: "text-xs font-semibold shrink-0 px-2 py-0.5 rounded-full border border-border text-muted-foreground",

@@ -70,6 +70,14 @@ pub struct Token {
 pub struct ParsedCapture {
     pub title: String,
     pub entity_id: Option<String>,
+    // Multi-entity moments (2026-07-29) — a second (or third...) @mention
+    // used to silently overwrite entity_id, so "meet @Alice about the zine
+    // with @audience" only ever attached to whichever mention came last,
+    // and the other was dropped on the floor entirely (not even a
+    // cross-reference — it just vanished). See parse() below: the first
+    // @mention is still the primary entity_id, every one after that lands
+    // here instead of clobbering it.
+    pub additional_entity_ids: Vec<String>,
     pub priority: Option<String>,
     pub project: Option<String>,
     pub due_at: Option<String>,
@@ -344,7 +352,16 @@ pub fn parse(input: &str, entities: &[EntityType]) -> ParsedCapture {
             TokenKind::Until(d) => cap.until_at = Some(d.clone()),
             TokenKind::TagAdd(tag) => cap.tags_add.push(tag.clone()),
             TokenKind::TagRemove(tag) => cap.tags_remove.push(tag.clone()),
-            TokenKind::Entity(id) => cap.entity_id = Some(id.clone()),
+            TokenKind::Entity(id) => {
+                // First @mention is the primary entity_id; every one after
+                // that is an additional entity, not a silent overwrite of
+                // the first (see ParsedCapture::additional_entity_ids).
+                if cap.entity_id.is_none() {
+                    cap.entity_id = Some(id.clone());
+                } else if cap.entity_id.as_deref() != Some(id.as_str()) && !cap.additional_entity_ids.contains(id) {
+                    cap.additional_entity_ids.push(id.clone());
+                }
+            }
             TokenKind::Depends(title) => cap.depends_on_title = Some(title.clone()),
             TokenKind::MomentType(id) => cap.moment_type_id = Some(*id),
         }
@@ -515,6 +532,28 @@ mod tests {
         let cap = parse("Call @Jane tonight", &entities());
         assert_eq!(cap.entity_id, Some("1".to_string()));
         assert_eq!(cap.title, "Call tonight");
+    }
+
+    #[test]
+    // Regression test for a real reported bug (2026-07-29): a second
+    // @mention used to silently overwrite entity_id, so "meet @Jane and
+    // @Jane Doe for coffee" only ever attached to whichever mention came
+    // last — the other was dropped entirely, not even cross-referenced.
+    // The first mention should stay entity_id (unchanged behavior); every
+    // one after that should land in additional_entity_ids instead of
+    // clobbering it.
+    fn second_mention_becomes_an_additional_entity_not_an_overwrite() {
+        let cap = parse("meet @Jane and @Jane Doe for coffee", &entities());
+        assert_eq!(cap.entity_id, Some("1".to_string()));
+        assert_eq!(cap.additional_entity_ids, vec!["2".to_string()]);
+        assert_eq!(cap.title, "meet and for coffee");
+    }
+
+    #[test]
+    fn mentioning_the_same_entity_twice_does_not_duplicate_it() {
+        let cap = parse("call @Jane then call @Jane again", &entities());
+        assert_eq!(cap.entity_id, Some("1".to_string()));
+        assert!(cap.additional_entity_ids.is_empty());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use crate::AppState;
 use crate::Route;
-use crate::api::{update_password, VaultKind};
+use crate::api::{update_password, ActiveStorage, VaultKind};
 use web_sys::window;
 
 // Settings page — account/vault-level controls, not data views. See memory
@@ -14,11 +14,10 @@ use web_sys::window;
 // its own sidebar View (RecentlyDeletedViewCmp, components/moment.rs) —
 // it's a data view like Due/Scheduled, not an account/vault setting.
 //
-// The password/remove sections below only apply to the Synced vault —
-// Local has no Supabase account behind it, so there's no password to
-// change and nothing to "remove" (it's the one fixed, permanent local
-// vault; full on-device data deletion was explicitly ruled out of scope
-// here).
+// The password/remove/delete-data sections below only apply to the Synced
+// vault — Local has no Supabase account behind it, so there's no password
+// to change and no server-held data to delete (full on-device Local vault
+// wipe is a separate, not-yet-built feature).
 #[component]
 pub fn SettingsCmp() -> Element {
     let state = use_context::<AppState>();
@@ -30,6 +29,8 @@ pub fn SettingsCmp() -> Element {
     let mut sidebarTgl = state.sidebarTgl;
     let mut backdropTgl = state.backdropTgl;
     let mut autohide_entities = state.autohide_entities;
+    let mut moments = state.moments;
+    let mut entities = state.entities;
 
     let has_synced = user_email.read().is_some();
 
@@ -92,6 +93,57 @@ pub fn SettingsCmp() -> Element {
         confirming_remove.set(false);
     };
 
+    // "Delete my account and data" (2026-07-29) — see SupabaseStorage::
+    // delete_all_data's own doc comment for exactly what this does and
+    // doesn't do (clears data via the existing owner-scoped RLS policies;
+    // never touches the actual login/auth.users row, which needs a
+    // privileged key this client can't hold).
+    let mut confirming_delete_data = use_signal(|| false);
+    let mut deleting_data = use_signal(|| false);
+    let mut delete_data_error = use_signal(|| None::<String>);
+    let delete_my_data = move |_| {
+        if *deleting_data.read() {
+            return;
+        }
+        let Some(token) = auth_token.read().clone() else {
+            delete_data_error.set(Some("You need to be logged in to the Synced vault to delete its data.".to_string()));
+            return;
+        };
+        deleting_data.set(true);
+        delete_data_error.set(None);
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(VaultKind::Synced, Some(token));
+            let result = match &storage {
+                ActiveStorage::Supabase(s) => s.delete_all_data().await,
+                ActiveStorage::Local(_) => Ok(()), // can't happen — Synced requested with a token present
+            };
+            match result {
+                Ok(()) => {
+                    moments.set(vec![]);
+                    entities.set(vec![]);
+                    confirming_delete_data.set(false);
+                    // Same "land back on Local, not an empty Synced view"
+                    // posture as Remove Synced vault above.
+                    #[cfg(not(feature = "desktop"))]
+                    if let Some(s) = window().and_then(|w| w.local_storage().ok().flatten()) {
+                        s.set("auth_token", "").ok();
+                        s.set("refresh_token", "").ok();
+                        s.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+                    }
+                    auth_token.set(None);
+                    user_id.set(None);
+                    user_email.set(None);
+                    active_vault.set(VaultKind::Local);
+                }
+                Err(e) => {
+                    clog!("Error deleting synced data: {}", e);
+                    delete_data_error.set(Some("Couldn't delete everything — some data may remain. Try again.".to_string()));
+                }
+            }
+            deleting_data.set(false);
+        });
+    };
+
     rsx! {
         div {
             class: "px-4 pt-4",
@@ -99,6 +151,14 @@ pub fn SettingsCmp() -> Element {
             p {
                 class: "text-sm text-muted-foreground mb-4",
                 "Account and vault controls."
+            }
+            // Beta pricing transparency (2026-07-29) — same notice shown at
+            // signup time (see views/auth.rs), repeated here since this is
+            // also where an existing Synced user would come looking for
+            // "wait, is this free" clarity, not just someone about to sign up.
+            p {
+                class: "text-xs text-muted-foreground rounded-md border border-border bg-muted/30 px-3 py-2 mb-4",
+                "Synced is free during beta. When we introduce pricing, anyone already using it will get advance notice before anything changes."
             }
         }
         div {
@@ -252,6 +312,59 @@ pub fn SettingsCmp() -> Element {
                             onclick: move |_| confirming_remove.set(true),
                             "Remove Synced vault"
                         }
+                    }
+                }
+                div {
+                    class: "rounded-lg border border-destructive/30 bg-background p-4",
+                    h3 { class: "text-sm font-semibold text-foreground mb-1", "Delete my account and data" }
+                    p {
+                        class: "text-sm text-muted-foreground mb-3",
+                        "Permanently deletes everyone and everything in your Synced vault — entities, moments, reactions, all of it. This can't be undone. Your login itself stays active (contact us if you want that gone too); you'll land back on the Local vault, which is untouched."
+                    }
+                    if let Some(msg) = delete_data_error.read().as_ref() {
+                        p { class: "text-sm text-destructive mb-2", "{msg}" }
+                    }
+                    if *confirming_delete_data.read() {
+                        div {
+                            class: "flex items-center gap-2",
+                            span { class: "text-sm text-foreground", "Permanently delete all Synced data?" }
+                            button {
+                                class: "rounded-md border border-transparent bg-destructive text-primary-foreground dark:text-foreground text-sm px-3 py-1.5 font-medium hover:bg-destructive/90 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                                disabled: *deleting_data.read(),
+                                onclick: delete_my_data,
+                                if *deleting_data.read() { "Deleting…" } else { "Confirm" }
+                            }
+                            button {
+                                class: "rounded-md border border-border bg-background text-foreground text-sm px-3 py-1.5 font-medium hover:bg-muted transition-colors cursor-pointer",
+                                disabled: *deleting_data.read(),
+                                onclick: move |_| confirming_delete_data.set(false),
+                                "Cancel"
+                            }
+                        }
+                    } else {
+                        button {
+                            class: "rounded-md border border-destructive/50 bg-background text-destructive text-sm px-4 py-1.5 font-medium hover:bg-destructive/10 transition-colors cursor-pointer",
+                            onclick: move |_| confirming_delete_data.set(true),
+                            "Delete my account and data"
+                        }
+                    }
+                }
+                div {
+                    class: "flex items-center gap-3 text-xs text-muted-foreground px-1",
+                    // Canonical copy lives on the marketing site, not as an
+                    // in-app route — see views/auth.rs's matching links.
+                    a {
+                        class: "hover:text-foreground cursor-pointer",
+                        href: "https://blackserverbook.com/privacy",
+                        target: "_blank",
+                        "Privacy"
+                    }
+                    span { "·" }
+                    a {
+                        class: "hover:text-foreground cursor-pointer",
+                        href: "https://blackserverbook.com/terms",
+                        target: "_blank",
+                        "Terms"
                     }
                 }
             }

@@ -1,5 +1,6 @@
 use serde_json::Value;
 use crate::types::*;
+use super::client::SupabaseClient;
 
 // Local-first pivot, Phase 1b (see /Users/aogposton/.claude/plans/joyful-brewing-feather.md
 // and memory reference_local_first_pivot_plan). Backend selection becomes a
@@ -193,6 +194,43 @@ impl SupabaseStorage {
 
     pub async fn restore_moment(&self, id: String) -> Result<(), StorageError> {
         Ok(super::moment::restoreMoment(id, self.token.clone()).await?)
+    }
+
+    // "Delete my account and data" (2026-07-29, closing a real pre-launch
+    // gap — no deletion path existed at all). Deletes everything this
+    // account owns, in FK-dependency order (reactions reference moments,
+    // moments reference entities), using the caller's own token — the
+    // existing owner-scoped RLS policies (scripts/2026-07-22-rls-and-self-
+    // entity.sql) already allow this, no new schema needed.
+    //
+    // This only ever clears data — it never touches the auth.users row
+    // itself (the actual login), which needs a privileged service-role key
+    // this client-side code can never safely hold. See
+    // scripts/2026-07-29-delete-account-function/ for that separate,
+    // harder step (a Supabase Edge Function, deployed by the user, not run
+    // from here). Without it, someone who deletes their data can still log
+    // back in — so a fresh Self entity is recreated here (mirroring
+    // exactly what the signup trigger does) rather than leaving the
+    // account in a broken no-Self-entity state if they do.
+    pub async fn delete_all_data(&self) -> Result<(), StorageError> {
+        let client = SupabaseClient::new(self.token.clone());
+        for table in ["reactions", "moments", "entities"] {
+            let resp = client.delete_all(table).send().await
+                .map_err(|e| StorageError::Remote(e.to_string()))?;
+            if !resp.status().is_success() {
+                let text = resp.text().await.unwrap_or_default();
+                return Err(StorageError::Remote(format!("Failed to delete {table}: {text}")));
+            }
+        }
+        self.create_entity(NewEntityType {
+            name: "Self".to_string(),
+            entity_type_id: Some(crate::types::SELF_ENTITY_TYPE_ID.to_string()),
+            parent_entity_id: None,
+            user_id: None,
+            archived_at: None,
+            metadata: None,
+        }).await?;
+        Ok(())
     }
 }
 

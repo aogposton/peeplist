@@ -5,6 +5,7 @@ pub mod auth;
 pub mod storage;
 pub mod vault_format;
 pub mod import;
+pub mod error_report;
 // Two concrete Local vault backends, sharing vault_format — `dx build`
 // compiles in `desktop` regardless of whether default features (which
 // include `web`) are also active, so this has to key off `native` being
@@ -18,9 +19,10 @@ pub mod local_desktop;
 #[cfg(not(feature = "native"))]
 pub mod local;
 
-pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_token, update_password};
+pub use auth::{login, signup, SignupOutcome, get_current_user, refresh_access_token, update_password, request_password_reset};
 pub use storage::{ActiveStorage, VaultKind, StorageError, is_self_entity};
 pub use import::{import_local_into_synced, ImportSummary};
+pub use error_report::report_error;
 
 // Desktop/CLI already write real files under ~/Documents/Peeplist — this is
 // specifically the web build's missing "get my data back out" path, since

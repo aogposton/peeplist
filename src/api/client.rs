@@ -18,8 +18,19 @@ impl SupabaseClient {
             client: Client::new(),
             anon_key,
             url,
-            token, 
+            token,
         }
+    }
+
+    // For requests that need to work whether or not anyone's logged in
+    // (currently just error_reports, since most usage is the Local vault
+    // with no account at all) — the anon key itself is a valid, signed JWT
+    // with role "anon", so using it as the bearer token (not an empty
+    // string) is what makes PostgREST resolve the request to the `anon`
+    // role instead of failing auth outright.
+    pub fn anon() -> Self {
+        let anon_key = env!("SUPABASE_ANON_KEY").to_string();
+        Self::new(anon_key)
     }
 
     pub fn post(&self, table: &str) -> RequestBuilder {
@@ -75,6 +86,18 @@ impl SupabaseClient {
     pub fn delete(&self, table: &str, id: &str) -> RequestBuilder {
         self.client
             .delete(format!("{}/rest/v1/{}?id=eq.{}", self.url, table, id))
+            .header("apikey",self.anon_key.clone())
+            .header("Authorization", format!("Bearer {}", self.token))
+    }
+
+    // Bulk delete — everything RLS scopes to the current token, not a
+    // single row by id like `delete` above. Used for "delete my account and
+    // data" (see SupabaseStorage::delete_all_data): PostgREST requires some
+    // filter on a DELETE, and `id=not.is.null` matches every row without
+    // narrowing further than whatever RLS itself already allows.
+    pub fn delete_all(&self, table: &str) -> RequestBuilder {
+        self.client
+            .delete(format!("{}/rest/v1/{}?id=not.is.null", self.url, table))
             .header("apikey",self.anon_key.clone())
             .header("Authorization", format!("Bearer {}", self.token))
     }

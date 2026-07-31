@@ -1,7 +1,7 @@
 // Black Server Book CLI ("bsb") — a genuinely standalone binary: it does
 // NOT require the desktop GUI app, only the `native` Cargo feature (real
 // std::fs + a minimal Tokio runtime, no webview/GUI deps at all). Reuses
-// the exact same storage/auth logic as the GUI (peeplist::api) rather than
+// the exact same storage/auth logic as the GUI (black_server_book::api) rather than
 // re-implementing it, so the Local vault this writes to is byte-for-byte
 // what the desktop app reads, and Synced-vault behavior can't drift from
 // the GUI's own.
@@ -19,9 +19,9 @@
 //   bsb whoami                    show your Local vault's Self entity, plus
 //                                  your Synced account if logged in
 
-use peeplist::api::{self, ActiveStorage, VaultKind};
-use peeplist::quick_capture;
-use peeplist::types::{MomentMetadata, NewMomentType};
+use black_server_book::api::{self, ActiveStorage, VaultKind};
+use black_server_book::quick_capture;
+use black_server_book::types::{MomentMetadata, NewMomentType};
 use std::io::{self, Write};
 
 // Credential persistence — deliberately a plain JSON file (chmod 600 on
@@ -119,7 +119,7 @@ fn prompt(label: &str) -> Result<String, String> {
 async fn cmd_login() -> Result<(), String> {
     let email = prompt("Email: ")?;
     let password = rpassword::prompt_password("Password: ").map_err(|e| e.to_string())?;
-    let resp = api::login(email, password).await?;
+    let resp = api::login(email, password, None).await?;
     let sess = session::Session {
         access_token: resp.access_token,
         refresh_token: resp.refresh_token,
@@ -211,7 +211,7 @@ async fn cmd_add(text: &str, synced: bool) -> Result<(), String> {
         storage.update_moment_field(created.id.clone(), "due_at", serde_json::json!(due)).await
             .map_err(|e| e.to_string())?;
     }
-    if parsed.has_metadata() {
+    if parsed.has_metadata() || !parsed.additional_entity_ids.is_empty() {
         let metadata = MomentMetadata {
             tags: parsed.tags_add.clone(),
             sort_index: None,
@@ -220,7 +220,7 @@ async fn cmd_add(text: &str, synced: bool) -> Result<(), String> {
             scheduled_at: parsed.scheduled_at.clone(),
             until_at: parsed.until_at.clone(),
             depends_on: Vec::new(),
-            additional_entity_ids: Vec::new(),
+            additional_entity_ids: parsed.additional_entity_ids.clone(),
         };
         storage.update_moment_field(created.id.clone(), "metadata", serde_json::json!(metadata)).await
             .map_err(|e| e.to_string())?;

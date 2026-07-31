@@ -1,5 +1,5 @@
 [package]
-name = "peeplist"
+name = "black_server_book"
 version = "0.1.0"
 authors = ["A.O. Poston <aotisg@gmail.com>"]
 edition = "2021"
@@ -17,7 +17,7 @@ reqwest = { version = "0.13.4", features = ["json"] }
 serde = { version = "1.0.228", features = ["derive"] }
 tracing = "0.1.44"
 chrono = { version = "0.4", features = ["serde"] }
-web-sys = { version = "0.3", features = ["console", "Window", "Storage"] }
+web-sys = { version = "0.3", features = ["console", "Window", "Storage", "Navigator"] }
 dotenv = "0.15.0"
 uuid = { version = "1.23.2", features = ["serde", "v4", "js"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
@@ -26,6 +26,10 @@ futures = "0.3.32"
 # dioxus-sdk-window = "0.7.0"
 # dioxus-sdk = { version = "0.7", features = ["window"] }
 gloo-events = "0.2"
+# Turns a wasm panic's default cryptic "unreachable executed" trap into a
+# real message + stack trace in the browser devtools console — see
+# main.rs's console_error_panic_hook::set_once() call.
+console_error_panic_hook = "0.1"
 dioxus-primitives = { git = "https://github.com/DioxusLabs/components", version = "0.0.1", default-features = false }
 lumen-blocks = { git = "https://github.com/Leaf-Computer/lumen-blocks.git", tag = "v0.3.0" }
 # YAML (de)serialization for the local vault format (see src/api/vault_format.rs).
@@ -41,7 +45,7 @@ directories = { version = "5", optional = true }
 rpassword = { version = "7", optional = true }
 # CLI-only: the GUI never needs its own top-level async runtime — Dioxus's
 # desktop build bundles one internally — but a standalone `bsb` binary has
-# nothing driving `peeplist::api`'s async fns (or reqwest's own internal
+# nothing driving `black_server_book::api`'s async fns (or reqwest's own internal
 # I/O) without this.
 tokio = { version = "1", features = ["rt", "macros"], optional = true }
 

@@ -5,7 +5,7 @@ use std::fmt;
 use dioxus::prelude::*;
 use crate::types::*;
 use crate::api::VaultKind;
-use views::{Logout, LoginCMP, Home};
+use views::{Logout, LoginCMP, ResetPasswordCmp, Home};
 use layouts::{Navbar};
 
 
@@ -46,6 +46,9 @@ enum Route {
 
     #[route("/login")]
     LoginCMP {},
+
+    #[route("/reset-password")]
+    ResetPasswordCmp {},
 
     #[layout(Navbar)]
         #[route("/")]
@@ -343,7 +346,42 @@ pub struct AppState {
 
 fn main() {
     dotenv::from_path("./docker/.env").ok();
+    // Turns a wasm panic's default cryptic "unreachable executed" trap into
+    // a real message + stack trace in the browser devtools console. A
+    // no-op on desktop (native panics already print a normal message to
+    // stderr on their own), so this isn't cfg-gated — just harmless there.
+    console_error_panic_hook::set_once();
     dioxus::launch(App);
+}
+
+// Minimal crash/error visibility (2026-07-29, see scripts/2026-07-29-
+// error-reports.sql and api::report_error) — window.onerror and
+// unhandledrejection are the two JS-level events that "something broke and
+// nobody but this one browser tab knows" actually flows through, so a
+// single global listener here catches both regardless of which view is
+// currently mounted. Same document::eval-persistent-listener pattern
+// layouts::Navbar's global keyboard shortcuts already use — this works
+// identically on desktop (a real webview, real JS) as on web, so it isn't
+// cfg-gated either.
+const GLOBAL_ERROR_SCRIPT: &str = r#"
+    window.addEventListener('error', (e) => {
+        dioxus.send({
+            message: e.message || 'window.onerror with no message',
+            context: e.filename ? (e.filename + ':' + e.lineno + ':' + e.colno) : null,
+        });
+    });
+    window.addEventListener('unhandledrejection', (e) => {
+        dioxus.send({
+            message: 'Unhandled promise rejection: ' + (e.reason ? String(e.reason) : 'unknown reason'),
+            context: null,
+        });
+    });
+"#;
+
+#[derive(serde::Deserialize, Clone)]
+struct GlobalErrorEvent {
+    message: String,
+    context: Option<String>,
 }
 
 #[component]
@@ -445,6 +483,28 @@ fn App() -> Element {
                 clog!("localStorage unavailable — starting with in-memory defaults");
             }
         }
+    });
+
+    let mut error_listener_started = use_signal(|| false);
+    use_effect(move || {
+        if *error_listener_started.read() {
+            return;
+        }
+        error_listener_started.set(true);
+        spawn(async move {
+            let mut eval = document::eval(GLOBAL_ERROR_SCRIPT);
+            while let Ok(event) = eval.recv::<GlobalErrorEvent>().await {
+                let token = state.auth_token.read().clone();
+                #[cfg(not(feature = "desktop"))]
+                let user_agent = web_sys::window()
+                    .and_then(|w| w.navigator().user_agent().ok());
+                #[cfg(feature = "desktop")]
+                let user_agent = None;
+                spawn(async move {
+                    api::report_error(token, event.message, event.context, user_agent).await;
+                });
+            }
+        });
     });
 
     // The `rsx!` macro lets us define HTML inside of rust. It expands to an Element with all of our HTML inside.
