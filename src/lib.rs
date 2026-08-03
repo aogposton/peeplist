@@ -21,6 +21,9 @@ pub mod types;
 #[path = "quick_capture.rs"]
 pub mod quick_capture;
 
+#[path = "taskwarrior_date.rs"]
+pub mod taskwarrior_date;
+
 // Deliberately not also re-declared at this top level — `api` (below)
 // already declares `pub mod vault_format;` itself (api/local_desktop.rs
 // imports it as `crate::api::vault_format`), and Rust treats two separate

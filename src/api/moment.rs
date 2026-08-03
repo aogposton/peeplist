@@ -93,3 +93,19 @@ pub async fn getDeletedMoments(token: String) -> Result<Vec<MomentType>, reqwest
 pub async fn restoreMoment(id: String, token: String) -> Result<(), reqwest::Error> {
     update_moment_field(id, "deleted_at", Value::Null, token).await
 }
+
+// Offline-first sync's LWW conflict check (see layouts/navbar.rs's flush
+// loop) — before replaying a queued field edit, this fetches the row as it
+// currently stands on the server so its `updated_at` can be compared
+// against the value captured when the edit was staged. `None` means the
+// row is genuinely gone server-side (a real hard delete elsewhere, or
+// already caught by RLS) rather than an error — the flush loop treats that
+// the same as "nothing to conflict with," dropping the stale edit.
+pub async fn getMomentById(id: String, token: String) -> Result<Option<MomentType>, reqwest::Error> {
+    let response = SupabaseClient::new(token)
+        .get(&format!("moments?id=eq.{id}&select=*,reactions(*)"))
+        .send()
+        .await?;
+    let mut moments: Vec<MomentType> = response.json().await?;
+    Ok(moments.pop())
+}

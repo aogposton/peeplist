@@ -1,15 +1,14 @@
 use dioxus::prelude::*;
+use chrono::Datelike;
 use crate::types::*;
 use crate::theme::*;
 use crate::AppState;
 use crate::ABView;
 use crate::View;
 use crate::api::{ActiveStorage, VaultKind, is_self_entity};
-use crate::components::GraphViewCmp;
+use crate::components::{GraphViewCmp, CheckboxCmp};
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
-use lumen_blocks::components::input::Input;
-use lumen_blocks::components::label::Label;
 
 fn stat_row(label: &str, value: &str) -> Element {
     rsx! {
@@ -357,8 +356,9 @@ pub fn entity_view_cmp() -> Element {
 
     let tab_variant = |open: bool| if open { ButtonVariant::Secondary } else { ButtonVariant::Ghost };
     let info_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::Info;
-    let history_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::History;
+    let story_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::Story;
     let stats_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::Stats;
+    let momentos_active = *activity_bar_tgl.read() && *activity_bar_view.read() == ABView::Momentos;
 
     rsx! {
         div {
@@ -397,19 +397,19 @@ pub fn entity_view_cmp() -> Element {
                         "Info"
                     }
                     Button {
-                        variant: tab_variant(history_active),
+                        variant: tab_variant(story_active),
                         size: ButtonSize::Small,
                         on_click: move |_| {
-                            if history_active {
+                            if story_active {
                                 activity_bar_tgl.set(false);
                                 backdropTgl.set(false);
                             } else {
-                                activity_bar_view.set(ABView::History);
+                                activity_bar_view.set(ABView::Story);
                                 backdropTgl.set(true);
                                 activity_bar_tgl.set(true);
                             }
                         },
-                        "History"
+                        "Story"
                     }
                     Button {
                         variant: tab_variant(stats_active),
@@ -426,6 +426,21 @@ pub fn entity_view_cmp() -> Element {
                         },
                         "Stats"
                     }
+                    Button {
+                        variant: tab_variant(momentos_active),
+                        size: ButtonSize::Small,
+                        on_click: move |_| {
+                            if momentos_active {
+                                activity_bar_tgl.set(false);
+                                backdropTgl.set(false);
+                            } else {
+                                activity_bar_view.set(ABView::Momentos);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
+                        },
+                        "Momentos"
+                    }
                 }
             }
         }
@@ -433,7 +448,7 @@ pub fn entity_view_cmp() -> Element {
 }
 
 #[component]
-pub fn ab_history_cmp() -> Element {
+pub fn ab_story_cmp() -> Element {
     let state = use_context::<AppState>();
     let current_entity = state.current_entity;
     let moments = state.moments;
@@ -460,6 +475,7 @@ pub fn ab_history_cmp() -> Element {
     let kind_label = |t: i64| match t {
         2i64 => "Promise",
         3i64 => "Note",
+        4i64 => "Momento",
         _ => "Task",
     };
 
@@ -472,7 +488,7 @@ pub fn ab_history_cmp() -> Element {
                 class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
                 span {
                     class: "text-sm font-medium text-muted-foreground",
-                    "History — {entity_name}"
+                    "Story — {entity_name}"
                 }
                 button {
                     class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
@@ -485,11 +501,11 @@ pub fn ab_history_cmp() -> Element {
             }
 
             div {
-                class: "flex flex-col gap-3 px-4 py-4 overflow-y-auto flex-1 min-h-0",
+                class: "flex flex-col gap-3 px-4 py-4 pb-[200px] overflow-y-auto flex-1 min-h-0",
                 if entity_moments.is_empty() {
                     div {
                         class: "text-sm text-muted-foreground text-center py-8",
-                        "No history yet for {entity_name}."
+                        "No story yet for {entity_name}."
                     }
                 } else {
                     for m in entity_moments.iter() {
@@ -547,6 +563,422 @@ pub fn ab_history_cmp() -> Element {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Momentos (2026-08-02) — an entity's recurring/personal moments (birthdays,
+// anniversaries, "call every Sunday"). Each momento is one MomentType
+// "template" row (moment_type_id 4): its own `due_at` is the RRULE's anchor
+// date, `metadata.recurrence_rule` the RRULE string — see src/momento.rs for
+// the expansion logic every list below goes through, and MomentMetadata's
+// own doc comment (types.rs) for why occurrences are never real rows.
+#[component]
+pub fn ab_momentos_cmp() -> Element {
+    let state = use_context::<AppState>();
+    let current_entity = state.current_entity;
+    let mut moments = state.moments;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+    let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
+
+    let entity = current_entity.read().clone();
+    let entity_name = entity.as_ref().map(|e| e.name.clone()).unwrap_or_else(|| "All".to_string());
+    let entity_id = entity.as_ref().map(|e| e.id.clone());
+    let today = chrono::Utc::now().date_naive();
+
+    let mut momentos: Vec<MomentType> = moments.read().iter()
+        .filter(|m| Some(m.entity_id.clone()) == entity_id && m.moment_type_id == 4i64)
+        .cloned()
+        .collect();
+    momentos.sort_by(|a, b| a.title.cmp(&b.title));
+
+    let mut new_title = use_signal(String::new);
+    // The RRULE's DTSTART anchor — the first occurrence, and (for Weekly/
+    // Monthly/Yearly) which day-of-week/day-of-month/day-of-year the
+    // pattern repeats on. Labeled "Start date" in the form now — it was
+    // unclear before whether this was a start or stop date.
+    let mut new_start = use_signal(String::new);
+    // Optional RRULE UNTIL — when set, the series stops producing
+    // occurrences after this date. Deliberately a separate concept from a
+    // regular moment's `until_at` (components::moment's Missed-view field,
+    // urgency::is_missed) despite the similar name: this is baked directly
+    // into the momento's own recurrence_rule string as UNTIL=..., not
+    // metadata.until_at.
+    let mut new_stop_date = use_signal(String::new);
+    let mut new_rule = use_signal(String::new);
+    let mut new_reveal = use_signal(String::new);
+    let mut create_error = use_signal(|| None::<String>);
+    // Which repeat frequency is currently selected — drives both button
+    // highlighting and whether the weekly day-picker shows at all (only
+    // when Weekly is the active choice, not unconditionally). None until
+    // something's picked; new_rule stays empty until then too.
+    let mut frequency_mode = use_signal(|| None::<&'static str>);
+    let mut weekly_days = use_signal(Vec::<chrono::Weekday>::new);
+
+    fn day_code(day: chrono::Weekday) -> &'static str {
+        use chrono::Weekday::*;
+        match day {
+            Mon => "MO", Tue => "TU", Wed => "WE", Thu => "TH", Fri => "FR", Sat => "SA", Sun => "SU",
+        }
+    }
+    fn day_label(day: chrono::Weekday) -> &'static str {
+        use chrono::Weekday::*;
+        match day {
+            Mon => "Mon", Tue => "Tue", Wed => "Wed", Thu => "Thu", Fri => "Fri", Sat => "Sat", Sun => "Sun",
+        }
+    }
+    const WEEK_DAYS: [chrono::Weekday; 7] = {
+        use chrono::Weekday::*;
+        [Mon, Tue, Wed, Thu, Fri, Sat, Sun]
+    };
+    const FREQUENCY_BUTTONS: [&str; 4] = ["Daily", "Weekly", "Monthly", "Yearly"];
+
+    fn base_rule_for(mode: &str, byday: &str) -> Option<String> {
+        match mode {
+            "Daily" => Some("FREQ=DAILY".to_string()),
+            "Weekly" => if byday.is_empty() { None } else { Some(format!("FREQ=WEEKLY;BYDAY={byday}")) },
+            "Monthly" => Some("FREQ=MONTHLY".to_string()),
+            "Yearly" => Some("FREQ=YEARLY".to_string()),
+            _ => None,
+        }
+    }
+
+    // Recomputes new_rule from whatever's currently selected — called
+    // after every change (frequency button, day toggle, stop date) so
+    // new_rule always reflects the full current state rather than each
+    // handler patching it ad hoc.
+    let mut rebuild_rule = move || {
+        let Some(mode) = *frequency_mode.read() else {
+            new_rule.set(String::new());
+            return;
+        };
+        let byday = weekly_days.read().iter().copied().map(day_code).collect::<Vec<_>>().join(",");
+        let Some(base) = base_rule_for(mode, &byday) else {
+            new_rule.set(String::new());
+            return;
+        };
+        let stop = new_stop_date.read().clone();
+        if stop.is_empty() {
+            new_rule.set(base);
+        } else {
+            // Basic (no-dash/colon) form matching DTSTART's own formatting
+            // (see momento::parse_rule_set) — end of that calendar day, so
+            // the stop date's own occurrence still counts as included.
+            let compact = stop.replace('-', "");
+            new_rule.set(format!("{base};UNTIL={compact}T235959Z"));
+        }
+    };
+
+    let mut toggle_weekly_day = move |day: chrono::Weekday| {
+        let mut days = weekly_days.read().clone();
+        if days.contains(&day) {
+            days.retain(|d| *d != day);
+        } else {
+            days.push(day);
+        }
+        // Stable Mon->Sun order regardless of click order, so the RRULE's
+        // BYDAY list is deterministic rather than reflecting click history.
+        days.sort_by_key(|d| d.num_days_from_monday());
+        weekly_days.set(days);
+        rebuild_rule();
+    };
+
+    let create_momento = move |_| {
+        let Some(eid) = entity_id.clone() else { return };
+        let title = new_title.read().clone();
+        let start = new_start.read().clone();
+        let rule = new_rule.read().clone();
+        let reveal = new_reveal.read().clone();
+        if title.trim().is_empty() || start.is_empty() || rule.trim().is_empty() {
+            create_error.set(Some("Title, start date, and a repeat frequency are all required.".to_string()));
+            return;
+        }
+        create_error.set(None);
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let new_moment = NewMomentType {
+                title: title.clone(),
+                description: None,
+                gravity: None,
+                entity_id: eid,
+                moment_type_id: 4,
+                deleted_at: None,
+            };
+            match storage.create_moment(new_moment).await {
+                Ok(mut created) => {
+                    let due_at = format!("{start}T09:00");
+                    let reveal_lead = if reveal.is_empty() { None } else { Some(reveal.clone()) };
+                    let meta = MomentMetadata { recurrence_rule: Some(rule.clone()), reveal_lead, ..Default::default() };
+                    let _ = storage.update_moment_field(created.id.clone(), "due_at", serde_json::json!(due_at)).await;
+                    let _ = storage.update_moment_field(created.id.clone(), "metadata", serde_json::json!(meta)).await;
+                    created.due_at = Some(due_at);
+                    created.metadata = Some(meta);
+                    moments.write().insert(0, created);
+                    new_title.set(String::new());
+                    new_start.set(String::new());
+                    new_stop_date.set(String::new());
+                    new_rule.set(String::new());
+                    new_reveal.set(String::new());
+                    frequency_mode.set(None);
+                    weekly_days.set(Vec::new());
+                }
+                Err(e) => {
+                    clog!("Error creating momento: {}", e);
+                    create_error.set(Some(format!("Couldn't create that: {e}")));
+                }
+            }
+        });
+    };
+
+    let toggle_completed = move |momento_id: String, date: String| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            crate::components::patch_moment_metadata(&storage, moments, momento_id, move |m| {
+                if m.momento_completed_occurrences.contains(&date) {
+                    m.momento_completed_occurrences.retain(|d| d != &date);
+                } else {
+                    m.momento_completed_occurrences.push(date);
+                }
+            }).await;
+        });
+    };
+
+    // Deleting a single occurrence and "skipping" it are the same action
+    // (2026-08-02 product decision) — both just exclude that one date from
+    // the pattern going forward. The series itself continues; only this one
+    // date drops out permanently.
+    let delete_occurrence = move |momento_id: String, date: String| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            crate::components::patch_moment_metadata(&storage, moments, momento_id, move |m| {
+                if !m.momento_excluded_occurrences.contains(&date) {
+                    m.momento_excluded_occurrences.push(date);
+                }
+            }).await;
+        });
+    };
+
+    // Deletes the whole momento template — every past and future occurrence,
+    // not just one date. Distinct from delete_occurrence above.
+    let delete_all_iterations = move |momento: MomentType| {
+        let token = auth_token;
+        let vault = active_vault;
+        let momento_id = momento.id.clone();
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.delete_moment(momento).await {
+                Ok(()) => moments.write().retain(|m| m.id != momento_id),
+                Err(e) => clog!("Error deleting momento: {}", e),
+            }
+        });
+    };
+
+    rsx! {
+        div {
+            class: "flex flex-col h-full bg-background",
+            div {
+                class: "flex items-center justify-between h-14 px-4 border-b border-border shrink-0",
+                span { class: "text-sm font-medium text-muted-foreground", "Momentos — {entity_name}" }
+                button {
+                    class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
+                    onclick: move |_| {
+                        activity_bar_tgl.set(false);
+                        backdropTgl.set(false);
+                    },
+                    "×"
+                }
+            }
+            div {
+                class: "flex flex-col gap-3 px-4 py-4 pb-[200px] overflow-y-auto flex-1 min-h-0",
+                if momentos.is_empty() {
+                    div {
+                        class: "text-sm text-muted-foreground text-center py-4",
+                        "No momentos yet for {entity_name}."
+                    }
+                } else {
+                    for m in momentos.iter() {
+                        {
+                            let meta = m.metadata.clone().unwrap_or_default();
+                            let occurrences = meta.recurrence_rule.as_deref()
+                                .map(|_| crate::momento::next_occurrences(m.due_at.as_deref().unwrap_or_default(), &meta, today, 3))
+                                .unwrap_or_default();
+                            let rule_label = meta.recurrence_rule.as_deref().map(crate::momento::describe_rule).unwrap_or_default();
+                            rsx! {
+                                div {
+                                    key: "{m.id}",
+                                    class: "rounded-lg border border-border p-3",
+                                    div {
+                                        class: "flex items-start justify-between gap-2 mb-2",
+                                        span { class: "text-sm font-medium text-foreground", "{m.title}" }
+                                        div {
+                                            class: "flex items-center gap-2 shrink-0",
+                                            span {
+                                                class: "text-xs px-2 py-0.5 rounded-full border border-border text-muted-foreground",
+                                                "{rule_label}"
+                                            }
+                                            button {
+                                                class: "text-xs text-destructive hover:underline cursor-pointer",
+                                                onclick: {
+                                                    let momento = m.clone();
+                                                    move |_| delete_all_iterations(momento.clone())
+                                                },
+                                                "Delete all"
+                                            }
+                                        }
+                                    }
+                                    div {
+                                        class: "flex flex-col gap-1.5",
+                                        for occ in occurrences.iter() {
+                                            {
+                                                let date_str = occ.date.format("%Y-%m-%d").to_string();
+                                                let momento_id = m.id.clone();
+                                                let momento_id2 = m.id.clone();
+                                                let date_str2 = date_str.clone();
+                                                let date_str3 = date_str.clone();
+                                                let completed = occ.completed;
+                                                rsx! {
+                                                    div {
+                                                        key: "{date_str}",
+                                                        class: "flex items-center justify-between gap-2 text-xs",
+                                                        div {
+                                                            class: "flex items-center gap-2",
+                                                            CheckboxCmp {
+                                                                checked: completed,
+                                                                on_change: move |checked: bool| {
+                                                                    let _ = checked;
+                                                                    toggle_completed(momento_id.clone(), date_str2.clone())
+                                                                },
+                                                                disabled: false,
+                                                            }
+                                                            span {
+                                                                class: if completed { "text-muted-foreground line-through" } else { "text-foreground" },
+                                                                "{occ.date.format(\"%b %d, %Y\")}"
+                                                            }
+                                                        }
+                                                        button {
+                                                            class: "text-destructive hover:underline cursor-pointer shrink-0",
+                                                            onclick: move |_| delete_occurrence(momento_id2.clone(), date_str3.clone()),
+                                                            "Delete this"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                div {
+                    class: "rounded-lg border border-border p-3 flex flex-col gap-2 mt-2",
+                    span { class: "text-sm font-medium text-foreground", "Add a momento" }
+                    input {
+                        r#type: "text",
+                        placeholder: "Title (e.g. \"Call Mom\")",
+                        class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                        value: "{new_title.read()}",
+                        oninput: move |e| new_title.set(e.value()),
+                    }
+                    div {
+                        class: "flex flex-col gap-1",
+                        label { class: "text-xs text-muted-foreground", "Start date — the first occurrence" }
+                        input {
+                            r#type: "date",
+                            lang: "en-US",
+                            class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            value: "{new_start.read()}",
+                            oninput: move |e| new_start.set(e.value()),
+                        }
+                    }
+                    div {
+                        class: "flex flex-col gap-1",
+                        label { class: "text-xs text-muted-foreground", "Stop date (optional) — series ends after this date" }
+                        input {
+                            r#type: "date",
+                            lang: "en-US",
+                            class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            value: "{new_stop_date.read()}",
+                            oninput: move |e| {
+                                new_stop_date.set(e.value());
+                                rebuild_rule();
+                            },
+                        }
+                    }
+                    div {
+                        class: "flex flex-col gap-1",
+                        label { class: "text-xs text-muted-foreground", "Repeat" }
+                        div {
+                            class: "flex flex-wrap gap-1.5",
+                            for label in FREQUENCY_BUTTONS {
+                                button {
+                                    key: "{label}",
+                                    class: if *frequency_mode.read() == Some(label) {
+                                        "rounded-md border border-transparent bg-primary text-primary-foreground text-xs px-2 py-1 cursor-pointer"
+                                    } else {
+                                        "rounded-md border border-border bg-background text-xs px-2 py-1 hover:bg-muted transition-colors cursor-pointer"
+                                    },
+                                    onclick: move |_| {
+                                        frequency_mode.set(Some(label));
+                                        rebuild_rule();
+                                    },
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
+                    if *frequency_mode.read() == Some("Weekly") {
+                        div {
+                            class: "flex flex-col gap-1",
+                            label { class: "text-xs text-muted-foreground", "On these days" }
+                            div {
+                                class: "flex flex-wrap gap-1",
+                                for day in WEEK_DAYS {
+                                    button {
+                                        key: "{day}",
+                                        class: if weekly_days.read().contains(&day) {
+                                            "rounded-md border border-transparent bg-primary text-primary-foreground text-xs px-2 py-1 cursor-pointer"
+                                        } else {
+                                            "rounded-md border border-border bg-background text-xs px-2 py-1 hover:bg-muted transition-colors cursor-pointer"
+                                        },
+                                        onclick: move |_| toggle_weekly_day(day),
+                                        "{day_label(day)}"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    div {
+                        class: "flex flex-col gap-1",
+                        label { class: "text-xs text-muted-foreground", "Show in the moment list" }
+                        select {
+                            class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                            value: "{new_reveal.read()}",
+                            onchange: move |e| new_reveal.set(e.value()),
+                            for (label, value) in crate::momento::reveal_presets() {
+                                option { key: "{value}", value: "{value}", "{label}" }
+                            }
+                        }
+                    }
+                    if let Some(msg) = create_error.read().as_ref() {
+                        p { class: "text-xs text-destructive", "{msg}" }
+                    }
+                    button {
+                        class: "rounded-md border border-transparent bg-primary text-primary-foreground text-sm px-3 py-1.5 font-medium hover:bg-primary/90 transition-colors cursor-pointer self-start",
+                        onclick: create_momento,
+                        "Add momento"
                     }
                 }
             }
@@ -620,7 +1052,7 @@ pub fn ab_stats_cmp() -> Element {
                 }
             }
             div {
-                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1 min-h-0",
+                class: "flex flex-col gap-4 px-4 py-4 pb-[200px] overflow-y-auto flex-1 min-h-0",
                 div {
                     class: "rounded-lg border border-border p-4",
                     h3 {
@@ -720,13 +1152,73 @@ pub fn ab_info_cmp() -> Element {
                 }
             }
             div {
-                class: "flex flex-col gap-4 px-4 py-4 overflow-y-auto flex-1 min-h-0",
+                class: "flex flex-col gap-4 px-4 py-4 pb-[200px] overflow-y-auto flex-1 min-h-0",
                 div {
                     class: "rounded-lg border border-border p-4",
                     div {
                         class: "flex flex-col divide-y divide-border",
                         {stat_row("Name", &entity_name)}
-                        {stat_row("Type", &type_name)}
+                        // Editable once an entity exists to edit (2026-08-01)
+                        // — Type used to only be settable in the now-removed
+                        // "Add Entity" modal, at creation time, with no way
+                        // back in afterward. Entities are now always created
+                        // bare (via @mention in the composer), so this is
+                        // the only place Type can ever be set. Falls back to
+                        // the plain read-only row for the "All" pseudo-view
+                        // (entity is None there — nothing to edit).
+                        if let Some(e) = entity.as_ref() {
+                            div {
+                                class: "flex justify-between items-center gap-3 text-sm py-1.5",
+                                span { class: "text-muted-foreground shrink-0", "Type" }
+                                select {
+                                    class: "rounded-md border border-transparent hover:border-input focus:border-input bg-transparent text-right text-sm text-foreground px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                    value: "{e.entity_type_id.clone().unwrap_or_default()}",
+                                    oninput: {
+                                        let entity_id = e.id.clone();
+                                        move |ev: Event<FormData>| {
+                                            let new_val = ev.value();
+                                            let entity_id = entity_id.clone();
+                                            let token = auth_token;
+                                            let vault = active_vault;
+                                            spawn(async move {
+                                                let new_type = if new_val.is_empty() { None } else { Some(new_val.clone()) };
+                                                let value = match &new_type {
+                                                    Some(v) => serde_json::json!(v),
+                                                    None => serde_json::Value::Null,
+                                                };
+                                                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                match storage.update_entity_field(entity_id.clone(), "entity_type_id", value).await {
+                                                    Ok(_) => {
+                                                        let mut list = entities.write();
+                                                        if let Some(ent) = list.iter_mut().find(|x| x.id == entity_id) {
+                                                            ent.entity_type_id = new_type.clone();
+                                                        }
+                                                        if let Some(cur) = current_entity.write().as_mut() {
+                                                            if cur.id == entity_id {
+                                                                cur.entity_type_id = new_type;
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(err) => log::info!("Error updating entity type: {}", err),
+                                                }
+                                            });
+                                        }
+                                    },
+                                    option { value: "", "Not set" }
+                                    // "Self" is a reserved marker, not a
+                                    // real relationship type to hand-pick —
+                                    // same exclusion the old modal used.
+                                    for entity_type in entity_types.read().iter().filter(|t| t.id != crate::types::SELF_ENTITY_TYPE_ID) {
+                                        option {
+                                            value: "{entity_type.id}",
+                                            "{entity_type.name}"
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            {stat_row("Type", &type_name)}
+                        }
                         {stat_row("Known since", &known_since)}
                         if let Some(e) = entity.as_ref() {
                             {editable_stat_row("Relationship", &meta.relationship, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.relationship = v)}
@@ -845,177 +1337,6 @@ pub fn ab_info_cmp() -> Element {
     }
 }
 
-#[component]
-pub fn EntityModalCmp() -> Element {
-    let state = use_context::<AppState>();
-    let mut entityModalTgl = state.entityModalTgl;
-    let mut entities = state.entities;
-    let auth_token = state.auth_token;
-    let active_vault = state.active_vault;
-    let mut entityTypes = use_signal(||vec![]);
-    let mut form = use_signal(EntityForm::default);
-
-
-    let mut onsubmit = move |_| {
-        let form_data = form.read().clone();
-        let token = auth_token;
-        let vault = active_vault;
-        form.set(EntityForm::default());
-        spawn(async move {
-            let metadata = EntityMetadata {
-                relationship: form_data.relationship.clone(),
-                how_met: form_data.meeting.clone(),
-                birthday: form_data.bday.clone(),
-                location: form_data.location.clone(),
-                why: form_data.why.clone(),
-            };
-            let new_entity = NewEntityType {
-                name: form_data.name.clone(),
-                entity_type_id: if form_data.entity_type_sel.is_empty() { None } else { Some(form_data.entity_type_sel.clone()) },
-                parent_entity_id: None,
-                user_id: None,
-                archived_at: None,
-                metadata: Some(metadata),
-            };
-
-            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-            match storage.create_entity(new_entity).await {
-                Ok(created) => {
-                    entities.write().insert(0, created);
-                }
-                Err(e) => {
-                    log::info!("Error creating entity: {}", e);
-                }
-            }
-        });
-    };
-
-    use_effect(move || {
-        // Read synchronously so the effect actually reruns on vault switch —
-        // see the matching comment in views/home.rs's fetch effect.
-        let vault = *active_vault.read();
-        let token = auth_token.read().clone();
-        spawn(async move {
-            let storage = ActiveStorage::for_vault(vault, token);
-            match storage.get_entity_types().await {
-                Ok(data) => entityTypes.set(data),
-                Err(e) => clog!("Error fetching entities: {}",e),
-            }
-        });
-    });
-    
-    rsx! {
-        if *entityModalTgl.read() {
-            div {
-                class: "fixed inset-0 bg-black/40 z-100 flex items-center justify-center p-4",
-                onclick: move |_| entityModalTgl.set(false),
-                div {
-                    class: "w-full max-w-md rounded-lg border border-border bg-card shadow-lg",
-                    onclick: move |e| e.stop_propagation(),
-                    div {
-                        class: "flex items-center justify-between h-14 px-4 border-b border-border",
-                        span { class: "text-lg font-semibold text-foreground", "New Entity" }
-                        button {
-                            class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-lg leading-none",
-                            onclick: move |_| entityModalTgl.set(false),
-                            "×"
-                        }
-                    }
-                    div {
-                        class: "flex flex-col gap-4 px-4 py-4 max-h-[70vh] overflow-y-auto",
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "Type" }
-                            select {
-                                class: "w-full h-10 rounded-md border border-input bg-background text-sm text-foreground px-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                value: "{form.read().entity_type_sel}",
-                                oninput: move |e| {
-                                    form.write().entity_type_sel = e.value();
-                                },
-                                option { value: "", "Select a type..." }
-                                // "Self" is a reserved marker (exactly one
-                                // per account, auto-provisioned — see
-                                // types.rs's SELF_ENTITY_TYPE_ID), not a
-                                // real relationship type to hand-pick when
-                                // creating a new person.
-                                for entity_type in entityTypes.iter().filter(|t| t.id != crate::types::SELF_ENTITY_TYPE_ID) {
-                                    option {
-                                        value: "{entity_type.id}",
-                                        "{entity_type.name}"
-                                    }
-                                }
-                            }
-                        }
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "Name" }
-                            Input {
-                                full_width: true,
-                                value: "{form.read().name}",
-                                on_input: move |e: Event<FormData>| form.write().name = e.value(),
-                            }
-                        }
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "Relationship to you" }
-                            Input {
-                                full_width: true,
-                                value: "{form.read().relationship}",
-                                on_input: move |e: Event<FormData>| form.write().relationship = e.value(),
-                            }
-                        }
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "How you met" }
-                            Input {
-                                full_width: true,
-                                value: "{form.read().meeting}",
-                                on_input: move |e: Event<FormData>| form.write().meeting = e.value(),
-                            }
-                        }
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "Birthday" }
-                            Input {
-                                full_width: true,
-                                value: "{form.read().bday}",
-                                on_input: move |e: Event<FormData>| form.write().bday = e.value(),
-                            }
-                        }
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "Their location" }
-                            Input {
-                                full_width: true,
-                                value: "{form.read().location}",
-                                on_input: move |e: Event<FormData>| form.write().location = e.value(),
-                            }
-                        }
-                        div {
-                            class: "flex flex-col gap-y-1.5",
-                            Label { "Why they matter" }
-                            Input {
-                                full_width: true,
-                                value: "{form.read().why}",
-                                on_input: move |e: Event<FormData>| form.write().why = e.value(),
-                            }
-                        }
-                    }
-                    div {
-                        class: "px-4 py-3 border-t border-border",
-                        Button {
-                            variant: ButtonVariant::Primary,
-                            full_width: true,
-                            on_click: move |e| onsubmit(e),
-                            "Create Entity"
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod individuation_tests {
     use super::*;
@@ -1027,6 +1348,7 @@ mod individuation_tests {
             entity_type_id: None,
             parent_entity_id: None,
             created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
             drift,
             metadata: None,
         }

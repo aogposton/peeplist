@@ -25,7 +25,13 @@ const VAULT_META_KEY: &str = "peeplist_vault:meta";
 // distinct set of strings in use across the vault plus a small built-in
 // default list"). Not meant to be exhaustive, just non-empty on a brand
 // new vault so the "New Entity" type dropdown isn't blank.
-const DEFAULT_ENTITY_TYPES: &[&str] = &["Friend", "Family", "Colleague", "Partner"];
+const DEFAULT_ENTITY_TYPES: &[&str] = &[
+    "Friend", "Family", "Colleague", "Partner",
+    // 2026-08-01: broader entity model beyond just people — Person/Group
+    // already exist as Synced entity_types rows (see scripts/2026-08-01-
+    // more-entity-types.sql), added here too for parity across both backends.
+    "Person", "Group", "Place", "Thing", "Pet", "Organization", "Audience",
+];
 
 fn local_storage() -> Result<Storage, StorageError> {
     web_sys::window()
@@ -102,6 +108,10 @@ impl LocalStorage {
             entity_type_id: None,
             parent_entity_id: None,
             created_at: now(),
+            // Local vault has no LWW concept at all (single-device by
+            // definition) — this exists purely so the shared struct
+            // deserializes; nothing here ever reads it.
+            updated_at: now(),
             drift: 2.0,
             metadata: None,
         };
@@ -220,6 +230,7 @@ impl LocalStorage {
             deleted_at: None,
             reactions: None,
             created_at: now(),
+            updated_at: now(),
             depends_on: None,
             metadata: None,
         };
@@ -236,6 +247,7 @@ impl LocalStorage {
             entity_type_id: e.entity_type_id,
             parent_entity_id: e.parent_entity_id,
             created_at: now(),
+            updated_at: now(),
             drift: 2.0,
             metadata: e.metadata,
         };

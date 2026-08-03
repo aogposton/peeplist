@@ -221,6 +221,12 @@ async fn cmd_add(text: &str, synced: bool) -> Result<(), String> {
             until_at: parsed.until_at.clone(),
             depends_on: Vec::new(),
             additional_entity_ids: parsed.additional_entity_ids.clone(),
+            // Momentos aren't created via the CLI's quick-capture path —
+            // only through the GUI's dedicated Momentos tab.
+            recurrence_rule: None,
+            momento_completed_occurrences: vec![],
+            momento_excluded_occurrences: vec![],
+            reveal_lead: None,
         };
         storage.update_moment_field(created.id.clone(), "metadata", serde_json::json!(metadata)).await
             .map_err(|e| e.to_string())?;

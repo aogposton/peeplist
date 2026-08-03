@@ -16,7 +16,7 @@
 // `parse_entity_file` hands the body back untouched so a future write-back
 // can preserve it exactly.
 
-use crate::types::{EntityMetadata, EntityType, MomentMetadata, MomentType, ReactionType};
+use crate::types::{EntityMetadata, EntityType, MomentMetadata, MomentType, ReactionType, SELF_ENTITY_TYPE_ID};
 use serde::{Deserialize, Serialize};
 
 fn default_drift() -> f64 {
@@ -34,6 +34,19 @@ pub const LOCAL_SELF_ENTITY_ID: &str = "self";
 pub const SELF_FILENAME: &str = "self.md";
 
 pub const VAULT_SCHEMA_VERSION: u32 = 1;
+
+// Separate from VAULT_SCHEMA_VERSION above — a different format (the
+// multi-entity backup bundle, see below) with its own version cadence, not
+// the per-entity vault-file format's.
+pub const BACKUP_SCHEMA_VERSION: u32 = 1;
+
+// Same check as api::storage::is_self_entity, duplicated rather than
+// imported — storage.rs already imports LOCAL_SELF_ENTITY_ID *from* this
+// module, so importing is_self_entity back the other way would make the two
+// modules depend on each other for what's really just a two-line check.
+fn is_self_for_backup(entity: &EntityType) -> bool {
+    entity.id == LOCAL_SELF_ENTITY_ID || entity.entity_type_id.as_deref() == Some(SELF_ENTITY_TYPE_ID)
+}
 
 const BODY_PLACEHOLDER: &str =
     "<!-- Freeform notes below this line are yours — peeplist never rewrites this section. -->\n";
@@ -136,6 +149,17 @@ pub struct MomentEntry {
     // physically lives under. See MomentType::entity_ids.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub additional_entity_ids: Vec<String>,
+    // Momentos (2026-08-02, moment_type_id 4 only) — see MomentMetadata's
+    // own doc comment in types.rs for what these mean; same fields, just
+    // riding this file format's flattened shape instead of a nested blob.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub recurrence_rule: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub momento_completed_occurrences: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub momento_excluded_occurrences: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reveal_lead: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -145,24 +169,28 @@ pub struct ReactionEntry {
     pub value: i32,
 }
 
-// --- moment_type_id <-> "task"/"promise"/"note" -------------------------
+// --- moment_type_id <-> "task"/"promise"/"note"/"momento" ---------------
 // Mirrors the mapping already implemented as `kind_label` in
 // src/components/entity.rs — kept in sync by hand since that one renders
-// for display ("Task"/"Promise"/"Note") and this one is a wire format key
-// ("task"/"promise"/"note"), not worth sharing a single function over.
+// for display ("Task"/"Promise"/"Note"/"Momento") and this one is a wire
+// format key ("task"/"promise"/"note"/"momento"), not worth sharing a
+// single function over. moment_type_id 4 ("momento") added 2026-08-02 — see
+// scripts/2026-08-02-momento-type.sql for why it's pinned to exactly 4.
 
 fn moment_type_str(moment_type_id: i64) -> &'static str {
     match moment_type_id {
         2 => "promise",
         3 => "note",
+        4 => "momento",
         _ => "task",
     }
 }
 
-fn moment_type_id(kind: &str) -> i64 {
+pub(crate) fn moment_type_id(kind: &str) -> i64 {
     match kind {
         "promise" => 2,
         "note" => 3,
+        "momento" => 4,
         _ => 1,
     }
 }
@@ -206,6 +234,10 @@ pub(crate) fn moment_to_entry(m: &MomentType) -> MomentEntry {
         created_at: m.created_at.clone(),
         reactions: m.reactions.as_deref().unwrap_or(&[]).iter().map(reaction_to_entry).collect(),
         additional_entity_ids: meta.additional_entity_ids,
+        recurrence_rule: meta.recurrence_rule,
+        momento_completed_occurrences: meta.momento_completed_occurrences,
+        momento_excluded_occurrences: meta.momento_excluded_occurrences,
+        reveal_lead: meta.reveal_lead,
     }
 }
 
@@ -222,6 +254,10 @@ pub(crate) fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentTyp
         until_at: entry.until_at.clone(),
         depends_on: entry.depends_on.clone(),
         additional_entity_ids: entry.additional_entity_ids.clone(),
+        recurrence_rule: entry.recurrence_rule.clone(),
+        momento_completed_occurrences: entry.momento_completed_occurrences.clone(),
+        momento_excluded_occurrences: entry.momento_excluded_occurrences.clone(),
+        reveal_lead: entry.reveal_lead.clone(),
     };
     let metadata = if meta == MomentMetadata::default() { None } else { Some(meta) };
     let reactions = entry.reactions.iter().map(|r| entry_to_reaction(r, &entry.id)).collect::<Vec<_>>();
@@ -237,6 +273,10 @@ pub(crate) fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentTyp
         deleted_at: None,
         reactions: if reactions.is_empty() { None } else { Some(reactions) },
         created_at: entry.created_at.clone(),
+        // The vault file format has no updated_at of its own (Local vault
+        // has no LWW concept — single-device by definition); created_at is
+        // the best available stand-in.
+        updated_at: entry.created_at.clone(),
         depends_on: None,
         metadata,
     }
@@ -274,6 +314,7 @@ fn doc_to_entity(doc: &EntityDoc) -> (EntityType, Vec<MomentType>) {
         entity_type_id: doc.entity_type.clone(),
         parent_entity_id: doc.parent_entity_id.clone(),
         created_at: doc.created_at.clone(),
+        updated_at: doc.created_at.clone(),
         drift: doc.drift,
         metadata: Some(metadata),
     };
@@ -340,6 +381,216 @@ pub fn parse_entity_file(content: &str) -> Result<ParsedEntityFile, VaultFormatE
     Ok(ParsedEntityFile { entity, moments, body: body.to_string() })
 }
 
+// --- full-vault backup bundle (2026-08-01) --------------------------------
+//
+// One downloadable YAML file holding every entity and its moments/reactions
+// — a disaster-recovery export/restore path (see memory: a real data-loss
+// incident is what prompted this). Unlike EntityDoc/MomentEntry above (which
+// this deliberately does NOT reuse, despite an earlier version of this
+// having done exactly that) this format never contains a real database id —
+// every cross-reference is a small file-relative reference number, and
+// entity_type is always a resolved literal name, never a raw entity_types
+// foreign-key string. A shared backend's auto-incrementing bigint ids
+// leaking through a file meant to be downloaded/shared/re-uploaded is a real
+// information disclosure (it reveals things like total row counts across
+// every account, not just the exporting one) — this format is designed so
+// nothing about the database itself is observable from the file.
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackupBundle {
+    pub schema_version: u32,
+    pub exported_at: String,
+    pub app_version: String,
+    pub entities: Vec<BackupEntity>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackupEntity {
+    // File-relative, 1-based, assigned at export time — not a database id.
+    pub r#ref: u32,
+    pub name: String,
+    // Always a literal readable name (e.g. "Friend"), resolved by the
+    // caller via ActiveStorage::get_entity_types() before this is built —
+    // never a raw entity_types foreign-key string. See build_backup_bundle.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub entity_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub parent_ref: Option<u32>,
+    // Explicit, backend-independent Self marker — replaces matching against
+    // LOCAL_SELF_ENTITY_ID or SELF_ENTITY_TYPE_ID, neither of which should
+    // ever appear in this file. `self` is a Rust keyword, hence the rename.
+    #[serde(rename = "self", skip_serializing_if = "std::ops::Not::not", default)]
+    pub self_entity: bool,
+    pub drift: f64,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "str::is_empty", default)]
+    pub relationship: String,
+    #[serde(skip_serializing_if = "str::is_empty", default)]
+    pub how_met: String,
+    #[serde(skip_serializing_if = "str::is_empty", default)]
+    pub birthday: String,
+    #[serde(skip_serializing_if = "str::is_empty", default)]
+    pub location: String,
+    #[serde(skip_serializing_if = "str::is_empty", default)]
+    pub why: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub moments: Vec<BackupMoment>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackupMoment {
+    // File-relative, 1-based — flat across the WHOLE bundle, not scoped to
+    // one entity's moments, since a moment can depend on one that lives
+    // under a different entity.
+    pub r#ref: u32,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub gravity: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub due_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub scheduled_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub until_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub priority: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub project: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub completed_at: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub depends_on: Vec<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub sort_index: Option<f64>,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub reactions: Vec<BackupReaction>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub additional_entity_refs: Vec<u32>,
+    // Momentos (2026-08-02, moment_type_id 4 / kind "momento" only) — same
+    // meaning as MomentMetadata's own fields in types.rs; occurrence dates
+    // here don't need ref-remapping (they're plain calendar dates, not
+    // cross-references to another record in this file).
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub recurrence_rule: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub momento_completed_occurrences: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub momento_excluded_occurrences: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub reveal_lead: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct BackupReaction {
+    // No id field — nothing else in this format references a reaction by
+    // id (a reaction's moment is implicit in its nesting position), so
+    // unlike entities/moments there's no cross-reference to preserve here.
+    pub description: String,
+    pub value: i32,
+}
+
+pub fn build_backup_bundle(
+    entities: &[EntityType],
+    moments: &[MomentType],
+    entity_type_names: &std::collections::HashMap<String, String>,
+    exported_at: String,
+) -> BackupBundle {
+    // Stable, deterministic ref assignment — sorted by created_at so the
+    // resulting file reads in a sensible order for a human, not just
+    // whatever order the storage backend happened to return.
+    let mut sorted_entities: Vec<&EntityType> = entities.iter().collect();
+    sorted_entities.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let entity_ref_of: std::collections::HashMap<String, u32> = sorted_entities.iter()
+        .enumerate()
+        .map(|(i, e)| (e.id.clone(), (i + 1) as u32))
+        .collect();
+
+    let mut sorted_moments: Vec<&MomentType> = moments.iter().collect();
+    sorted_moments.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+
+    let moment_ref_of: std::collections::HashMap<String, u32> = sorted_moments.iter()
+        .enumerate()
+        .map(|(i, m)| (m.id.clone(), (i + 1) as u32))
+        .collect();
+
+    let backup_entities = sorted_entities.iter().map(|e| {
+        let own_moments: Vec<&MomentType> = sorted_moments.iter()
+            .filter(|m| m.entity_id == e.id)
+            .copied()
+            .collect();
+        let meta = e.metadata.clone().unwrap_or_default();
+        BackupEntity {
+            r#ref: entity_ref_of[&e.id],
+            name: e.name.clone(),
+            entity_type: e.entity_type_id.as_ref().and_then(|id| entity_type_names.get(id).cloned()),
+            // Silently dropped if the parent isn't in this export (e.g. it
+            // was deleted separately) — same best-effort posture the rest
+            // of this format already follows.
+            parent_ref: e.parent_entity_id.as_ref().and_then(|id| entity_ref_of.get(id).copied()),
+            self_entity: is_self_for_backup(e),
+            drift: e.drift,
+            created_at: e.created_at.clone(),
+            relationship: meta.relationship,
+            how_met: meta.how_met,
+            birthday: meta.birthday,
+            location: meta.location,
+            why: meta.why,
+            moments: own_moments.iter().map(|m| {
+                let meta = m.metadata.clone().unwrap_or_default();
+                BackupMoment {
+                    r#ref: moment_ref_of[&m.id],
+                    kind: moment_type_str(m.moment_type_id).to_string(),
+                    title: m.title.clone(),
+                    description: m.description.clone().filter(|d| !d.is_empty()),
+                    gravity: m.gravity,
+                    due_at: m.due_at.clone(),
+                    scheduled_at: meta.scheduled_at,
+                    until_at: meta.until_at,
+                    priority: meta.priority,
+                    project: meta.project,
+                    completed_at: m.completed_at.clone(),
+                    depends_on: m.dependency_ids().iter().filter_map(|id| moment_ref_of.get(id).copied()).collect(),
+                    tags: meta.tags,
+                    sort_index: meta.sort_index,
+                    created_at: m.created_at.clone(),
+                    reactions: m.reactions.as_deref().unwrap_or(&[]).iter()
+                        .map(|r| BackupReaction { description: r.description.clone(), value: r.value })
+                        .collect(),
+                    additional_entity_refs: meta.additional_entity_ids.iter().filter_map(|id| entity_ref_of.get(id).copied()).collect(),
+                    recurrence_rule: meta.recurrence_rule,
+                    momento_completed_occurrences: meta.momento_completed_occurrences,
+                    momento_excluded_occurrences: meta.momento_excluded_occurrences,
+                    reveal_lead: meta.reveal_lead,
+                }
+            }).collect(),
+        }
+    }).collect();
+
+    BackupBundle {
+        schema_version: BACKUP_SCHEMA_VERSION,
+        exported_at,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        entities: backup_entities,
+    }
+}
+
+pub fn render_backup(bundle: &BackupBundle) -> Result<String, VaultFormatError> {
+    Ok(serde_norway::to_string(bundle)?)
+}
+
+pub fn parse_backup(yaml: &str) -> Result<BackupBundle, VaultFormatError> {
+    Ok(serde_norway::from_str(yaml)?)
+}
+
 // --- vault-root files (.peeplist/vault.yaml, .peeplist/trash.yaml) --------
 //
 // Shapes only, per §1d's vault layout — nothing reads/writes these yet
@@ -394,6 +645,7 @@ mod tests {
             entity_type_id: Some("Friend".to_string()),
             parent_entity_id: None,
             created_at: "2024-03-01T10:00:00Z".to_string(),
+            updated_at: "2024-03-01T10:00:00Z".to_string(),
             drift: 2.0,
             metadata: Some(EntityMetadata {
                 relationship: "Close friend".to_string(),
@@ -418,6 +670,7 @@ mod tests {
             deleted_at: None,
             reactions: None,
             created_at: "2026-06-01T00:00:00Z".to_string(),
+            updated_at: "2026-06-01T00:00:00Z".to_string(),
             depends_on: None,
             metadata: Some(MomentMetadata { tags: vec!["wedding".to_string()], ..Default::default() }),
         }
@@ -441,6 +694,7 @@ mod tests {
                 value: 3,
             }]),
             created_at: "2026-07-01T18:22:00Z".to_string(),
+            updated_at: "2026-07-01T18:22:00Z".to_string(),
             depends_on: None,
             metadata: None,
         }
@@ -459,6 +713,7 @@ mod tests {
             deleted_at: None,
             reactions: None,
             created_at: "2026-05-01T00:00:00Z".to_string(),
+            updated_at: "2026-05-01T00:00:00Z".to_string(),
             depends_on,
             metadata: None,
         }
@@ -509,6 +764,10 @@ mod tests {
             until_at: Some("2026-09-01T00:00:00Z".to_string()),
             depends_on: vec![],
             additional_entity_ids: vec![],
+            recurrence_rule: None,
+            momento_completed_occurrences: vec![],
+            momento_excluded_occurrences: vec![],
+            reveal_lead: None,
         });
 
         let rendered = render_entity_file(&entity, &[with_attrs.clone()], "");
@@ -538,6 +797,7 @@ mod tests {
             entity_type_id: None,
             parent_entity_id: None,
             created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
             drift: 2.0,
             metadata: None,
         };
@@ -553,6 +813,7 @@ mod tests {
             deleted_at: None,
             reactions: None,
             created_at: "2026-01-02T00:00:00Z".to_string(),
+            updated_at: "2026-01-02T00:00:00Z".to_string(),
             depends_on: None,
             metadata: None,
         };
@@ -617,5 +878,67 @@ mod tests {
         // confirms the id portion is deterministic and slug-independent).
         let name2 = entity_filename("Jane Smith", "3f9a2b7e-1234-4a1b-9c3d-abcdef012345");
         assert!(name2.ends_with("--3f9a2b7e.md"));
+    }
+
+    #[test]
+    fn backup_bundle_uses_file_relative_refs_not_raw_ids() {
+        let parent = sample_entity(); // id "3f9a2b7e-..."
+        let mut child = sample_entity();
+        child.id = "child-uuid-0001".to_string();
+        child.name = "Jane's Sister".to_string();
+        child.parent_entity_id = Some(parent.id.clone());
+        child.created_at = "2024-04-01T10:00:00Z".to_string();
+
+        let t = task(&parent.id); // id "8f2c1e40-..."
+        let mut linked_promise = promise(&child.id, Some(t.id.clone()));
+        linked_promise.metadata = Some(MomentMetadata {
+            additional_entity_ids: vec![parent.id.clone()],
+            ..Default::default()
+        });
+
+        let entities = vec![parent.clone(), child.clone()];
+        let moments = vec![t.clone(), linked_promise.clone()];
+        let type_names: std::collections::HashMap<String, String> =
+            [("Friend".to_string(), "Friend".to_string())].into_iter().collect();
+
+        let bundle = build_backup_bundle(&entities, &moments, &type_names, "2026-08-01T00:00:00Z".to_string());
+
+        // No raw database id appears anywhere in the bundle — every id-shaped
+        // string above ("3f9a2b7e...", "child-uuid-0001", "8f2c1e40...",
+        // "5e21") must be entirely absent from the rendered file.
+        let rendered = render_backup(&bundle).expect("renders");
+        for raw_id in [&parent.id, &child.id, &t.id, &linked_promise.id] {
+            assert!(!rendered.contains(raw_id.as_str()), "raw id {raw_id} leaked into the backup file");
+        }
+        assert!(rendered.contains("Friend"), "entity_type should be a literal name");
+
+        // Cross-references resolve to small relative ref numbers, not ids.
+        let parent_entry = bundle.entities.iter().find(|e| e.name == "Jane Doe").unwrap();
+        let child_entry = bundle.entities.iter().find(|e| e.name == "Jane's Sister").unwrap();
+        assert_eq!(child_entry.parent_ref, Some(parent_entry.r#ref));
+        assert_eq!(parent_entry.entity_type.as_deref(), Some("Friend"));
+
+        let task_entry = parent_entry.moments.iter().find(|m| m.title.contains("wedding")).unwrap();
+        let promise_entry = child_entry.moments.iter().find(|m| m.kind == "promise").unwrap();
+        assert_eq!(promise_entry.depends_on, vec![task_entry.r#ref]);
+        assert_eq!(promise_entry.additional_entity_refs, vec![parent_entry.r#ref]);
+
+        // Round-trips through YAML with no loss.
+        let parsed = parse_backup(&rendered).expect("valid round-trip");
+        assert_eq!(parsed, bundle);
+    }
+
+    #[test]
+    fn backup_bundle_marks_self_entity_explicitly() {
+        let mut self_entity = sample_entity();
+        self_entity.id = LOCAL_SELF_ENTITY_ID.to_string();
+        let bundle = build_backup_bundle(&[self_entity], &[], &std::collections::HashMap::new(), "2026-08-01T00:00:00Z".to_string());
+        // The only place "self" is marked is the explicit boolean flag —
+        // BackupEntity has no id field at all (just a small relative ref),
+        // so the Local-only sentinel id has nothing to leak through even in
+        // principle, unlike the old format's doc.id == LOCAL_SELF_ENTITY_ID
+        // sniffing.
+        assert!(bundle.entities[0].self_entity);
+        assert_eq!(bundle.entities[0].r#ref, 1);
     }
 }

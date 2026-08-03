@@ -113,6 +113,15 @@ pub struct EntityType {
     // Server-generated on insert; never sent back on writes.
     #[serde(skip_serializing, default)]
     pub created_at: String,
+    // Server-generated/updated via a DB trigger (scripts/2026-08-02-
+    // updated-at-lww.sql), never sent back on writes — used by the offline-
+    // first sync flush loop (layouts/navbar.rs) to detect whether this
+    // record changed on the server since a queued offline edit was staged,
+    // for real last-write-wins conflict resolution. Empty string on a
+    // record that predates the migration or came from the Local vault
+    // (which has no LWW concept at all, single-device by definition).
+    #[serde(skip_serializing, default)]
+    pub updated_at: String,
     // Days per +1 unit of distance from inactivity (see Distance/Drift spec).
     // Defaults to 2.0 client-side so this degrades gracefully before the
     // `entities.drift` column exists in the DB.
@@ -141,18 +150,6 @@ pub struct NewEntityType {
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
     pub metadata: Option<EntityMetadata>,
 }
-
-#[derive(Clone, Default)]
-pub struct EntityForm {
-    pub name: String,
-    pub relationship: String,
-    pub meeting: String,
-    pub bday: String,
-    pub location: String,
-    pub why: String,
-    pub entity_type_sel: String,
-}
-
 
 #[derive(Clone, Default)]
 pub struct ReactionForm {
@@ -188,6 +185,10 @@ pub struct MomentType {
     // Server-generated on insert; never sent back on writes (see below).
     #[serde(skip_serializing, default)]
     pub created_at: String,
+    // See EntityType::updated_at's doc comment — same trigger-driven LWW
+    // timestamp, same reasoning.
+    #[serde(skip_serializing, default)]
+    pub updated_at: String,
     // Legacy single taskwarrior-style dependency column (bare `depends_on
     // bigint`, no join table) — superseded 2026-07-29 by the unlimited
     // `metadata.depends_on` list (see MomentMetadata), same trick as
@@ -244,10 +245,12 @@ impl MomentType {
 // Taskwarrior-style attributes, part 2 (see DESIGN_PROGRESS.md — the user
 // wants "everything taskwarrior has"). Deliberately not new MomentType/DB
 // columns: like tags/sort_index below, these ride the existing metadata
-// jsonb blob, so no Supabase schema migration is needed. `recur` and real
-// enforcement of `scheduled`/`until` (taskwarrior hides tasks before their
-// scheduled date and auto-deletes them after `until`) are explicitly out of
-// scope for now — these fields are storable and editable, not yet acted on.
+// jsonb blob, so no Supabase schema migration is needed. Real enforcement of
+// `scheduled`/`until` (taskwarrior hides tasks before their scheduled date
+// and auto-deletes them after `until`) is still out of scope — these fields
+// are storable and editable, not yet acted on. `recur` — explicitly deferred
+// when this comment was first written — is `recurrence_rule` below,
+// 2026-08-02, for moment_type_id 4 ("momento") specifically.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct MomentMetadata {
     #[serde(default)]
@@ -275,6 +278,36 @@ pub struct MomentMetadata {
     // entity_id, not lightweight tag-alongs — see MomentType::entity_ids.
     #[serde(default)]
     pub additional_entity_ids: Vec<String>,
+    // Momentos (2026-08-02, moment_type_id 4 only) — an RFC 5545 RRULE
+    // string (e.g. "FREQ=WEEKLY;BYDAY=MO"), expanded on the fly by
+    // src/momento.rs wherever a momento's upcoming occurrences need
+    // showing. The moment's own `due_at` doubles as the RRULE's DTSTART
+    // (anchor date) — no separate anchor field needed. Occurrences are
+    // never materialized as real rows; the two lists below are the only
+    // per-occurrence state that exists, keyed by occurrence date
+    // ("YYYY-MM-DD").
+    #[serde(default)]
+    pub recurrence_rule: Option<String>,
+    // Occurrence dates marked done — a momento's own version of
+    // completed_at, since the template itself is never "completed" (it
+    // recurs forever until deleted).
+    #[serde(default)]
+    pub momento_completed_occurrences: Vec<String>,
+    // Occurrence dates permanently excluded from the pattern (iCal's own
+    // EXDATE concept) — "skip" and "delete a single occurrence" are the
+    // same action, per an explicit product decision (2026-08-02): there's
+    // no separate "temporarily hide, comes back later" state.
+    #[serde(default)]
+    pub momento_excluded_occurrences: Vec<String>,
+    // How far in advance a momento surfaces on the cross-entity Momentos
+    // sidebar view (2026-08-03) — one of "1hour"/"1day"/"1week"/"1month", or
+    // None to always show every future occurrence (today's default
+    // behavior, unchanged). Purely a display filter — see
+    // src/momento.rs::is_revealed. Doesn't affect the per-entity Momentos
+    // tab, which always shows everything for that entity regardless (you
+    // navigated there on purpose; there's nothing to declutter).
+    #[serde(default)]
+    pub reveal_lead: Option<String>,
 }
 
 

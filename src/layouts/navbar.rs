@@ -13,13 +13,13 @@ use crate::components::{
     MomentCmp,
     MomentListCmp,
     MomentInputCmp,
-    EntityModalCmp,
     FullScreenEditorModalCmp,
     OnTheFlyCmp,
     ab_task_cmp,
-    ab_history_cmp,
+    ab_story_cmp,
     ab_stats_cmp,
     ab_info_cmp,
+    ab_momentos_cmp,
     views_list_cmp,
     entity_list_cmp,
     tag_list_cmp,
@@ -34,15 +34,381 @@ use crate::api::{
 };
 
 use crate::types::{EntityType, MomentType, NewMomentType};
+use crate::api::sync_queue::{self, QueuedOp};
+use crate::api::synced_mirror;
 use web_sys::window;
 use gloo_timers::future::TimeoutFuture;
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger, DropdownSeparator};
+use std::collections::HashMap;
 
 // Refresh the access token this long before it would otherwise expire via
 // inactivity/backend expiry, so a live session never silently dies underneath
 // the user. Supabase's default JWT lifetime is 1 hour; 50 minutes leaves margin.
 const TOKEN_REFRESH_INTERVAL_MS: u32 = 50 * 60 * 1000;
+
+// Offline-first sync for the Synced vault (see api::sync_queue/
+// synced_mirror). Much shorter than the token-refresh interval above —
+// this is what makes a reconnect feel snappy rather than waiting up to an
+// hour for queued edits to actually reach the server.
+const SYNC_FLUSH_INTERVAL_MS: u32 = 60 * 1000;
+
+// Below this width, the docked desktop sidebar (see Navbar's second
+// sidebar block, distinct from the mobile drawer `Sidebar` component)
+// auto-folds to give the content column its space back.
+const SIDEBAR_FOLD_WIDTH: f64 = 900.0;
+
+const ONLINE_SCRIPT: &str = r#"
+    window.addEventListener('online', () => dioxus.send(true));
+"#;
+
+// Supabase rotates the refresh token on every use — the token that was
+// just spent stops working the moment a new one comes back. With the
+// 50-minute proactive loop below AND the 60-second sync flush loop
+// (refresh_before_flush) each independently calling refresh_access_token
+// on their own schedule, a long enough session guarantees their ticks
+// eventually land close together: both read the same not-yet-rotated
+// refresh_token from localStorage, one reaches Supabase first and rotates
+// it, and the other's now-stale token gets rejected — which, depending on
+// Supabase's reuse-detection settings, can invalidate the whole session.
+// That's a real, live way for sync to silently and permanently stop
+// working (every queued write then fails against a dead session forever,
+// looking exactly like "nothing ever synced"), not just a wasted API call.
+//
+// This one shared clock is how every refresh call site (the mount-time
+// check, the 50-minute loop, and the flush loop) coordinates: whichever of
+// them actually refreshes stamps this, and none of them will refresh again
+// until it's stale — so there's only ever one active "refresh clock" for
+// the whole app, not three independent ones that can race each other.
+const MIN_REFRESH_INTERVAL_SECS: i64 = 5 * 60;
+pub(crate) const LAST_REFRESHED_AT_KEY: &str = "auth_last_refreshed_at";
+
+fn is_refresh_due(last_refreshed_at: Option<i64>, now: i64) -> bool {
+    match last_refreshed_at {
+        Some(last) => now - last > MIN_REFRESH_INTERVAL_SECS,
+        None => true,
+    }
+}
+
+fn should_refresh_now(storage: &web_sys::Storage) -> bool {
+    let last: Option<i64> = storage.get_item(LAST_REFRESHED_AT_KEY).ok().flatten().and_then(|s| s.parse().ok());
+    is_refresh_due(last, chrono::Utc::now().timestamp())
+}
+
+fn mark_refreshed(storage: &web_sys::Storage) {
+    storage.set(LAST_REFRESHED_AT_KEY, &chrono::Utc::now().timestamp().to_string()).ok();
+}
+
+// A create op's `temp_id` (client-minted, shown in the UI the instant it's
+// created) only resolves to the server's real id once its own create
+// actually replays successfully — everything else queued behind it that
+// references that id (a field edit, a delete, a reaction) has to get the
+// real id substituted in before it can be sent, or the server has no idea
+// what row it's talking about. `id_map` accumulates temp_id -> real_id as
+// each create in this flush pass resolves; these two helpers apply it.
+fn remap_id(id: &str, id_map: &HashMap<String, String>) -> String {
+    id_map.get(id).cloned().unwrap_or_else(|| id.to_string())
+}
+
+fn remap_value(value: serde_json::Value, id_map: &HashMap<String, String>) -> serde_json::Value {
+    match &value {
+        serde_json::Value::String(s) if id_map.contains_key(s) => serde_json::Value::String(id_map[s].clone()),
+        _ => value,
+    }
+}
+
+// Real LWW: is the server's current updated_at strictly newer than the
+// baseline this edit was staged against? Parses both as real timestamps
+// rather than comparing the raw strings — Postgres's timestamptz
+// serialization is consistent enough that string comparison would usually
+// agree, but "usually" isn't good enough for a check whose only job is
+// deciding whose edit survives. Fails open (not stale) if either side is
+// empty or unparseable — a record with no known baseline, or an
+// unrecognized timestamp shape, shouldn't block an edit from applying;
+// that's the same call this app already makes elsewhere for anything
+// date-related that might be malformed or missing (see momento.rs's
+// is_revealed/urgency.rs's parse_moment_datetime).
+fn is_stale(staged_updated_at: &str, server_updated_at: &str) -> bool {
+    if staged_updated_at.is_empty() || server_updated_at.is_empty() {
+        return false;
+    }
+    match (
+        chrono::DateTime::parse_from_rfc3339(staged_updated_at),
+        chrono::DateTime::parse_from_rfc3339(server_updated_at),
+    ) {
+        (Ok(staged), Ok(server)) => server > staged,
+        _ => false,
+    }
+}
+
+// Tries to keep the access token fresh before replaying anything queued —
+// otherwise a long offline stretch means every queued op fails on an
+// expired token, which looks like a completely different bug. Reuses the
+// exact refresh flow the 50-minute loop above already does; falls back to
+// whatever's currently cached (refresh itself needs network too, so this
+// can fail while still offline — that's fine, the flush attempt below will
+// just fail the same way and everything stays queued for the next tick).
+//
+// Gated by should_refresh_now/mark_refreshed (see their doc comment above)
+// — this runs every 60 seconds, far more often than a token actually needs
+// refreshing, so it only actually calls refresh_access_token when nothing
+// else (this same function on an earlier tick, the 50-minute loop, or the
+// mount-time check) has refreshed recently. Otherwise it just hands back
+// whatever's already cached, no network call at all.
+async fn refresh_before_flush(mut auth_token: Signal<Option<String>>) -> Option<String> {
+    let storage = window().and_then(|w| w.local_storage().ok().flatten())?;
+    if !should_refresh_now(&storage) {
+        return storage.get_item("auth_token").ok().flatten().filter(|s| !s.is_empty());
+    }
+    let refresh_tok = storage.get_item("refresh_token").ok().flatten().filter(|s| !s.is_empty())?;
+    match refresh_access_token(refresh_tok).await {
+        Ok(auth) => {
+            storage.set("auth_token", &auth.access_token).ok();
+            storage.set("refresh_token", &auth.refresh_token).ok();
+            mark_refreshed(&storage);
+            auth_token.set(Some(auth.access_token.clone()));
+            Some(auth.access_token)
+        }
+        Err(_) => storage.get_item("auth_token").ok().flatten().filter(|s| !s.is_empty()),
+    }
+}
+
+// Whether a single queued op reached a real, final outcome (success, or a
+// definitive server-side rejection/LWW-stale-drop — either way, nothing
+// left to do for it) versus a retryable failure (couldn't reach the
+// server at all). This distinction is what makes the flush loop crash-
+// safe — see remove_front's doc comment in sync_queue.rs for the exact bug
+// this replaced.
+enum FlushOutcome {
+    Done,
+    Retry,
+}
+
+// Replays each queued op, in order, against the real Supabase API (the
+// same functions SupabaseStorage itself delegates to — see api::storage.rs).
+// Reads the queue via `peek` (never mutates it) and only calls
+// `sync_queue::remove_front(1)` immediately after an op reaches a real
+// outcome — success, or a definitive rejection worth dropping (delete_
+// entity's FK-violation case, or an LWW-stale edit). The moment anything
+// comes back as a retryable failure, this stops entirely: that op and
+// everything queued behind it stays exactly as persisted, untouched, for
+// the next tick — no attempt to guess what else might also be affected.
+async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, mut entities: Signal<Vec<EntityType>>) {
+    let ops = sync_queue::peek();
+    let mut id_map: HashMap<String, String> = HashMap::new();
+
+    for op in ops {
+        let outcome = match op {
+            QueuedOp::CreateMoment { temp_id, mut new } => {
+                new.entity_id = remap_id(&new.entity_id, &id_map);
+                match crate::api::moment::createMoment(new.clone(), token.clone()).await {
+                    Ok(created) => {
+                        id_map.insert(temp_id.clone(), created.id.clone());
+                        let mut all = synced_mirror::get_moments().unwrap_or_default();
+                        match all.iter().position(|m| m.id == temp_id) {
+                            Some(pos) => all[pos] = created.clone(),
+                            None => all.push(created.clone()),
+                        }
+                        synced_mirror::set_moments(&all);
+                        moments.write().retain(|m| m.id != temp_id);
+                        moments.write().push(created);
+                        FlushOutcome::Done
+                    }
+                    Err(e) => {
+                        clog!("Sync flush: create moment failed, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::CreateEntity { temp_id, mut new } => {
+                new.entity_type_id = new.entity_type_id.map(|t| remap_id(&t, &id_map));
+                new.parent_entity_id = new.parent_entity_id.map(|p| remap_id(&p, &id_map));
+                match crate::api::entity::createEntity(new.clone(), token.clone()).await {
+                    Ok(created) => {
+                        id_map.insert(temp_id.clone(), created.id.clone());
+                        let mut all = synced_mirror::get_entities().unwrap_or_default();
+                        match all.iter().position(|e| e.id == temp_id) {
+                            Some(pos) => all[pos] = created.clone(),
+                            None => all.push(created.clone()),
+                        }
+                        synced_mirror::set_entities(&all);
+                        entities.write().retain(|e| e.id != temp_id);
+                        entities.write().push(created);
+                        FlushOutcome::Done
+                    }
+                    Err(e) => {
+                        clog!("Sync flush: create entity failed, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::CreateReaction { temp_id, mut new } => {
+                new.moment_id = remap_id(&new.moment_id, &id_map);
+                match crate::api::moment::createReaction(new.clone(), token.clone()).await {
+                    Ok(created) => {
+                        id_map.insert(temp_id.clone(), created.id.clone());
+                        let mut all = synced_mirror::get_moments().unwrap_or_default();
+                        if let Some(m) = all.iter_mut().find(|m| m.id == created.moment_id) {
+                            let reactions = m.reactions.get_or_insert_with(Vec::new);
+                            match reactions.iter().position(|r| r.id == temp_id) {
+                                Some(pos) => reactions[pos] = created.clone(),
+                                None => reactions.push(created.clone()),
+                            }
+                        }
+                        synced_mirror::set_moments(&all);
+                        // Reactions live nested inside each moment's own
+                        // `reactions` field, not a top-level Signal of their
+                        // own — the full refetch after this loop is what
+                        // actually surfaces this in the UI.
+                        FlushOutcome::Done
+                    }
+                    Err(e) => {
+                        clog!("Sync flush: create reaction failed, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::UpdateMomentField { id, field, value, staged_updated_at } => {
+                let real_id = remap_id(&id, &id_map);
+                match crate::api::moment::getMomentById(real_id.clone(), token.clone()).await {
+                    Ok(Some(server_moment)) if is_stale(&staged_updated_at, &server_moment.updated_at) => {
+                        // Someone else changed this moment on the server
+                        // since we staged this edit — the server's newer
+                        // version wins. Drop the edit and pull the newer
+                        // row into the mirror instead of clobbering it.
+                        clog!("Sync flush: server has a newer version of moment {}, dropping stale offline edit to '{}'", real_id, field);
+                        let mut all = synced_mirror::get_moments().unwrap_or_default();
+                        match all.iter().position(|m| m.id == real_id) {
+                            Some(pos) => all[pos] = server_moment,
+                            None => all.push(server_moment),
+                        }
+                        synced_mirror::set_moments(&all);
+                        FlushOutcome::Done
+                    }
+                    Ok(_) => {
+                        let real_value = remap_value(value.clone(), &id_map);
+                        match crate::api::moment::update_moment_field(real_id, &field, real_value, token.clone()).await {
+                            Ok(()) => FlushOutcome::Done,
+                            Err(e) => {
+                                clog!("Sync flush: update moment field failed, will retry next tick ({})", e);
+                                FlushOutcome::Retry
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        clog!("Sync flush: couldn't check moment {} for conflicts, will retry next tick ({})", real_id, e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::UpdateEntityField { id, field, value, staged_updated_at } => {
+                let real_id = remap_id(&id, &id_map);
+                match crate::api::entity::getEntityById(real_id.clone(), token.clone()).await {
+                    Ok(Some(server_entity)) if is_stale(&staged_updated_at, &server_entity.updated_at) => {
+                        clog!("Sync flush: server has a newer version of entity {}, dropping stale offline edit to '{}'", real_id, field);
+                        let mut all = synced_mirror::get_entities().unwrap_or_default();
+                        match all.iter().position(|e| e.id == real_id) {
+                            Some(pos) => all[pos] = server_entity,
+                            None => all.push(server_entity),
+                        }
+                        synced_mirror::set_entities(&all);
+                        FlushOutcome::Done
+                    }
+                    Ok(_) => {
+                        let real_value = remap_value(value.clone(), &id_map);
+                        match crate::api::entity::update_entity_field(real_id, &field, real_value, token.clone()).await {
+                            Ok(()) => FlushOutcome::Done,
+                            Err(e) => {
+                                clog!("Sync flush: update entity field failed, will retry next tick ({})", e);
+                                FlushOutcome::Retry
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        clog!("Sync flush: couldn't check entity {} for conflicts, will retry next tick ({})", real_id, e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::DeleteMoment(mut m) => {
+                m.id = remap_id(&m.id, &id_map);
+                match crate::api::moment::deleteMoment(m.clone(), token.clone()).await {
+                    Ok(()) => FlushOutcome::Done,
+                    Err(e) => {
+                        clog!("Sync flush: delete moment failed, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::DeleteEntity(id) => {
+                let real_id = remap_id(&id, &id_map);
+                match crate::api::entity::deleteEntity(real_id, token.clone()).await {
+                    Ok(()) => FlushOutcome::Done,
+                    Err(crate::api::StorageError::Remote(e)) => {
+                        clog!("Sync flush: delete entity rejected by server, dropping ({})", e);
+                        FlushOutcome::Done
+                    }
+                    Err(e) => {
+                        clog!("Sync flush: delete entity couldn't reach the server, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::DeleteReaction(mut r) => {
+                r.id = remap_id(&r.id, &id_map);
+                r.moment_id = remap_id(&r.moment_id, &id_map);
+                match crate::api::moment::deleteReaction(r.clone(), token.clone()).await {
+                    Ok(()) => FlushOutcome::Done,
+                    Err(e) => {
+                        clog!("Sync flush: delete reaction failed, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+            QueuedOp::RestoreMoment(id) => {
+                let real_id = remap_id(&id, &id_map);
+                match crate::api::moment::restoreMoment(real_id, token.clone()).await {
+                    Ok(()) => FlushOutcome::Done,
+                    Err(e) => {
+                        clog!("Sync flush: restore moment failed, will retry next tick ({})", e);
+                        FlushOutcome::Retry
+                    }
+                }
+            }
+        };
+
+        match outcome {
+            FlushOutcome::Done => sync_queue::remove_front(1),
+            FlushOutcome::Retry => break,
+        }
+    }
+
+    refresh_mirror_and_signals(token, moments, entities).await;
+}
+
+// Re-fetches the full vault over the network and overwrites both the
+// mirror and the live Signals with the result — this is what keeps the UI
+// fresh once back online (SupabaseStorage's own read methods can't do this
+// themselves: they're a cheap value constructed fresh per call, with no
+// Signal handles at all — see storage.rs). Run after the queue replay
+// above so this device's own just-flushed writes are already reflected in
+// what comes back, not overwritten a moment later.
+async fn refresh_mirror_and_signals(token: String, mut moments: Signal<Vec<MomentType>>, mut entities: Signal<Vec<EntityType>>) {
+    if let Ok(mut open) = crate::api::moment::getMoments(token.clone()).await {
+        if let Ok(deleted) = crate::api::moment::getDeletedMoments(token.clone()).await {
+            open.extend(deleted);
+        }
+        synced_mirror::set_moments(&open);
+        moments.set(open.into_iter().filter(|m| m.deleted_at.is_none()).collect());
+    }
+    if let Ok(fresh) = crate::api::entity::getEntities(token.clone()).await {
+        synced_mirror::set_entities(&fresh);
+        entities.set(fresh);
+    }
+    if let Ok(fresh_types) = crate::api::entity::getEntityTypes(token).await {
+        synced_mirror::set_entity_types(&fresh_types);
+    }
+}
 
 
 // #[cfg(target_arch = "wasm32")]
@@ -63,6 +429,36 @@ const TOKEN_REFRESH_INTERVAL_MS: u32 = 50 * 60 * 1000;
 // across web and desktop) instead registers a real window-level listener in
 // JS once and streams every keydown back over the eval's channel, so this
 // works regardless of what currently has focus.
+// Mobile-vs-desktop viewport detection (2026-08-01) — see AppState::
+// is_desktop_viewport's doc comment for why this is plain window.innerWidth/
+// innerHeight in JS rather than a Tailwind CSS breakpoint. `resize` alone
+// doesn't cover an iOS Safari address-bar show/hide changing innerHeight
+// without the window itself resizing, but this is the same signal a real
+// resize event would carry, so a first reading, before ever exercising this
+// codepath, wasn't judged worth a separate visualViewport listener.
+const VIEWPORT_SCRIPT: &str = r#"
+    function send() {
+        dioxus.send({ width: window.innerWidth, height: window.innerHeight });
+    }
+    window.addEventListener('resize', send);
+    send();
+"#;
+
+#[derive(serde::Deserialize, Clone)]
+struct ViewportSize {
+    width: f64,
+    height: f64,
+}
+
+// Local-timezone offset (2026-08-01) — see AppState::local_utc_offset_minutes's
+// doc comment. A one-shot read, not a live listener like VIEWPORT_SCRIPT
+// above: unlike window size, a browser's timezone offset changing mid-
+// session (a DST transition, or the user's system clock changing timezone)
+// is rare enough not to warrant polling for.
+const TIMEZONE_OFFSET_SCRIPT: &str = r#"
+    dioxus.send(new Date().getTimezoneOffset());
+"#;
+
 #[derive(serde::Deserialize, Clone)]
 struct GlobalKeyEvent {
     key: String,
@@ -164,16 +560,29 @@ pub fn vault_switcher_cmp() -> Element {
     let mut backdropTgl = state.backdropTgl;
     let mut currentView = state.currentView;
     let mut current_entity = state.current_entity;
+    let is_desktop_viewport = state.is_desktop_viewport;
     let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
 
+    // Keyed off auth_token, not user_email — user_email is only populated
+    // once the mount-time session check (see the effect below) actually
+    // completes a round trip, which can legitimately take a while or never
+    // resolve at all while offline. auth_token is restored synchronously
+    // from localStorage at startup (main.rs), so it's the real signal for
+    // "is there a Synced session," not a proxy for "have we successfully
+    // fetched the display name yet." Using user_email here used to mean a
+    // slow/offline first check left a real session sitting there while
+    // this UI insisted no Synced vault existed — "+ Add a vault" would
+    // show, but clicking it just bounced straight back off Login's own
+    // already-logged-in redirect (auth_token being genuinely Some).
     let entries: Vec<VaultEntry> = {
         let mut v = vec![VaultEntry { kind: VaultKind::Local, label: "Local".to_string(), removable: false }];
-        if let Some(email) = user_email.read().clone() {
-            v.push(VaultEntry { kind: VaultKind::Synced, label: email, removable: true });
+        if auth_token.read().is_some() {
+            let label = user_email.read().clone().unwrap_or_else(|| "Synced".to_string());
+            v.push(VaultEntry { kind: VaultKind::Synced, label, removable: true });
         }
         v
     };
-    let has_synced = user_email.read().is_some();
+    let has_synced = auth_token.read().is_some();
 
     // See VaultKind::effective's doc comment — the raw signal can say
     // "Synced" even on a first-ever, never-logged-in visit, so the switcher
@@ -206,9 +615,26 @@ pub fn vault_switcher_cmp() -> Element {
     let mut remove_synced = move || {
         #[cfg(not(feature = "desktop"))]
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-            storage.set("auth_token", "").ok();
-            storage.set("refresh_token", "").ok();
+            // remove_item, not set("", ...) — an empty string is still a
+            // present value, and used to read back on the next app launch
+            // as Some("") (see main.rs's startup restore), which every
+            // auth_token.is_some() check treats as "logged in" despite
+            // there being no real session. remove_item leaves nothing to
+            // misread.
+            storage.remove_item("auth_token").ok();
+            storage.remove_item("refresh_token").ok();
+            storage.remove_item(LAST_REFRESHED_AT_KEY).ok();
         }
+        // This account's mirror/queue (see api::synced_mirror/sync_queue)
+        // belong to this session specifically — clear them here too, or a
+        // later "+ Add a vault" login (same browser, maybe a different
+        // account) would see the previous account's stale cached data
+        // before its first real fetch. Was missing here previously (only
+        // components/settings.rs's own separate remove-vault action did
+        // this) — two independent logout entry points had silently
+        // diverged.
+        crate::api::synced_mirror::clear();
+        crate::api::sync_queue::clear();
         auth_token.set(None);
         user_id.set(None);
         user_email.set(None);
@@ -231,7 +657,7 @@ pub fn vault_switcher_cmp() -> Element {
         // visible rows. Revisit properly if this turns out to matter for
         // more than vault-switching.
         div {
-            class: "xl:hidden px-3 flex flex-col gap-y-0.5",
+            class: if *is_desktop_viewport.read() { "hidden px-3 flex flex-col gap-y-0.5" } else { "px-3 flex flex-col gap-y-0.5" },
             for entry in entries.iter() {
                 {
                     let kind = entry.kind;
@@ -282,7 +708,7 @@ pub fn vault_switcher_cmp() -> Element {
             }
         }
         div {
-            class: "hidden xl:block px-3",
+            class: if *is_desktop_viewport.read() { "block px-3" } else { "hidden px-3" },
             div {
                 class: "w-full sidebar-vault-switcher",
                 Dropdown {
@@ -403,7 +829,102 @@ pub fn Navbar() -> Element {
     let mut on_the_fly_open = state.on_the_fly_open;
     let mut refresh_loop_started = use_signal(|| false);
     let mut keyboard_listener_started = use_signal(|| false);
+    let mut viewport_listener_started = use_signal(|| false);
+    let mut is_desktop_viewport = state.is_desktop_viewport;
+    let mut sidebar_collapsed = state.sidebar_collapsed;
+    let mut timezone_offset_read = use_signal(|| false);
+    let mut local_utc_offset_minutes = state.local_utc_offset_minutes;
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut sync_flush_loop_started = use_signal(|| false);
+    let mut sync_online_listener_started = use_signal(|| false);
+    let mut sync_flushing = use_signal(|| false);
     let moment = current_moment.read().clone();
+
+    // Offline-first sync for the Synced vault (see api::sync_queue/
+    // synced_mirror) — periodic tick, same TimeoutFuture shape as the
+    // token-refresh loop below, at a much shorter interval so a reconnect
+    // doesn't have to wait up to an hour to actually flush. `sync_flushing`
+    // guards against the periodic tick and the 'online' listener below
+    // both firing a flush at once.
+    use_effect(move || {
+        if *sync_flush_loop_started.read() {
+            return;
+        }
+        sync_flush_loop_started.set(true);
+        spawn(async move {
+            loop {
+                TimeoutFuture::new(SYNC_FLUSH_INTERVAL_MS).await;
+                if auth_token.read().is_none() || *sync_flushing.read() {
+                    continue;
+                }
+                sync_flushing.set(true);
+                if let Some(token) = refresh_before_flush(auth_token).await {
+                    flush_sync_queue(token, moments, entities).await;
+                }
+                sync_flushing.set(false);
+            }
+        });
+    });
+
+    // Flushes immediately on reconnect instead of waiting for the next
+    // periodic tick above — same eval-listener pattern as
+    // VIEWPORT_SCRIPT/GLOBAL_KEYDOWN_SCRIPT.
+    use_effect(move || {
+        if *sync_online_listener_started.read() {
+            return;
+        }
+        sync_online_listener_started.set(true);
+        spawn(async move {
+            let mut eval = document::eval(ONLINE_SCRIPT);
+            while let Ok(_) = eval.recv::<bool>().await {
+                if auth_token.read().is_none() || *sync_flushing.read() {
+                    continue;
+                }
+                sync_flushing.set(true);
+                if let Some(token) = refresh_before_flush(auth_token).await {
+                    flush_sync_queue(token, moments, entities).await;
+                }
+                sync_flushing.set(false);
+            }
+        });
+    });
+
+    // Started once per mounted session, same guard pattern as the keyboard
+    // listener below — see VIEWPORT_SCRIPT/AppState::is_desktop_viewport for
+    // why this exists instead of a CSS breakpoint.
+    use_effect(move || {
+        if *viewport_listener_started.read() {
+            return;
+        }
+        viewport_listener_started.set(true);
+        spawn(async move {
+            let mut eval = document::eval(VIEWPORT_SCRIPT);
+            while let Ok(size) = eval.recv::<ViewportSize>().await {
+                is_desktop_viewport.set(size.width >= 500.0 || size.height >= 900.0);
+                // Width-only, independent of the OR-based desktop check
+                // above — a narrow-but-tall window still counts as
+                // "desktop" there, but is still too cramped for a fixed
+                // 256px docked sidebar.
+                sidebar_collapsed.set(size.width < SIDEBAR_FOLD_WIDTH);
+            }
+        });
+    });
+
+    // One-shot, same guard pattern as above — see
+    // AppState::local_utc_offset_minutes/TIMEZONE_OFFSET_SCRIPT.
+    use_effect(move || {
+        if *timezone_offset_read.read() {
+            return;
+        }
+        timezone_offset_read.set(true);
+        spawn(async move {
+            let mut eval = document::eval(TIMEZONE_OFFSET_SCRIPT);
+            if let Ok(offset) = eval.recv::<i32>().await {
+                local_utc_offset_minutes.set(offset);
+            }
+        });
+    });
 
     // Started once per mounted session, same guard pattern as the token
     // refresh loop below.
@@ -457,7 +978,19 @@ pub fn Navbar() -> Element {
                 Ok(user) => {
                     user_email.set(Some(user.email));
                 }
-                Err(e) => {
+                // The request never reached Supabase at all (offline, or a
+                // transient connectivity blip) — this says nothing about
+                // whether the token is actually still valid, so it's not
+                // grounds to log anyone out. Leaving the session exactly as
+                // it is is what makes the Synced vault survive a page
+                // refresh while offline (see api::synced_mirror/sync_queue)
+                // — this used to collapse into the same "log out" path as
+                // a real rejection below, which is what broke that.
+                Err(crate::api::AuthError::Network(e)) => {
+                    clog!("Session check couldn't reach the server (offline?), leaving session as-is: {}", e);
+                }
+                Err(crate::api::AuthError::Rejected(msg)) => {
+                    // A real answer from Supabase saying this token is dead.
                     // This used to log straight out the moment the *cached*
                     // access token failed this check — which is nearly
                     // guaranteed to happen on every fresh page load after the
@@ -470,40 +1003,69 @@ pub fn Navbar() -> Element {
                     // overnight, opened it again" — so this was the actual
                     // "losing my vault login" bug, not the loop. Try a real
                     // refresh first; only actually log out if that also
-                    // fails (refresh_token itself expired/revoked).
-                    clog!("Session check failed ({}), attempting token refresh before logging out", e);
+                    // comes back rejected (refresh_token itself expired/revoked).
+                    clog!("Session check rejected ({}), attempting token refresh before logging out", msg);
                     #[cfg(not(feature = "desktop"))]
-                    let refreshed = 'refresh: {
+                    let should_log_out = 'refresh: {
                         let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) else {
                             break 'refresh false;
                         };
+                        // No refresh_token to even try — unlike a network
+                        // failure below, this isn't "maybe offline, leave
+                        // it be": there's no path back to a valid session
+                        // without one, so this is as final as an explicit
+                        // rejection. Previously this returned `false` (same
+                        // as the network-failure case), which left a
+                        // rejected token with nothing to refresh it against
+                        // sitting there forever — auth_token never became
+                        // genuinely None, so Login's already-logged-in
+                        // redirect guard would bounce away from the login
+                        // page permanently, with no way back in.
                         let Some(refresh_tok) = storage.get_item("refresh_token").ok().flatten().filter(|s| !s.is_empty()) else {
-                            break 'refresh false;
+                            break 'refresh true;
                         };
                         match refresh_access_token(refresh_tok).await {
                             Ok(auth) => {
                                 storage.set("auth_token", &auth.access_token).ok();
                                 storage.set("refresh_token", &auth.refresh_token).ok();
+                                mark_refreshed(&storage);
                                 auth_token.set(Some(auth.access_token));
                                 user_id.set(Some(auth.user.id));
                                 user_email.set(Some(auth.user.email));
-                                true
-                            }
-                            Err(e) => {
-                                clog!("Token refresh failed too, logging out: {}", e);
                                 false
+                            }
+                            // Couldn't even attempt the refresh due to
+                            // connectivity — same reasoning as the outer
+                            // Network arm, don't log out over this either.
+                            Err(crate::api::AuthError::Network(e)) => {
+                                clog!("Token refresh couldn't reach the server (offline?), leaving session as-is: {}", e);
+                                false
+                            }
+                            Err(crate::api::AuthError::Rejected(e)) => {
+                                clog!("Token refresh rejected too, logging out: {}", e);
+                                true
                             }
                         }
                     };
                     #[cfg(feature = "desktop")]
-                    let refreshed = false;
+                    let should_log_out = false;
 
-                    if !refreshed {
+                    if should_log_out {
+                        // Deliberately NOT clearing the sync mirror/queue
+                        // here (unlike the user-initiated "Remove Synced
+                        // vault"/"Delete my account" flows in
+                        // components/settings.rs) — this is a forced
+                        // logout from a dead token, not the user
+                        // disconnecting. Any not-yet-flushed offline edits
+                        // stay queued so logging back into the same
+                        // account still gets them synced instead of
+                        // silently losing them.
                         #[cfg(not(feature = "desktop"))]
                         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                            storage.set("auth_token", &"").ok();
-                            storage.set("refresh_token", &"").ok();
+                            storage.remove_item("auth_token").ok();
+                            storage.remove_item("refresh_token").ok();
                             storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+                            storage.remove_item(LAST_REFRESHED_AT_KEY).ok();
                         }
                         auth_token.set(None);
                         user_id.set(None);
@@ -531,18 +1093,40 @@ pub fn Navbar() -> Element {
                     let Some(refresh_tok) = storage.get_item("refresh_token").ok().flatten().filter(|s| !s.is_empty()) else {
                         break;
                     };
+                    // Skip if the flush loop (or this same loop, or the
+                    // mount-time check) already refreshed recently — see
+                    // should_refresh_now's doc comment. At a 50-minute
+                    // interval this rarely actually matters, but keeps
+                    // every refresh call site honoring the same one clock.
+                    if !should_refresh_now(&storage) {
+                        continue;
+                    }
                     match refresh_access_token(refresh_tok).await {
                         Ok(auth) => {
                             storage.set("auth_token", &auth.access_token).ok();
                             storage.set("refresh_token", &auth.refresh_token).ok();
+                            mark_refreshed(&storage);
                             auth_token.set(Some(auth.access_token));
                             user_id.set(Some(auth.user.id));
                         }
-                        Err(e) => {
-                            clog!("Token refresh failed, logging out: {}", e);
-                            storage.set("auth_token", &"").ok();
-                            storage.set("refresh_token", &"").ok();
+                        // Offline (or a transient blip) — this tick just
+                        // couldn't reach Supabase at all, which says
+                        // nothing about whether the refresh_token is
+                        // actually still good. Skip this tick without
+                        // logging out and, critically, without `break`ing
+                        // the loop — it used to stop entirely here, so a
+                        // long offline stretch meant this loop never ran
+                        // again for the rest of the session even after
+                        // reconnecting.
+                        Err(crate::api::AuthError::Network(e)) => {
+                            clog!("Proactive refresh couldn't reach the server (offline?), will retry next tick: {}", e);
+                        }
+                        Err(crate::api::AuthError::Rejected(e)) => {
+                            clog!("Token refresh rejected, logging out: {}", e);
+                            storage.remove_item("auth_token").ok();
+                            storage.remove_item("refresh_token").ok();
                             storage.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+                            storage.remove_item(LAST_REFRESHED_AT_KEY).ok();
                             auth_token.set(None);
                             user_id.set(None);
                             user_email.set(None);
@@ -554,10 +1138,11 @@ pub fn Navbar() -> Element {
             });
         }
     });
+    let width_class = if *is_desktop_viewport.read() { "w-96" } else { "w-full" };
     let activity_bar_class = if *activity_bar_tgl.read() {
-        "openedbtw fixed inset-y-0 right-0 z-[60] w-full xl:w-96 transition-transform duration-300 translate-x-0"
+        format!("openedbtw fixed inset-y-0 right-0 z-[60] {width_class} transition-transform duration-300 translate-x-0")
     } else {
-        "closedbtw fixed inset-y-0 right-0 z-[60] w-full xl:w-96 transition-transform duration-300 translate-x-full"
+        format!("closedbtw fixed inset-y-0 right-0 z-[60] {width_class} transition-transform duration-300 translate-x-full")
     };
  
     //
@@ -573,12 +1158,23 @@ pub fn Navbar() -> Element {
         Settings => "".to_string(),
         RecentlyDeleted => "".to_string(),
         SelfEntity => "".to_string(),
+        Momentos => "".to_string(),
+        Missed => "".to_string(),
     };
 
     rsx! {
 
         button {
-            class: "xl:hidden fixed flex z-51 left-4 top-1 text-2xl",
+            // Explicit h-12/w-12 (48px) hit-box, not just the glyph's own
+            // font-size — a bare text-2xl "☰" with no box was a ~24px tap
+            // target, well under the ~44px minimum comfortable touch size.
+            // Also shown (not just on mobile) when the docked desktop
+            // sidebar has auto-folded for width — otherwise there'd be no
+            // way to reach it at all at that width. Reuses the same
+            // mobile drawer (`Sidebar` component, driven by sidebarTgl) as
+            // a fallback overlay rather than a second sidebar
+            // implementation.
+            class: if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "hidden" } else { "fixed flex items-center justify-center z-51 left-3 top-1 h-12 w-12 text-3xl rounded-md active:bg-foreground/10 transition-colors" },
             onclick: move |_| {
                 let tgl = *sidebarTgl.read();
                 sidebarTgl.set(!tgl);
@@ -591,7 +1187,7 @@ pub fn Navbar() -> Element {
         if *backdropTgl.read() || *sidebarTgl.read() || *momentInputTgl.read() {
             div {
                 id: "backdrop",
-                class: "xl:hidden fixed inset-0 bg-black/20 z-30",
+                class: if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "hidden" } else { "fixed inset-0 bg-black/20 z-30" },
                 onclick: move |_| {
                     clog!("clicked");
                     momentInputTgl.set(false);
@@ -609,7 +1205,7 @@ pub fn Navbar() -> Element {
         if *activity_bar_tgl.read() {
             div {
                 id: "activity-bar-backdrop",
-                class: "hidden xl:block fixed inset-0 z-[59]",
+                class: if *is_desktop_viewport.read() { "fixed inset-0 z-[59]" } else { "hidden" },
                 onclick: move |_| {
                     backdropTgl.set(false);
                     activity_bar_tgl.set(false);
@@ -619,12 +1215,11 @@ pub fn Navbar() -> Element {
 
         div {
             style: "background-color:{BG};",
-            EntityModalCmp { }
             FullScreenEditorModalCmp { }
             OnTheFlyCmp { }
             button {
                 id: "add-moment-button",
-                class: "xl:hidden fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95",
+                class: if *is_desktop_viewport.read() { "hidden" } else { "fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95" },
                 style: "background-color:{HL};",
                 onclick: move |_| {
                     let current = *momentInputTgl.read();
@@ -633,10 +1228,13 @@ pub fn Navbar() -> Element {
                 if *momentInputTgl.read() { "✕" } else { "+" }
             }
             div {
-                class: if *momentInputTgl.read() {
-                    "xl:hidden fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-100 translate-y-0"
-                } else {
-                    "xl:hidden fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-0 translate-y-4 pointer-events-none"
+                class: {
+                    let hidden_on_desktop = if *is_desktop_viewport.read() { "hidden " } else { "" };
+                    if *momentInputTgl.read() {
+                        format!("{hidden_on_desktop}fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-100 translate-y-0")
+                    } else {
+                        format!("{hidden_on_desktop}fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-0 translate-y-4 pointer-events-none")
+                    }
                 },
                 MomentInputCmp { }
             }
@@ -664,7 +1262,7 @@ pub fn Navbar() -> Element {
                     // confirmation modals in entity_list_cmp/tag_list_cmp/
                     // project_list_cmp), pinning them inside the sidebar's
                     // 256px box instead of centering on the real viewport.
-                    class: "hidden xl:block h-full overflow-y-auto pb-[200px] w-64 border-r border-border bg-background",
+                    class: if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "block h-full overflow-y-auto pb-[200px] w-64 border-r border-border bg-background" } else { "hidden" },
                     div {
                         class:"h-1",
                     }
@@ -682,7 +1280,12 @@ pub fn Navbar() -> Element {
                     tag_list_cmp { }
                 }
                 div {
-                    class: "xl:w-2/3 w-full overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black/30",
+                    // pb-[200px] on mobile only — same reason as the
+                    // sidebar/activity-bar panels (a fixed floating button
+                    // sitting over the last bit of scrolled content), but
+                    // not wanted on desktop where nothing floats over this
+                    // column.
+                    class: if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "w-2/3 overflow-y-auto [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black/30" } else { "w-full overflow-y-auto pb-[200px] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-black/30" },
                     "{header_title}"
                     Outlet::<Route> {}
                 }
@@ -690,17 +1293,18 @@ pub fn Navbar() -> Element {
                     id:"activity-bar",
                     class: "{activity_bar_class} bg-background border-l border-border shadow-2xl",
                     if current_moment.read().is_some()
-                        || *activity_bar_view.read() == ABView::History
+                        || *activity_bar_view.read() == ABView::Story
                         || *activity_bar_view.read() == ABView::Stats
-                        || *activity_bar_view.read() == ABView::Info {
+                        || *activity_bar_view.read() == ABView::Info
+                        || *activity_bar_view.read() == ABView::Momentos {
                         match activity_bar_view.read().clone() {
                             ABView::Task => rsx! {
                                 ab_task_cmp {
                                     key: "{*activity_bar_tgl.read()}"
                                 }
                             },
-                            ABView::History => rsx! {
-                                ab_history_cmp {
+                            ABView::Story => rsx! {
+                                ab_story_cmp {
                                     key: "{*activity_bar_tgl.read()}"
                                 }
                             },
@@ -714,10 +1318,84 @@ pub fn Navbar() -> Element {
                                     key: "{*activity_bar_tgl.read()}"
                                 }
                             },
+                            ABView::Momentos => rsx! {
+                                ab_momentos_cmp {
+                                    key: "{*activity_bar_tgl.read()}"
+                                }
+                            },
                         }
                     }
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod sync_flush_tests {
+    use super::*;
+
+    #[test]
+    fn newer_server_timestamp_is_stale() {
+        assert!(is_stale("2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z"));
+    }
+
+    #[test]
+    fn older_or_equal_server_timestamp_is_not_stale() {
+        assert!(!is_stale("2026-01-02T00:00:00Z", "2026-01-01T00:00:00Z"));
+        assert!(!is_stale("2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn missing_or_unparseable_timestamps_fail_open_not_stale() {
+        assert!(!is_stale("", "2026-01-02T00:00:00Z"));
+        assert!(!is_stale("2026-01-01T00:00:00Z", ""));
+        assert!(!is_stale("garbage", "2026-01-02T00:00:00Z"));
+        assert!(!is_stale("2026-01-01T00:00:00Z", "garbage"));
+    }
+
+    #[test]
+    fn remap_id_substitutes_a_known_temp_id() {
+        let mut map = HashMap::new();
+        map.insert("temp-1".to_string(), "real-42".to_string());
+        assert_eq!(remap_id("temp-1", &map), "real-42");
+        assert_eq!(remap_id("unrelated", &map), "unrelated");
+    }
+
+    #[test]
+    fn remap_value_only_substitutes_matching_string_values() {
+        let mut map = HashMap::new();
+        map.insert("temp-1".to_string(), "real-42".to_string());
+        assert_eq!(remap_value(serde_json::json!("temp-1"), &map), serde_json::json!("real-42"));
+        assert_eq!(remap_value(serde_json::json!("other"), &map), serde_json::json!("other"));
+        assert_eq!(remap_value(serde_json::json!(5), &map), serde_json::json!(5));
+    }
+
+    #[test]
+    fn no_prior_refresh_is_always_due() {
+        assert!(is_refresh_due(None, 1_000_000));
+    }
+
+    #[test]
+    fn recent_refresh_is_not_due_yet() {
+        let now = 1_000_000;
+        assert!(!is_refresh_due(Some(now - 60), now));
+    }
+
+    #[test]
+    fn refresh_older_than_the_gate_is_due_again() {
+        let now = 1_000_000;
+        assert!(is_refresh_due(Some(now - MIN_REFRESH_INTERVAL_SECS - 1), now));
+    }
+
+    // The exact scenario this whole gate exists for: the 60-second flush
+    // loop and the 50-minute proactive loop both independently wanting to
+    // refresh — without this gate, both would call refresh_access_token,
+    // and since Supabase rotates the refresh token on use, whichever
+    // request lands second would be spending an already-consumed token.
+    #[test]
+    fn a_refresh_moments_ago_blocks_a_second_refresh_right_after() {
+        let now = 1_000_000;
+        assert!(!is_refresh_due(Some(now - 1), now));
     }
 }

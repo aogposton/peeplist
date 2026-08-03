@@ -4,6 +4,33 @@ use crate::Route;
 use crate::api::{update_password, ActiveStorage, VaultKind};
 use web_sys::window;
 
+// Triggers a real browser download of a string as a file — Blob + a
+// throwaway <a download> click, since there's no plain-Rust/web-sys-free
+// way to do this and Dioxus has no built-in for it. Takes {filename,
+// content} as one JS-side object (rather than two separate dioxus.recv()
+// values) since eval.send() here is a single one-shot call, not the
+// repeated-token loop pattern views/auth.rs's Turnstile script uses.
+#[cfg(not(feature = "desktop"))]
+const DOWNLOAD_FILE_SCRIPT: &str = r#"
+    const { filename, content } = await dioxus.recv();
+    const blob = new Blob([content], { type: "application/yaml" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+"#;
+
+#[cfg(not(feature = "desktop"))]
+#[derive(serde::Serialize)]
+struct DownloadPayload {
+    filename: String,
+    content: String,
+}
+
 // Settings page — account/vault-level controls, not data views. See memory
 // project_backlog_review_2026_07_21 / project_ui_backlog_2026_07_21. Data
 // export was built here 2026-07-22 then explicitly removed the same day —
@@ -32,7 +59,11 @@ pub fn SettingsCmp() -> Element {
     let mut moments = state.moments;
     let mut entities = state.entities;
 
-    let has_synced = user_email.read().is_some();
+    // See navbar.rs's vault_switcher_cmp for why this is auth_token, not
+    // user_email — the latter only populates after a session-check round
+    // trip that can stall or never complete while offline, which used to
+    // leave this permanently false despite a real session existing.
+    let has_synced = auth_token.read().is_some();
 
     let mut new_password = use_signal(String::new);
     let mut confirm_password = use_signal(String::new);
@@ -77,9 +108,27 @@ pub fn SettingsCmp() -> Element {
     let remove_synced_vault = move |_| {
         #[cfg(not(feature = "desktop"))]
         if let Some(storage) = window().and_then(|w| w.local_storage().ok().flatten()) {
-            storage.set("auth_token", "").ok();
-            storage.set("refresh_token", "").ok();
+            // remove_item, not set("", ...) — an empty string still reads
+            // back as Some("") on next launch (main.rs's startup restore),
+            // which every auth_token.is_some() check treats as "logged in"
+            // with nothing real behind it. See navbar.rs's remove_synced
+            // for the live bug this caused (permanently stuck behind
+            // Login's already-logged-in redirect, no way back in).
+            storage.remove_item("auth_token").ok();
+            storage.remove_item("refresh_token").ok();
+            // Same key as navbar.rs's LAST_REFRESHED_AT_KEY (the shared
+            // refresh-coordination clock) — stale here would just mean a
+            // fresh future login's first refresh gets skipped for up to 5
+            // minutes, harmless but worth clearing along with the tokens.
+            storage.remove_item("auth_last_refreshed_at").ok();
         }
+        // Offline-first sync's mirror/queue (see api::synced_mirror/
+        // sync_queue) are cached under this account's Synced session —
+        // wipe them here too, or a later "+ Add a vault" login (same
+        // browser, maybe a different account) would see the previous
+        // account's stale cached data before the first real fetch.
+        crate::api::synced_mirror::clear();
+        crate::api::sync_queue::clear();
         auth_token.set(None);
         user_id.set(None);
         user_email.set(None);
@@ -93,54 +142,157 @@ pub fn SettingsCmp() -> Element {
         confirming_remove.set(false);
     };
 
-    // "Delete my account and data" (2026-07-29) — see SupabaseStorage::
-    // delete_all_data's own doc comment for exactly what this does and
-    // doesn't do (clears data via the existing owner-scoped RLS policies;
-    // never touches the actual login/auth.users row, which needs a
-    // privileged key this client can't hold).
-    let mut confirming_delete_data = use_signal(|| false);
-    let mut deleting_data = use_signal(|| false);
-    let mut delete_data_error = use_signal(|| None::<String>);
-    let delete_my_data = move |_| {
-        if *deleting_data.read() {
+    // "Delete my account" (2026-08-02, replacing the old two-tier "remove
+    // vault" vs "delete data" vs "delete account" spread — see memory: a
+    // user explicitly asked for one action that deletes everything,
+    // including the login, not a halfway "just the data" option that left
+    // an extra step for them to think about). Calls the delete-account
+    // Supabase Edge Function — see SupabaseStorage::delete_account's own
+    // doc comment for why that has to be a server-side call, not something
+    // done with the client's own token.
+    let mut confirming_delete_account = use_signal(|| false);
+    let mut deleting_account = use_signal(|| false);
+    let mut delete_account_error = use_signal(|| None::<String>);
+    let delete_my_account = move |_| {
+        if *deleting_account.read() {
             return;
         }
         let Some(token) = auth_token.read().clone() else {
-            delete_data_error.set(Some("You need to be logged in to the Synced vault to delete its data.".to_string()));
+            delete_account_error.set(Some("You need to be logged in to the Synced vault to delete its account.".to_string()));
             return;
         };
-        deleting_data.set(true);
-        delete_data_error.set(None);
+        deleting_account.set(true);
+        delete_account_error.set(None);
         spawn(async move {
             let storage = ActiveStorage::for_vault(VaultKind::Synced, Some(token));
             let result = match &storage {
-                ActiveStorage::Supabase(s) => s.delete_all_data().await,
+                ActiveStorage::Supabase(s) => s.delete_account().await,
                 ActiveStorage::Local(_) => Ok(()), // can't happen — Synced requested with a token present
             };
             match result {
                 Ok(()) => {
                     moments.set(vec![]);
                     entities.set(vec![]);
-                    confirming_delete_data.set(false);
+                    confirming_delete_account.set(false);
                     // Same "land back on Local, not an empty Synced view"
                     // posture as Remove Synced vault above.
                     #[cfg(not(feature = "desktop"))]
                     if let Some(s) = window().and_then(|w| w.local_storage().ok().flatten()) {
-                        s.set("auth_token", "").ok();
-                        s.set("refresh_token", "").ok();
+                        s.remove_item("auth_token").ok();
+                        s.remove_item("refresh_token").ok();
                         s.set("active_vault", VaultKind::Local.as_storage_str()).ok();
+                        s.remove_item("auth_last_refreshed_at").ok();
                     }
+                    // The account itself no longer exists server-side —
+                    // nothing left to ever flush this queue against.
+                    crate::api::synced_mirror::clear();
+                    crate::api::sync_queue::clear();
                     auth_token.set(None);
                     user_id.set(None);
                     user_email.set(None);
                     active_vault.set(VaultKind::Local);
                 }
                 Err(e) => {
-                    clog!("Error deleting synced data: {}", e);
-                    delete_data_error.set(Some("Couldn't delete everything — some data may remain. Try again.".to_string()));
+                    clog!("Error deleting account: {}", e);
+                    delete_account_error.set(Some(format!("Couldn't delete your account: {e}")));
                 }
             }
-            deleting_data.set(false);
+            deleting_account.set(false);
+        });
+    };
+
+    // Full data backup/restore (2026-08-01) — see memory: a real, distressing
+    // data-loss incident is what prompted this. Deliberately not gated by
+    // has_synced like the sections below — it operates on whichever vault
+    // is currently active (Local or Synced), since "I have no way to get my
+    // data back out" is exactly as bad for a Local-only user.
+    let effective_vault = active_vault.read().effective(&auth_token.read());
+    let vault_label = if effective_vault == VaultKind::Synced { "Synced" } else { "Local" };
+
+    let mut backup_busy = use_signal(|| false);
+    let mut backup_error = use_signal(|| None::<String>);
+    let mut backup_status = use_signal(|| None::<String>);
+    let mut restore_busy = use_signal(|| false);
+    let mut restore_error = use_signal(|| None::<String>);
+    let mut restore_status = use_signal(|| None::<String>);
+
+    let download_backup = move |_| {
+        if *backup_busy.read() {
+            return;
+        }
+        backup_busy.set(true);
+        backup_error.set(None);
+        backup_status.set(None);
+        let vault = active_vault.read().effective(&auth_token.read());
+        let token = auth_token.read().clone();
+        spawn(async move {
+            match crate::api::export_backup(vault, token).await {
+                Ok(yaml) => {
+                    let filename = format!(
+                        "black-server-book-backup-{}.yaml",
+                        chrono::Utc::now().format("%Y-%m-%d")
+                    );
+                    #[cfg(not(feature = "desktop"))]
+                    {
+                        let mut eval = document::eval(DOWNLOAD_FILE_SCRIPT);
+                        let _ = eval.send(DownloadPayload { filename, content: yaml });
+                    }
+                    backup_status.set(Some("Backup downloaded.".to_string()));
+                }
+                Err(e) => {
+                    clog!("Error exporting backup: {}", e);
+                    backup_error.set(Some(format!("Couldn't create the backup: {e}")));
+                }
+            }
+            backup_busy.set(false);
+        });
+    };
+
+    let mut handle_restore_file = move |text: String| {
+        if *restore_busy.read() {
+            return;
+        }
+        restore_busy.set(true);
+        restore_error.set(None);
+        restore_status.set(None);
+        let vault = active_vault.read().effective(&auth_token.read());
+        let token = auth_token.read().clone();
+        spawn(async move {
+            match crate::api::import_backup(vault, token.clone(), text).await {
+                Ok(summary) => {
+                    let untyped_note = if summary.entities_untyped > 0 {
+                        format!(
+                            " {} imported without a matching type in this vault (set them from the Info panel).",
+                            summary.entities_untyped
+                        )
+                    } else {
+                        String::new()
+                    };
+                    restore_status.set(Some(format!(
+                        "Restored {} {}, {} {}, {} {}.{untyped_note}",
+                        summary.entities, if summary.entities == 1 { "entity" } else { "entities" },
+                        summary.moments, if summary.moments == 1 { "moment" } else { "moments" },
+                        summary.reactions, if summary.reactions == 1 { "reaction" } else { "reactions" },
+                    )));
+                    // Same vault/token as before the restore, so the fetch
+                    // effect in views/home.rs (which only reruns when those
+                    // change) won't pick this up on its own — refetch here
+                    // so the restored data actually shows up without a
+                    // manual page reload.
+                    let storage = ActiveStorage::for_vault(vault, token);
+                    if let Ok(m) = storage.get_moments().await {
+                        moments.set(m);
+                    }
+                    if let Ok(e) = storage.get_entities().await {
+                        entities.set(e);
+                    }
+                }
+                Err(e) => {
+                    clog!("Error importing backup: {}", e);
+                    restore_error.set(Some(format!("Couldn't restore that backup: {e}")));
+                }
+            }
+            restore_busy.set(false);
         });
     };
 
@@ -163,6 +315,67 @@ pub fn SettingsCmp() -> Element {
         }
         div {
             class: "mx-4 mb-3 flex flex-col gap-4",
+            div {
+                class: "rounded-lg border border-border bg-background p-4",
+                h3 { class: "text-sm font-semibold text-foreground mb-1", "Backup & restore" }
+                p {
+                    class: "text-sm text-muted-foreground mb-3",
+                    "Downloads everything in your {vault_label} vault — entities, moments, reactions, all of it — as one file you can restore from later, on this device or any other."
+                }
+                div {
+                    class: "flex flex-wrap items-center gap-3",
+                    button {
+                        class: "rounded-md border border-transparent bg-primary text-primary-foreground text-sm px-4 py-1.5 font-medium hover:bg-primary/90 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                        disabled: *backup_busy.read(),
+                        onclick: download_backup,
+                        if *backup_busy.read() { "Preparing…" } else { "Download backup" }
+                    }
+                    label {
+                        r#for: "restore-backup-input",
+                        class: if *restore_busy.read() {
+                            "rounded-md border border-border bg-background text-foreground text-sm px-4 py-1.5 font-medium inline-block opacity-50 cursor-not-allowed"
+                        } else {
+                            "rounded-md border border-border bg-background text-foreground text-sm px-4 py-1.5 font-medium hover:bg-muted transition-colors cursor-pointer inline-block"
+                        },
+                        if *restore_busy.read() { "Restoring…" } else { "Restore from backup file" }
+                    }
+                    input {
+                        id: "restore-backup-input",
+                        r#type: "file",
+                        accept: "application/yaml,text/yaml,.yaml,.yml",
+                        class: "hidden",
+                        disabled: *restore_busy.read(),
+                        onchange: move |e: Event<FormData>| {
+                            let Some(file) = e.files().into_iter().next() else { return };
+                            spawn(async move {
+                                match file.read_string().await {
+                                    Ok(text) => handle_restore_file(text),
+                                    Err(err) => {
+                                        clog!("Error reading backup file: {:?}", err);
+                                        restore_error.set(Some("Couldn't read that file.".to_string()));
+                                    }
+                                }
+                            });
+                        },
+                    }
+                }
+                if let Some(msg) = backup_status.read().as_ref() {
+                    p { class: "text-sm text-foreground mt-2", "{msg}" }
+                }
+                if let Some(msg) = backup_error.read().as_ref() {
+                    p { class: "text-sm text-destructive mt-2", "{msg}" }
+                }
+                if let Some(msg) = restore_status.read().as_ref() {
+                    p { class: "text-sm text-foreground mt-2", "{msg}" }
+                }
+                if let Some(msg) = restore_error.read().as_ref() {
+                    p { class: "text-sm text-destructive mt-2", "{msg}" }
+                }
+                p {
+                    class: "text-xs text-muted-foreground mt-2",
+                    "Restoring adds to what's already here rather than replacing it — importing the same backup twice will duplicate everything in it."
+                }
+            }
             div {
                 class: "rounded-lg border border-border bg-background p-4 flex items-center justify-between gap-3",
                 div {
@@ -316,36 +529,36 @@ pub fn SettingsCmp() -> Element {
                 }
                 div {
                     class: "rounded-lg border border-destructive/30 bg-background p-4",
-                    h3 { class: "text-sm font-semibold text-foreground mb-1", "Delete my account and data" }
+                    h3 { class: "text-sm font-semibold text-foreground mb-1", "Delete my account" }
                     p {
                         class: "text-sm text-muted-foreground mb-3",
-                        "Permanently deletes everyone and everything in your Synced vault — entities, moments, reactions, all of it. This can't be undone. Your login itself stays active (contact us if you want that gone too); you'll land back on the Local vault, which is untouched."
+                        "Permanently deletes everything in your Synced vault — entities, moments, reactions, all of it — and your login itself. This can't be undone; you'd need to sign up again with this email to come back, starting from empty. You'll land back on the Local vault, which is untouched."
                     }
-                    if let Some(msg) = delete_data_error.read().as_ref() {
+                    if let Some(msg) = delete_account_error.read().as_ref() {
                         p { class: "text-sm text-destructive mb-2", "{msg}" }
                     }
-                    if *confirming_delete_data.read() {
+                    if *confirming_delete_account.read() {
                         div {
                             class: "flex items-center gap-2",
-                            span { class: "text-sm text-foreground", "Permanently delete all Synced data?" }
+                            span { class: "text-sm text-foreground", "Permanently delete your account and everything in it?" }
                             button {
                                 class: "rounded-md border border-transparent bg-destructive text-primary-foreground dark:text-foreground text-sm px-3 py-1.5 font-medium hover:bg-destructive/90 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
-                                disabled: *deleting_data.read(),
-                                onclick: delete_my_data,
-                                if *deleting_data.read() { "Deleting…" } else { "Confirm" }
+                                disabled: *deleting_account.read(),
+                                onclick: delete_my_account,
+                                if *deleting_account.read() { "Deleting…" } else { "Confirm" }
                             }
                             button {
                                 class: "rounded-md border border-border bg-background text-foreground text-sm px-3 py-1.5 font-medium hover:bg-muted transition-colors cursor-pointer",
-                                disabled: *deleting_data.read(),
-                                onclick: move |_| confirming_delete_data.set(false),
+                                disabled: *deleting_account.read(),
+                                onclick: move |_| confirming_delete_account.set(false),
                                 "Cancel"
                             }
                         }
                     } else {
                         button {
                             class: "rounded-md border border-destructive/50 bg-background text-destructive text-sm px-4 py-1.5 font-medium hover:bg-destructive/10 transition-colors cursor-pointer",
-                            onclick: move |_| confirming_delete_data.set(true),
-                            "Delete my account and data"
+                            onclick: move |_| confirming_delete_account.set(true),
+                            "Delete my account"
                         }
                     }
                 }

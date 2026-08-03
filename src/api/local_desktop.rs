@@ -142,6 +142,7 @@ impl LocalStorage {
             entity_type_id: None,
             parent_entity_id: None,
             created_at: now(),
+            updated_at: now(),
             drift: 2.0,
             metadata: None,
         };
@@ -204,7 +205,10 @@ impl LocalStorage {
     }
 
     pub async fn get_entity_types(&self) -> Result<Vec<EntityTypeType>, StorageError> {
-        const DEFAULT_ENTITY_TYPES: &[&str] = &["Friend", "Family", "Colleague", "Partner"];
+        const DEFAULT_ENTITY_TYPES: &[&str] = &[
+            "Friend", "Family", "Colleague", "Partner",
+            "Person", "Group", "Place", "Thing", "Pet", "Organization", "Audience",
+        ];
         let mut names: Vec<String> = self.all()?.into_iter().filter_map(|f| f.entity.entity_type_id).collect();
         for default in DEFAULT_ENTITY_TYPES {
             if !names.iter().any(|n| n == default) {
@@ -232,6 +236,7 @@ impl LocalStorage {
             deleted_at: None,
             reactions: None,
             created_at: now(),
+            updated_at: now(),
             depends_on: None,
             metadata: None,
         };
@@ -247,6 +252,7 @@ impl LocalStorage {
             entity_type_id: e.entity_type_id,
             parent_entity_id: e.parent_entity_id,
             created_at: now(),
+            updated_at: now(),
             drift: 2.0,
             metadata: e.metadata,
         };

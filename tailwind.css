@@ -1,6 +1,20 @@
 @import "tailwindcss";
 @source "/Users/aogposton/.cargo/git/checkouts/lumen-blocks-5600ca768664ebbd/57eda26/blocks/src/**/*.rs";
 
+/* Mobile-vs-desktop layout switch used to live here as a `desktop-w:`/
+   `desktop-h:` custom-variant pair (width>=500px OR height>=900px). Moved
+   to Rust/JS (see AppState::is_desktop_viewport, set from window.innerWidth/
+   innerHeight in layouts::Navbar) after that CSS version shipped looking
+   right in Chrome's iPhone SE emulation but failed silently on a real
+   iPhone SE — the compiled output nests each class's `@media` *inside* its
+   own selector block, and that compiled shape turned out to depend on
+   which Tailwind v4 point-release was doing the compiling (confirmed by
+   hand: v4.3.3 emitted a flat, always-applies `@media {...}` block for the
+   exact same `@custom-variant` source that v4.1.5 — what this project's
+   `dx` actually bundles — nested instead). Not worth re-attempting as CSS
+   without pinning and continuously re-verifying an exact Tailwind version;
+   plain JS numbers compared in Rust have no such dependency. */
+
 :root {
     --background: oklch(1 0 0);
     --foreground: oklch(0.145 0 0);

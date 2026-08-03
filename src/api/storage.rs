@@ -1,6 +1,9 @@
 use serde_json::Value;
 use crate::types::*;
 use super::client::SupabaseClient;
+use super::sync_queue::{self, QueuedOp};
+use super::synced_mirror;
+use uuid::Uuid;
 
 // Local-first pivot, Phase 1b (see /Users/aogposton/.claude/plans/joyful-brewing-feather.md
 // and memory reference_local_first_pivot_plan). Backend selection becomes a
@@ -132,36 +135,150 @@ impl SupabaseStorage {
         Self { token }
     }
 
+    // getMoments/getDeletedMoments are two independently-filtered views of
+    // the same server table (deleted_at is.null / not.is.null) — a cold
+    // mirror has to seed from *both* together, or whichever of get_moments/
+    // get_deleted_moments happens to run first would seed the mirror with
+    // only its own half and starve the other view forever after (it'd never
+    // see an empty mirror again to trigger a re-seed).
+    async fn ensure_moments_seeded(&self) -> Result<Vec<MomentType>, StorageError> {
+        if let Some(cached) = synced_mirror::get_moments() {
+            return Ok(cached);
+        }
+        let mut all = super::moment::getMoments(self.token.clone()).await?;
+        let deleted = super::moment::getDeletedMoments(self.token.clone()).await?;
+        all.extend(deleted);
+        synced_mirror::set_moments(&all);
+        Ok(all)
+    }
+
+    // Cache-first (offline-first sync, see api::synced_mirror/sync_queue):
+    // a populated mirror returns instantly with no network round-trip at
+    // all; only a cold mirror (first login, or a cleared cache) falls back
+    // to the direct fetch, seeding the mirror from the result. No call site
+    // changes needed — this stays behind the same `ActiveStorage` seam
+    // every one of them already goes through.
     pub async fn get_moments(&self) -> Result<Vec<MomentType>, StorageError> {
-        Ok(super::moment::getMoments(self.token.clone()).await?)
+        Ok(self.ensure_moments_seeded().await?.into_iter().filter(|m| m.deleted_at.is_none()).collect())
     }
 
     pub async fn get_entities(&self) -> Result<Vec<EntityType>, StorageError> {
-        Ok(super::entity::getEntities(self.token.clone()).await?)
+        if let Some(cached) = synced_mirror::get_entities() {
+            return Ok(cached);
+        }
+        let fresh = super::entity::getEntities(self.token.clone()).await?;
+        synced_mirror::set_entities(&fresh);
+        Ok(fresh)
     }
 
     pub async fn get_entity_types(&self) -> Result<Vec<EntityTypeType>, StorageError> {
-        Ok(super::entity::getEntityTypes(self.token.clone()).await?)
+        if let Some(cached) = synced_mirror::get_entity_types() {
+            return Ok(cached);
+        }
+        let fresh = super::entity::getEntityTypes(self.token.clone()).await?;
+        synced_mirror::set_entity_types(&fresh);
+        Ok(fresh)
     }
 
+    // Writes apply to the mirror immediately (same instant-Signal-update UX
+    // Local vault already has — see views/home.rs, which just does
+    // `moments.write().push(created)` the moment this future resolves) and
+    // queue the real network call for the background flush loop
+    // (layouts/navbar.rs) instead of awaiting it here. A client-minted
+    // `temp_id` stands in for the server's real id until the flush loop's
+    // create actually lands — see sync_queue::QueuedOp's doc comment.
     pub async fn create_moment(&self, m: NewMomentType) -> Result<MomentType, StorageError> {
-        Ok(super::moment::createMoment(m, self.token.clone()).await?)
+        let temp_id = Uuid::new_v4().to_string();
+        let moment = MomentType {
+            id: temp_id.clone(),
+            title: m.title.clone(),
+            description: m.description.clone(),
+            gravity: m.gravity,
+            entity_id: m.entity_id.clone(),
+            moment_type_id: m.moment_type_id,
+            due_at: None,
+            completed_at: None,
+            deleted_at: m.deleted_at.clone(),
+            reactions: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            depends_on: None,
+            metadata: None,
+        };
+        let mut moments = synced_mirror::get_moments().unwrap_or_default();
+        moments.push(moment.clone());
+        synced_mirror::set_moments(&moments);
+        sync_queue::push(QueuedOp::CreateMoment { temp_id, new: m });
+        Ok(moment)
     }
 
     pub async fn create_entity(&self, e: NewEntityType) -> Result<EntityType, StorageError> {
-        Ok(super::entity::createEntity(e, self.token.clone()).await?)
+        let temp_id = Uuid::new_v4().to_string();
+        let entity = EntityType {
+            id: temp_id.clone(),
+            name: e.name.clone(),
+            entity_type_id: e.entity_type_id.clone(),
+            parent_entity_id: e.parent_entity_id.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            drift: 2.0,
+            metadata: e.metadata.clone(),
+        };
+        let mut entities = synced_mirror::get_entities().unwrap_or_default();
+        entities.push(entity.clone());
+        synced_mirror::set_entities(&entities);
+        sync_queue::push(QueuedOp::CreateEntity { temp_id, new: e });
+        Ok(entity)
     }
 
     pub async fn create_reaction(&self, r: NewReactionType) -> Result<ReactionType, StorageError> {
-        Ok(super::moment::createReaction(r, self.token.clone()).await?)
+        let temp_id = Uuid::new_v4().to_string();
+        let reaction = ReactionType {
+            id: temp_id.clone(),
+            description: r.description.clone(),
+            moment_id: r.moment_id.clone(),
+            value: r.value,
+        };
+        let mut moments = synced_mirror::get_moments().unwrap_or_default();
+        if let Some(m) = moments.iter_mut().find(|m| m.id == r.moment_id) {
+            m.reactions.get_or_insert_with(Vec::new).push(reaction.clone());
+        }
+        synced_mirror::set_moments(&moments);
+        sync_queue::push(QueuedOp::CreateReaction { temp_id, new: r });
+        Ok(reaction)
     }
 
     pub async fn update_moment_field(&self, id: String, field: &str, value: Value) -> Result<(), StorageError> {
-        Ok(super::moment::update_moment_field(id, field, value, self.token.clone()).await?)
+        let coerced = super::coerce_fk_value(field, value.clone());
+        let mut moments = synced_mirror::get_moments().unwrap_or_default();
+        // Captured BEFORE patching — this is the last server-confirmed
+        // updated_at we know of, the baseline the flush loop's LWW check
+        // compares against later. Deliberately not bumped to "now" here:
+        // that would be a client-clock timestamp compared against the
+        // server's own clock, which can drift.
+        let staged_updated_at = moments.iter().find(|m| m.id == id).map(|m| m.updated_at.clone()).unwrap_or_default();
+        if let Some(pos) = moments.iter().position(|m| m.id == id) {
+            if let Some(patched) = synced_mirror::patch_moment(&moments[pos], field, coerced) {
+                moments[pos] = patched;
+            }
+        }
+        synced_mirror::set_moments(&moments);
+        sync_queue::push(QueuedOp::UpdateMomentField { id, field: field.to_string(), value, staged_updated_at });
+        Ok(())
     }
 
     pub async fn update_entity_field(&self, id: String, field: &str, value: Value) -> Result<(), StorageError> {
-        Ok(super::entity::update_entity_field(id, field, value, self.token.clone()).await?)
+        let coerced = super::coerce_fk_value(field, value.clone());
+        let mut entities = synced_mirror::get_entities().unwrap_or_default();
+        let staged_updated_at = entities.iter().find(|e| e.id == id).map(|e| e.updated_at.clone()).unwrap_or_default();
+        if let Some(pos) = entities.iter().position(|e| e.id == id) {
+            if let Some(patched) = synced_mirror::patch_entity(&entities[pos], field, coerced) {
+                entities[pos] = patched;
+            }
+        }
+        synced_mirror::set_entities(&entities);
+        sync_queue::push(QueuedOp::UpdateEntityField { id, field: field.to_string(), value, staged_updated_at });
+        Ok(())
     }
 
     // Unlike Local's storage (see LocalStorage::reassign_moment_entity —
@@ -176,60 +293,80 @@ impl SupabaseStorage {
         self.update_moment_field(moment_id, "entity_id", serde_json::json!(new_entity_id)).await
     }
 
+    // Soft delete, mirrored immediately (same coerce as update_moment_field
+    // above uses, since this is really just a deleted_at patch server-side
+    // too — see moment::deleteMoment).
     pub async fn delete_moment(&self, moment: MomentType) -> Result<(), StorageError> {
-        Ok(super::moment::deleteMoment(moment, self.token.clone()).await?)
+        let deleted_at = chrono::Utc::now().to_rfc3339();
+        let mut moments = synced_mirror::get_moments().unwrap_or_default();
+        if let Some(pos) = moments.iter().position(|m| m.id == moment.id) {
+            moments[pos].deleted_at = Some(deleted_at);
+        }
+        synced_mirror::set_moments(&moments);
+        sync_queue::push(QueuedOp::DeleteMoment(moment));
+        Ok(())
     }
 
+    // A real hard delete server-side, which can fail on a live foreign-key
+    // violation (something still references this entity) — unlike every
+    // other write here, that rejection used to surface synchronously to the
+    // caller (see the old direct-network version of this method). Now that
+    // it's queued, a rejection only shows up later in the flush loop's log,
+    // not in the UI at the moment of deletion — an accepted tradeoff of
+    // going optimistic (see the sync plan's "real risks" section).
     pub async fn delete_entity(&self, id: String) -> Result<(), StorageError> {
-        super::entity::deleteEntity(id, self.token.clone()).await.map_err(StorageError::Remote)
+        let mut entities = synced_mirror::get_entities().unwrap_or_default();
+        entities.retain(|e| e.id != id);
+        synced_mirror::set_entities(&entities);
+        sync_queue::push(QueuedOp::DeleteEntity(id));
+        Ok(())
     }
 
     pub async fn delete_reaction(&self, reaction: ReactionType) -> Result<(), StorageError> {
-        Ok(super::moment::deleteReaction(reaction, self.token.clone()).await?)
+        let mut moments = synced_mirror::get_moments().unwrap_or_default();
+        if let Some(m) = moments.iter_mut().find(|m| m.id == reaction.moment_id) {
+            if let Some(reactions) = m.reactions.as_mut() {
+                reactions.retain(|r| r.id != reaction.id);
+            }
+        }
+        synced_mirror::set_moments(&moments);
+        sync_queue::push(QueuedOp::DeleteReaction(reaction));
+        Ok(())
     }
 
     pub async fn get_deleted_moments(&self) -> Result<Vec<MomentType>, StorageError> {
-        Ok(super::moment::getDeletedMoments(self.token.clone()).await?)
+        Ok(self.ensure_moments_seeded().await?.into_iter().filter(|m| m.deleted_at.is_some()).collect())
     }
 
     pub async fn restore_moment(&self, id: String) -> Result<(), StorageError> {
-        Ok(super::moment::restoreMoment(id, self.token.clone()).await?)
+        let mut moments = synced_mirror::get_moments().unwrap_or_default();
+        if let Some(pos) = moments.iter().position(|m| m.id == id) {
+            moments[pos].deleted_at = None;
+        }
+        synced_mirror::set_moments(&moments);
+        sync_queue::push(QueuedOp::RestoreMoment(id));
+        Ok(())
     }
 
-    // "Delete my account and data" (2026-07-29, closing a real pre-launch
-    // gap — no deletion path existed at all). Deletes everything this
-    // account owns, in FK-dependency order (reactions reference moments,
-    // moments reference entities), using the caller's own token — the
-    // existing owner-scoped RLS policies (scripts/2026-07-22-rls-and-self-
-    // entity.sql) already allow this, no new schema needed.
-    //
-    // This only ever clears data — it never touches the auth.users row
-    // itself (the actual login), which needs a privileged service-role key
-    // this client-side code can never safely hold. See
-    // scripts/2026-07-29-delete-account-function/ for that separate,
-    // harder step (a Supabase Edge Function, deployed by the user, not run
-    // from here). Without it, someone who deletes their data can still log
-    // back in — so a fresh Self entity is recreated here (mirroring
-    // exactly what the signup trigger does) rather than leaving the
-    // account in a broken no-Self-entity state if they do.
-    pub async fn delete_all_data(&self) -> Result<(), StorageError> {
+    // "Delete my account" (2026-08-02, replacing the earlier data-only
+    // "Delete my account and data" — see memory: a user explicitly asked
+    // for one full deletion, not a two-tier data-vs-login choice). Calls
+    // the delete-account Supabase Edge Function (supabase/functions/delete-
+    // account/index.ts, deployed separately via the Supabase CLI — this
+    // client-side code can never safely hold the service-role key deleting
+    // the actual auth.users row needs). That function deletes this
+    // account's reactions/moments/entities *then* the auth.users row
+    // itself, in that order deliberately — deleting the auth row first
+    // would violate entities.user_id's foreign key while any of this
+    // account's entities (e.g. its own Self row) still reference it.
+    pub async fn delete_account(&self) -> Result<(), StorageError> {
         let client = SupabaseClient::new(self.token.clone());
-        for table in ["reactions", "moments", "entities"] {
-            let resp = client.delete_all(table).send().await
-                .map_err(|e| StorageError::Remote(e.to_string()))?;
-            if !resp.status().is_success() {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(StorageError::Remote(format!("Failed to delete {table}: {text}")));
-            }
+        let resp = client.functions_post("delete-account").send().await
+            .map_err(|e| StorageError::Remote(e.to_string()))?;
+        if !resp.status().is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(StorageError::Remote(format!("Failed to delete account: {text}")));
         }
-        self.create_entity(NewEntityType {
-            name: "Self".to_string(),
-            entity_type_id: Some(crate::types::SELF_ENTITY_TYPE_ID.to_string()),
-            parent_entity_id: None,
-            user_id: None,
-            archived_at: None,
-            metadata: None,
-        }).await?;
         Ok(())
     }
 }

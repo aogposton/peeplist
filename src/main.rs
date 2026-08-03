@@ -31,6 +31,8 @@ mod api;
 mod theme;
 mod ui;
 mod quick_capture;
+mod taskwarrior_date;
+mod momento;
 mod urgency;
 
 pub use urgency::UrgencyWeights;
@@ -84,6 +86,22 @@ pub enum View {
     Notes,
     Settings,
     RecentlyDeleted,
+    // Momentos (2026-08-02) — every entity's recurring/personal moments
+    // (birthdays, "call every Sunday") in one cross-entity list, sorted by
+    // next-upcoming-occurrence. Complements the per-entity Momentos tab
+    // (components::entity::ab_momentos_cmp), same relationship the global
+    // Scheduled view already has to a moment's own scheduled_at.
+    Momentos,
+    // A moment given an until_at (taskwarrior-style deadline, set via the
+    // `until:` quick-capture keyword) that's passed without ever being
+    // completed — see urgency::is_missed. Same relationship to until_at
+    // that Scheduled has to scheduled_at: is_missed hides it from every
+    // normal view once it's passed, and this is the one place it's still
+    // visible, so there's somewhere to go find it. 2026-08-03: until_at
+    // existed as editable metadata since 2026-07-something but had zero
+    // actual behavior anywhere in the app until this view's addition
+    // finally gave it one.
+    Missed,
     // Reuses the same rendering as View::Entity (see views/home.rs's
     // combined `Entity | SelfEntity` match arm) — the only difference is
     // this one's a real sidebar View (hideable, listed in VIEW_ENTRIES)
@@ -110,6 +128,8 @@ impl View {
             View::AllEntities => Some("all_entities"),
             View::RecentlyDeleted => Some("recently_deleted"),
             View::SelfEntity => Some("self_entity"),
+            View::Momentos => Some("momentos"),
+            View::Missed => Some("missed"),
             View::Entity | View::Settings => None,
         }
     }
@@ -125,6 +145,8 @@ impl View {
             "all_entities" => Some(View::AllEntities),
             "recently_deleted" => Some(View::RecentlyDeleted),
             "self_entity" => Some(View::SelfEntity),
+            "momentos" => Some(View::Momentos),
+            "missed" => Some(View::Missed),
             _ => None,
         }
     }
@@ -145,6 +167,8 @@ impl View {
             View::AllEntities => Some("All Entities"),
             View::RecentlyDeleted => Some("Recently Deleted"),
             View::SelfEntity => Some("Self"),
+            View::Momentos => Some("Momentos"),
+            View::Missed => Some("Missed"),
             View::Entity | View::Settings => None,
         }
     }
@@ -170,9 +194,14 @@ pub fn persist_hidden_views(views: &[View]) {
 #[derive(Clone, PartialEq)]
 pub enum ABView {
    Task,
-   History,
+   // Renamed from History (2026-08-02) — same moment timeline, friendlier
+   // label. See components::entity::ab_story_cmp (renamed to match).
+   Story,
    Stats,
    Info,
+   // Momentos (2026-08-02) — an entity's recurring/personal moments
+   // (birthdays, "call every Sunday"). See components::entity::ab_momentos_cmp.
+   Momentos,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -244,6 +273,8 @@ impl fmt::Display for View {
             View::Settings => write!(f, "Settings"),
             View::RecentlyDeleted => write!(f, "Recently Deleted"),
             View::SelfEntity => write!(f, "Self"),
+            View::Momentos => write!(f, "Momentos"),
+            View::Missed => write!(f, "Missed"),
         }
     }
 }
@@ -253,7 +284,6 @@ pub struct AppState {
     pub moments: Signal<Vec<MomentType>>,
     pub entities: Signal<Vec<EntityType>>,
     pub momentInputTgl: Signal<bool>,
-    pub entityModalTgl: Signal<bool>,
     pub sidebarTgl: Signal<bool>,
     pub currentView: Signal<View>,
     pub current_entity: Signal<Option<EntityType>>,
@@ -342,6 +372,40 @@ pub struct AppState {
     // presses in a row without an intervening render still register as two
     // distinct requests.
     pub focus_composer: Signal<u32>,
+    // Mobile-vs-desktop layout switch (2026-08-01), computed in Rust/JS
+    // (window.innerWidth/innerHeight via layouts::Navbar's resize listener)
+    // instead of a Tailwind CSS breakpoint. A CSS custom-variant version of
+    // this (desktop-w:/desktop-h: in tailwind.css) shipped first and looked
+    // right in Chrome's device emulation, but failed silently on a real
+    // iPhone SE — Tailwind v4's compiled output relies on native CSS
+    // nesting (`.foo { @media (...) { ... } }`), which needs Safari 16.4+;
+    // an older/real device just never applied the rule at all, leaving the
+    // desktop layout stuck on. Plain JS numbers compared in Rust have no
+    // such browser-version dependency. True (desktop) is the default until
+    // the first real reading arrives.
+    pub is_desktop_viewport: Signal<bool>,
+    // Local-timezone offset in minutes, JS Date.getTimezoneOffset()
+    // convention (positive = local time is BEHIND UTC, e.g. +240 for EDT) —
+    // captured once via layouts::Navbar's mount effect. due_at/scheduled_at/
+    // until_at are always stored as real UTC (matches what Supabase's
+    // timestamptz column actually does with them — see urgency.rs's
+    // parse_moment_datetime doc comment), but every place that *displays* or
+    // *edits* one of those fields as a raw date/time was showing/writing the
+    // bare UTC digits with no conversion at all — invisible for date-only
+    // due dates most of the day, but glaringly wrong (~4 hours, for EDT) the
+    // moment a precise time is involved, e.g. quick-capture's `due:2min`
+    // (2026-08-01 bug report). Defaults to 0 (UTC) until the first real
+    // reading arrives, same posture as is_desktop_viewport above.
+    pub local_utc_offset_minutes: Signal<i32>,
+    // Auto-folds the docked desktop sidebar (layouts::Navbar) once the
+    // window narrows past a comfortable width, distinct from
+    // is_desktop_viewport's own mobile-vs-desktop split above — a narrow-
+    // but-tall window can still count as "desktop" there (it's an OR on
+    // width/height) while still being too cramped for a fixed 256px
+    // sidebar. Purely responsive, no manual override: widen the window and
+    // it un-folds on its own. Computed alongside is_desktop_viewport in the
+    // same VIEWPORT_SCRIPT resize listener.
+    pub sidebar_collapsed: Signal<bool>,
 }
 
 fn main() {
@@ -363,6 +427,18 @@ fn main() {
 // layouts::Navbar's global keyboard shortcuts already use — this works
 // identically on desktop (a real webview, real JS) as on web, so it isn't
 // cfg-gated either.
+// PWA service-worker registration (2026-08-02) — see assets/sw.js's own doc
+// comment for the caching strategy. `navigator.serviceWorker` doesn't exist
+// on a native webview (desktop), hence the guard here rather than a
+// `#[cfg(not(feature = "desktop"))]` — a script eval'd on desktop would
+// otherwise throw on `navigator.serviceWorker` being undefined. One-shot,
+// fire-and-forget: nothing in Rust needs to know registration happened.
+const SW_REGISTER_SCRIPT: &str = r#"
+    if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.register('/sw.js');
+    }
+"#;
+
 const GLOBAL_ERROR_SCRIPT: &str = r#"
     window.addEventListener('error', (e) => {
         dioxus.send({
@@ -390,7 +466,6 @@ fn App() -> Element {
         moments: Signal::new(vec![]),
         momentInputTgl: Signal::new(false),
         entities: Signal::new(vec![]),
-        entityModalTgl: Signal::new(false),
         activity_bar_tgl: Signal::new(false),
         activity_bar_view: Signal::new(ABView::Task),
         sidebarTgl: Signal::new(false),
@@ -417,6 +492,9 @@ fn App() -> Element {
         autohide_entities: Signal::new(true),
         data_loading: Signal::new(true),
         focus_composer: Signal::new(0),
+        is_desktop_viewport: Signal::new(true),
+        local_utc_offset_minutes: Signal::new(0),
+        sidebar_collapsed: Signal::new(false),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -445,8 +523,19 @@ fn App() -> Element {
                 .and_then(|w| w.local_storage().ok().flatten());
 
             if let Some(storage) = storage {
+                // Filter out an empty string, not just a missing key —
+                // several logout paths write "" to this key rather than
+                // removing it outright. Without this filter, a restored
+                // Some("") reads as "logged in" to every auth_token.is_some()
+                // check in the app (the vault switcher, Login's already-
+                // logged-in redirect guard, has_synced), permanently
+                // stranding whoever hits it: Login always bounces them back
+                // to Home since a session "exists," but there's no real
+                // token behind it to actually do anything with.
                 if let Ok(Some(token)) = storage.get_item("auth_token") {
-                    state.auth_token.set(Some(token));
+                    if !token.is_empty() {
+                        state.auth_token.set(Some(token));
+                    }
                 }
 
                 if let Ok(Some(mode)) = storage.get_item("sort_mode") {
@@ -485,6 +574,17 @@ fn App() -> Element {
         }
     });
 
+    let mut sw_registered = use_signal(|| false);
+    use_effect(move || {
+        if *sw_registered.read() {
+            return;
+        }
+        sw_registered.set(true);
+        spawn(async move {
+            document::eval(SW_REGISTER_SCRIPT);
+        });
+    });
+
     let mut error_listener_started = use_signal(|| false);
     use_effect(move || {
         if *error_listener_started.read() {
@@ -517,6 +617,17 @@ fn App() -> Element {
         document::Link { rel: "stylesheet", href: DX_COMPONENTS_THEME_CSS }
         document::Script { src: FA_JS }
         document::Script { src: D3_JS }
+
+        // PWA (2026-08-02) — manifest.json/icon-*.png are plain files copied
+        // verbatim by scripts/deploy.sh, not asset!()-wrapped (see that
+        // script's own comment for why), so these are literal absolute
+        // paths rather than Asset consts like FAVICON above.
+        document::Link { rel: "manifest", href: "/manifest.json" }
+        document::Link { rel: "apple-touch-icon", href: "/icon-192.png" }
+        // White, not the app's red highlight color — on a PWA this paints
+        // the mobile browser topbar, and red there reads like a screen-
+        // recording indicator rather than an app color choice.
+        meta { name: "theme-color", content: "#ffffff" }
 
         meta {
             name:"viewport",

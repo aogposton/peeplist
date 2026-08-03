@@ -2,6 +2,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use super::client::SupabaseClient;
+use super::storage::StorageError;
 use crate::types::*;
 
 pub async fn createEntity(entity: NewEntityType,token: String) -> Result<EntityType, reqwest::Error> {
@@ -42,6 +43,17 @@ pub async fn update_entity_field(id: String, field: &str, value: Value, token: S
     Ok(())
 }
 
+// See moment::getMomentById's doc comment — same purpose (the offline-first
+// sync LWW conflict check in layouts/navbar.rs's flush loop), same shape.
+pub async fn getEntityById(id: String, token: String) -> Result<Option<EntityType>, reqwest::Error> {
+    let response = SupabaseClient::new(token)
+        .get(&format!("entities?id=eq.{id}"))
+        .send()
+        .await?;
+    let mut entities: Vec<EntityType> = response.json().await?;
+    Ok(entities.pop())
+}
+
 pub async fn getEntityTypes(token: String) -> Result<Vec<EntityTypeType>, reqwest::Error> {
     let response = SupabaseClient::new(token)
         .get("entity_types")
@@ -59,19 +71,24 @@ pub async fn getEntityTypes(token: String) -> Result<Vec<EntityTypeType>, reqwes
 // references this row, and nothing cascades or nulls it out) silently
 // looked like success: the entity vanished from the UI, then came right
 // back on the next fetch since it was never actually deleted server-side.
-// Now matches the login/signup pattern (String error, not reqwest::Error)
-// so the real failure reason surfaces instead of being swallowed.
-pub async fn deleteEntity(id: String, token: String) -> Result<(), String> {
+//
+// Returns StorageError (not a plain String) specifically so the offline-
+// sync flush loop (layouts/navbar.rs) can tell "never reached the server,
+// retry later" (Network) apart from "server said no, permanently drop"
+// (Remote) — collapsing both into one error type here would leave the
+// flush loop unable to make that call for entity deletes specifically,
+// even though every other queued op already distinguishes them.
+pub async fn deleteEntity(id: String, token: String) -> Result<(), StorageError> {
     let response = SupabaseClient::new(token)
         .delete("entities", &id)
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(StorageError::Network)?;
 
     let status = response.status();
     if !status.is_success() {
         let text = response.text().await.unwrap_or_default();
-        return Err(format!("Delete failed ({}): {}", status, text));
+        return Err(StorageError::Remote(format!("Delete failed ({}): {}", status, text)));
     }
     Ok(())
 }

@@ -177,6 +177,17 @@ impl UrgencyBreakdown {
 pub fn parse_moment_datetime(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|dt| dt.with_timezone(&Utc))
         .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M").ok().map(|ndt| ndt.and_utc()))
+        // Bare shape *with* seconds, still no offset — taskwarrior_date.rs's
+        // full-precision keywords (eod/eow/eom/eoq/eoy/eoww, all "end of
+        // ___" at 23:59:59) produce exactly this. Missing this fallback was
+        // a real bug (2026-08-01): a moment due at one of those got a due
+        // date that displayed/sorted correctly right after a fresh fetch
+        // from Supabase (which normalizes the stored value into full
+        // RFC3339 with an offset on the way back out) but silently failed
+        // to parse — and so didn't show at all — against the exact string
+        // still sitting in the local signal immediately after creation,
+        // before any refetch happened.
+        .or_else(|| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S").ok().map(|ndt| ndt.and_utc()))
 }
 
 // Taskwarrior's real "wait" semantic: a moment scheduled for the future
@@ -192,6 +203,24 @@ pub fn is_waiting(m: &MomentType, now: DateTime<Utc>) -> bool {
         .and_then(|meta| meta.scheduled_at.as_deref())
         .and_then(parse_moment_datetime)
         .is_some_and(|scheduled| scheduled > now)
+}
+
+// Taskwarrior's real "until" semantic, mirroring is_waiting's relationship
+// to scheduled_at above: a moment given a deadline (via `until:` — see
+// quick_capture.rs) that passed without ever being completed is hidden
+// from every normal view once that date arrives, on the theory that
+// whatever window it mattered in has closed — it didn't get done, and
+// nagging about it forever isn't the point. The Missed view (see
+// components::moment::MissedViewCmp) is the one place it's still visible,
+// same relationship Scheduled has to is_waiting. (2026-08-03: until_at
+// itself existed as editable metadata long before this — it just had zero
+// actual effect anywhere until this function gave it one.)
+pub fn is_missed(m: &MomentType, now: DateTime<Utc>) -> bool {
+    m.completed_at.is_none()
+        && m.metadata.as_ref()
+            .and_then(|meta| meta.until_at.as_deref())
+            .and_then(parse_moment_datetime)
+            .is_some_and(|until| until <= now)
 }
 
 /// The single function responsible for computing a moment's priority
@@ -285,6 +314,24 @@ mod tests {
     use super::*;
     use crate::types::MomentMetadata;
 
+    #[test]
+    fn parse_moment_datetime_accepts_every_shape_this_app_actually_produces() {
+        // RFC3339 with offset — what Supabase normalizes a stored value
+        // into on the way back out.
+        assert!(parse_moment_datetime("2026-08-09T23:59:59+00:00").is_some());
+        assert!(parse_moment_datetime("2026-08-09T23:59:59Z").is_some());
+        // Bare, no seconds — quick_capture.rs's ordinary due:/scheduled:/
+        // until: shape (today, tomorrow, absolute dates, most
+        // taskwarrior_date.rs keywords).
+        assert!(parse_moment_datetime("2026-08-09T00:00").is_some());
+        // Bare, WITH seconds, no offset — taskwarrior_date.rs's full-
+        // precision "end of ___" keywords (eod/eow/eom/eoq/eoy/eoww) before
+        // any round-trip through the database. This exact shape silently
+        // failed to parse before 2026-08-01, which is why a moment due at
+        // one of those showed no due date until the page was refreshed.
+        assert!(parse_moment_datetime("2026-08-09T23:59:59").is_some());
+    }
+
     fn base_moment() -> MomentType {
         MomentType {
             id: "1".into(),
@@ -298,6 +345,7 @@ mod tests {
             deleted_at: None,
             reactions: None,
             created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
             depends_on: None,
             metadata: None,
         }
@@ -428,5 +476,42 @@ mod tests {
         let d = b.describe();
         assert!(d.contains("priority"));
         assert!(!d.contains("due "));
+    }
+
+    #[test]
+    fn past_until_and_incomplete_is_missed() {
+        let mut m = base_moment();
+        m.metadata = Some(MomentMetadata {
+            until_at: Some((Utc::now() - chrono::Duration::days(1)).to_rfc3339()),
+            ..Default::default()
+        });
+        assert!(is_missed(&m, Utc::now()));
+    }
+
+    #[test]
+    fn future_until_is_not_missed_yet() {
+        let mut m = base_moment();
+        m.metadata = Some(MomentMetadata {
+            until_at: Some((Utc::now() + chrono::Duration::days(1)).to_rfc3339()),
+            ..Default::default()
+        });
+        assert!(!is_missed(&m, Utc::now()));
+    }
+
+    #[test]
+    fn completed_moment_is_never_missed_even_past_until() {
+        let mut m = base_moment();
+        m.completed_at = Some(Utc::now().to_rfc3339());
+        m.metadata = Some(MomentMetadata {
+            until_at: Some((Utc::now() - chrono::Duration::days(1)).to_rfc3339()),
+            ..Default::default()
+        });
+        assert!(!is_missed(&m, Utc::now()));
+    }
+
+    #[test]
+    fn no_until_at_is_never_missed() {
+        let m = base_moment();
+        assert!(!is_missed(&m, Utc::now()));
     }
 }

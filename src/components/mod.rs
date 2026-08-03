@@ -16,6 +16,13 @@ pub use moment::FullScreenEditorModalCmp;
 pub use moment::OnTheFlyCmp;
 pub use moment::RecentlyDeletedViewCmp;
 pub use moment::UrgencySettingsCmp;
+pub use moment::MomentosViewCmp;
+pub use moment::MissedViewCmp;
+pub use moment::CheckboxCmp;
+// Reused by entity.rs's ab_momentos_cmp for completing/skipping a single
+// momento occurrence — same read-modify-write-the-whole-metadata-blob
+// pattern moment.rs's own field edits already use, not worth a second copy.
+pub(crate) use moment::patch_moment_metadata;
 
 mod sidebar;
 pub use sidebar::views_list_cmp;
@@ -24,9 +31,9 @@ pub use sidebar::tag_list_cmp;
 pub use sidebar::project_list_cmp;
 
 mod entity;
-pub use entity::EntityModalCmp;
 pub use entity::entity_view_cmp;
-pub use entity::ab_history_cmp;
+pub use entity::ab_story_cmp;
+pub use entity::ab_momentos_cmp;
 pub use entity::ab_stats_cmp;
 pub use entity::ab_info_cmp;
 pub use entity::DistanceViewCmp;

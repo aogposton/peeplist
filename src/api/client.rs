@@ -91,13 +91,24 @@ impl SupabaseClient {
     }
 
     // Bulk delete — everything RLS scopes to the current token, not a
-    // single row by id like `delete` above. Used for "delete my account and
-    // data" (see SupabaseStorage::delete_all_data): PostgREST requires some
-    // filter on a DELETE, and `id=not.is.null` matches every row without
-    // narrowing further than whatever RLS itself already allows.
+    // single row by id like `delete` above. PostgREST requires some filter
+    // on a DELETE, and `id=not.is.null` matches every row without narrowing
+    // further than whatever RLS itself already allows.
     pub fn delete_all(&self, table: &str) -> RequestBuilder {
         self.client
             .delete(format!("{}/rest/v1/{}?id=not.is.null", self.url, table))
+            .header("apikey",self.anon_key.clone())
+            .header("Authorization", format!("Bearer {}", self.token))
+    }
+
+    // Supabase Edge Functions — a different path prefix than the REST/Auth
+    // APIs above (see SupabaseStorage::delete_account, the one caller today).
+    // The user's own access token in Authorization satisfies both Supabase's
+    // platform-level JWT check (on by default for a deployed function) and
+    // the function's own internal re-verification of who's calling.
+    pub fn functions_post(&self, path: &str) -> RequestBuilder {
+        self.client
+            .post(format!("{}/functions/v1/{}", self.url, path))
             .header("apikey",self.anon_key.clone())
             .header("Authorization", format!("Bearer {}", self.token))
     }

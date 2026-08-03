@@ -37,6 +37,9 @@ lumen-blocks = { git = "https://github.com/Leaf-Computer/lumen-blocks.git", tag 
 serde_norway = "0.9"
 # Unicode-safe filename slugs for the vault's people/*.md files.
 slug = "0.1"
+# RFC 5545 RRULE parsing/expansion for momentos (recurring moments — see
+# src/momento.rs). chrono-based, matching the rest of the app's date stack.
+rrule = "0.14"
 # Desktop-only: cross-platform resolution of the default vault root
 # (~/Documents/Peeplist/ or platform equivalent). See src/api/local_desktop.rs.
 directories = { version = "5", optional = true }

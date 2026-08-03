@@ -1,23 +1,22 @@
 // Full "delete my account" — removes the auth.users row itself (so the
 // email can be reused and the person can never log back in as this
-// account), not just their data. The Rust client's SupabaseStorage::
-// delete_all_data (src/api/storage.rs) already handles the data-only path
-// with zero deployment, using the existing owner-scoped RLS policies and
-// no privileged key. Actually deleting the auth.users row needs the
-// service-role key, which can only ever live here — never in the client.
+// account), not just their data. Actually deleting the auth.users row needs
+// the service-role key, which can only ever live here — never in the
+// client.
 //
-// NOT deployed yet. To deploy (once, with the Supabase CLI installed and
-// this project linked — `supabase link --project-ref <your-project-ref>`,
-// run from the repo root):
+// The client side is wired up (Settings' "Delete my account" button ->
+// SupabaseStorage::delete_account, src/api/storage.rs), but this function
+// itself is NOT deployed yet — until it is, that button's Confirm click
+// will just fail with a network/404 error. To deploy (once, with the
+// Supabase CLI installed and this project linked — `supabase link
+// --project-ref <your-project-ref>`, run from the repo root):
 //   supabase functions deploy delete-account
 //
 // No secrets need to be set manually — SUPABASE_URL and
 // SUPABASE_SERVICE_ROLE_KEY are automatically available to every Edge
 // Function on this platform, you don't provide them yourself.
 //
-// Call from the client with the user's own access token (there's
-// deliberately no client-side call site wired up for this yet — add one
-// once this is actually deployed, otherwise it's a button that 404s):
+// Called with the user's own access token:
 //   POST {SUPABASE_URL}/functions/v1/delete-account
 //   Authorization: Bearer <user's access_token>
 

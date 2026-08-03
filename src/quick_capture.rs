@@ -37,7 +37,6 @@
 // becomes part of the title — that's the signal to the user that it didn't
 // "activate".
 use crate::types::EntityType;
-use chrono::{Duration, NaiveDate, NaiveDateTime};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
@@ -150,23 +149,11 @@ fn normalize_priority(val: &str) -> Option<String> {
     }
 }
 
+// Full Taskwarrior-style relative-date grammar (today/tomorrow, Nd/Nw/Nm/Ny/
+// Nmin/Nhour, weekday/month names, sow/eom/soq/..., the Easter cluster,
+// ISO-8601) lives in taskwarrior_date.rs — this is just the plug-in point.
 fn parse_date_token(val: &str) -> Option<String> {
-    let today = chrono::Utc::now().date_naive();
-    match val.to_lowercase().as_str() {
-        "today" => return Some(format!("{}T00:00", today.format("%Y-%m-%d"))),
-        "tomorrow" => {
-            let d = today + Duration::days(1);
-            return Some(format!("{}T00:00", d.format("%Y-%m-%d")));
-        }
-        _ => {}
-    }
-    if let Ok(dt) = NaiveDateTime::parse_from_str(val, "%Y-%m-%dT%H:%M") {
-        return Some(dt.format("%Y-%m-%dT%H:%M").to_string());
-    }
-    if let Ok(d) = NaiveDate::parse_from_str(val, "%Y-%m-%d") {
-        return Some(format!("{}T00:00", d.format("%Y-%m-%d")));
-    }
-    None
+    crate::taskwarrior_date::parse_taskwarrior_date(val, chrono::Utc::now())
 }
 
 fn classify_word(word: &str) -> TokenKind {
@@ -361,6 +348,15 @@ pub fn parse(input: &str, entities: &[EntityType]) -> ParsedCapture {
                 } else if cap.entity_id.as_deref() != Some(id.as_str()) && !cap.additional_entity_ids.contains(id) {
                     cap.additional_entity_ids.push(id.clone());
                 }
+                // Unlike every other recognized token, a resolved @mention
+                // stays in the title verbatim (2026-08-01) — the whole point
+                // of @mentioning someone is naming them in the sentence you're
+                // writing, not just tagging them structurally. `t.text` is
+                // the exact matched span (`@Name`, `@"Multi Word"`, etc.),
+                // so this preserves whatever the user actually typed.
+                if !t.text.trim().is_empty() {
+                    title_parts.push(t.text.as_str());
+                }
             }
             TokenKind::Depends(title) => cap.depends_on_title = Some(title.clone()),
             TokenKind::MomentType(id) => cap.moment_type_id = Some(*id),
@@ -471,9 +467,9 @@ mod tests {
 
     fn entities() -> Vec<EntityType> {
         vec![
-            EntityType { id: "1".into(), name: "Jane".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), drift: 2.0, metadata: None },
-            EntityType { id: "2".into(), name: "Jane Doe".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), drift: 2.0, metadata: None },
-            EntityType { id: "0".into(), name: "Self".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), drift: 2.0, metadata: None },
+            EntityType { id: "1".into(), name: "Jane".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), updated_at: String::new(), drift: 2.0, metadata: None },
+            EntityType { id: "2".into(), name: "Jane Doe".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), updated_at: String::new(), drift: 2.0, metadata: None },
+            EntityType { id: "0".into(), name: "Self".into(), entity_type_id: None, parent_entity_id: None, created_at: String::new(), updated_at: String::new(), drift: 2.0, metadata: None },
         ]
     }
 
@@ -524,14 +520,16 @@ mod tests {
     fn matches_longest_entity_name() {
         let cap = parse("Call @Jane Doe about the wedding", &entities());
         assert_eq!(cap.entity_id, Some("2".to_string()));
-        assert_eq!(cap.title, "Call about the wedding");
+        // Mentions stay in the title now (2026-08-01) — see the Entity arm
+        // in parse().
+        assert_eq!(cap.title, "Call @Jane Doe about the wedding");
     }
 
     #[test]
     fn shorter_entity_name_matches_when_longer_not_present() {
         let cap = parse("Call @Jane tonight", &entities());
         assert_eq!(cap.entity_id, Some("1".to_string()));
-        assert_eq!(cap.title, "Call tonight");
+        assert_eq!(cap.title, "Call @Jane tonight");
     }
 
     #[test]
@@ -546,7 +544,7 @@ mod tests {
         let cap = parse("meet @Jane and @Jane Doe for coffee", &entities());
         assert_eq!(cap.entity_id, Some("1".to_string()));
         assert_eq!(cap.additional_entity_ids, vec!["2".to_string()]);
-        assert_eq!(cap.title, "meet and for coffee");
+        assert_eq!(cap.title, "meet @Jane and @Jane Doe for coffee");
     }
 
     #[test]
@@ -626,7 +624,7 @@ mod tests {
     fn quoted_mention_matches_by_exact_name() {
         let cap = parse("Call @\"Jane Doe\" tonight", &entities());
         assert_eq!(cap.entity_id, Some("2".to_string()));
-        assert_eq!(cap.title, "Call tonight");
+        assert_eq!(cap.title, "Call @\"Jane Doe\" tonight");
     }
 
     #[test]

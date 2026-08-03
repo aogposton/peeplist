@@ -19,6 +19,89 @@ use crate::components::context_menu::{ContextMenu, ContextMenuContent, ContextMe
 use web_sys::window;
 use crate::quick_capture::{self, TokenKind};
 
+// Local-timezone display/edit conversion for due_at/scheduled_at/until_at
+// (2026-08-01) — see AppState::local_utc_offset_minutes's doc comment.
+// Storage is always real UTC; every one of these fields was being shown/
+// edited as the raw UTC digits with no conversion at all, invisible for
+// date-only due dates most of the day but glaringly wrong (~4 hours, for
+// EDT) the moment a precise time is involved.
+//
+// Deliberately not touched here: the "is this overdue/waiting" comparison
+// logic (urgency.rs::is_waiting, DueViewCmp's `parsed.date_naive() < today`)
+// still compares real UTC instants/dates — genuinely correct for "is this
+// moment in the past," and near-midnight local-calendar-day edge cases
+// there are a separate, deeper question (should "today" mean the UTC day or
+// the local day for filtering purposes) than "does the displayed clock time
+// match what I actually meant," which is what was reported and fixed here.
+
+// Converts a stored UTC bare-datetime string to the equivalent local
+// bare-datetime string for display/editing. Returns the input unchanged if
+// it doesn't parse (matches every other call site's fail-open posture for
+// these fields).
+fn utc_str_to_local(stored: &str, offset_minutes: i32) -> String {
+    let Some(dt) = crate::urgency::parse_moment_datetime(stored) else { return stored.to_string(); };
+    let local = dt.naive_utc() - chrono::Duration::minutes(offset_minutes as i64);
+    local.format("%Y-%m-%dT%H:%M").to_string()
+}
+
+// The inverse: a local bare-datetime string (as typed/picked into a native
+// date/time input) back to UTC for storage. None for empty/unparseable
+// input — every call site already treats an empty string as "clear the
+// field."
+fn local_str_to_utc(local: &str, offset_minutes: i32) -> Option<String> {
+    if local.is_empty() {
+        return None;
+    }
+    let ndt = chrono::NaiveDateTime::parse_from_str(local, "%Y-%m-%dT%H:%M").ok()?;
+    let utc = ndt + chrono::Duration::minutes(offset_minutes as i64);
+    Some(utc.format("%Y-%m-%dT%H:%M").to_string())
+}
+
+#[cfg(test)]
+mod timezone_conversion_tests {
+    use super::*;
+
+    // EDT: local is behind UTC by 4 hours, JS getTimezoneOffset() = +240.
+    const EDT_OFFSET: i32 = 240;
+
+    #[test]
+    fn utc_to_local_subtracts_the_offset() {
+        // 7:58pm EDT + 2min = 7:58pm+2min EDT = 23:58+2min UTC = 00:00 UTC
+        // the next day — the exact 2026-08-01 bug report (a moment created
+        // via due:2min showed as 11:59pm instead of ~8:00pm, because the
+        // raw UTC digits were displayed with no conversion at all).
+        assert_eq!(utc_str_to_local("2026-08-06T00:00", EDT_OFFSET), "2026-08-05T20:00");
+    }
+
+    #[test]
+    fn local_to_utc_adds_the_offset() {
+        assert_eq!(local_str_to_utc("2026-08-05T20:00", EDT_OFFSET), Some("2026-08-06T00:00".to_string()));
+    }
+
+    #[test]
+    fn round_trips() {
+        let utc = "2026-08-05T23:59";
+        let local = utc_str_to_local(utc, EDT_OFFSET);
+        assert_eq!(local_str_to_utc(&local, EDT_OFFSET), Some(utc.to_string()));
+    }
+
+    #[test]
+    fn zero_offset_is_a_no_op() {
+        assert_eq!(utc_str_to_local("2026-08-05T12:00", 0), "2026-08-05T12:00");
+        assert_eq!(local_str_to_utc("2026-08-05T12:00", 0), Some("2026-08-05T12:00".to_string()));
+    }
+
+    #[test]
+    fn empty_input_clears_the_field() {
+        assert_eq!(local_str_to_utc("", EDT_OFFSET), None);
+    }
+
+    #[test]
+    fn unparseable_input_falls_back_to_itself_rather_than_panicking() {
+        assert_eq!(utc_str_to_local("not-a-date", EDT_OFFSET), "not-a-date");
+    }
+}
+
 #[component]
 pub fn CheckboxCmp(props: CheckboxProps) -> Element {
     rsx! {
@@ -338,6 +421,7 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let entities = state.entities;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     let moments_list = props.moments.clone();
 
@@ -512,44 +596,113 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
         }
     };
 
+    let sort_mode_label = |mode: SortMode| match mode {
+        SortMode::Default => "Default",
+        SortMode::DueDate => "Due date",
+        SortMode::Custom => "Custom (drag to reorder)",
+        SortMode::ByEntity => "By entity",
+    };
+    let density_label = if current_density == ListDensity::Compact { "Compact" } else { "Full" };
+
     rsx! {
-        div {
-            class: "mx-4 mb-1 flex items-center justify-between gap-1",
+        // Desktop: the full row, every control always visible. Mobile: the
+        // same six controls (four sort modes + two density options) don't
+        // fit in one row at that width, so they collapse behind a single
+        // dropdown trigger instead — same options, same handlers, just
+        // menu-shaped rather than laid out inline.
+        if *is_desktop_viewport.read() {
             div {
-                class: "flex items-center gap-1",
-                span { class: "text-xs text-muted-foreground mr-1", "Sort:" }
-                span {
-                    class: sort_btn_class(current_sort_mode == SortMode::Default),
-                    onclick: move |_| set_sort_mode(SortMode::Default),
-                    "Default{dir_arrow(SortMode::Default)}"
+                class: "mx-4 mb-1 flex items-center justify-between gap-1",
+                div {
+                    class: "flex items-center gap-1",
+                    span { class: "text-xs text-muted-foreground mr-1", "Sort:" }
+                    span {
+                        class: sort_btn_class(current_sort_mode == SortMode::Default),
+                        onclick: move |_| set_sort_mode(SortMode::Default),
+                        "Default{dir_arrow(SortMode::Default)}"
+                    }
+                    span {
+                        class: sort_btn_class(current_sort_mode == SortMode::DueDate),
+                        onclick: move |_| set_sort_mode(SortMode::DueDate),
+                        "Due date{dir_arrow(SortMode::DueDate)}"
+                    }
+                    span {
+                        class: sort_btn_class(current_sort_mode == SortMode::Custom),
+                        onclick: move |_| set_sort_mode(SortMode::Custom),
+                        "Custom (drag to reorder){dir_arrow(SortMode::Custom)}"
+                    }
+                    span {
+                        class: sort_btn_class(current_sort_mode == SortMode::ByEntity),
+                        onclick: move |_| set_sort_mode(SortMode::ByEntity),
+                        "By entity{dir_arrow(SortMode::ByEntity)}"
+                    }
                 }
-                span {
-                    class: sort_btn_class(current_sort_mode == SortMode::DueDate),
-                    onclick: move |_| set_sort_mode(SortMode::DueDate),
-                    "Due date{dir_arrow(SortMode::DueDate)}"
-                }
-                span {
-                    class: sort_btn_class(current_sort_mode == SortMode::Custom),
-                    onclick: move |_| set_sort_mode(SortMode::Custom),
-                    "Custom (drag to reorder){dir_arrow(SortMode::Custom)}"
-                }
-                span {
-                    class: sort_btn_class(current_sort_mode == SortMode::ByEntity),
-                    onclick: move |_| set_sort_mode(SortMode::ByEntity),
-                    "By entity{dir_arrow(SortMode::ByEntity)}"
+                div {
+                    class: "flex items-center gap-1",
+                    span {
+                        class: sort_btn_class(current_density == ListDensity::Compact),
+                        onclick: move |_| set_density(ListDensity::Compact),
+                        "Compact"
+                    }
+                    span {
+                        class: sort_btn_class(current_density == ListDensity::Full),
+                        onclick: move |_| set_density(ListDensity::Full),
+                        "Full"
+                    }
                 }
             }
+        } else {
             div {
-                class: "flex items-center gap-1",
-                span {
-                    class: sort_btn_class(current_density == ListDensity::Compact),
-                    onclick: move |_| set_density(ListDensity::Compact),
-                    "Compact"
-                }
-                span {
-                    class: sort_btn_class(current_density == ListDensity::Full),
-                    onclick: move |_| set_density(ListDensity::Full),
-                    "Full"
+                class: "mx-4 mb-1 flex justify-end",
+                Dropdown {
+                    DropdownTrigger {
+                        Button {
+                            variant: ButtonVariant::Secondary,
+                            size: ButtonSize::Small,
+                            "{sort_mode_label(current_sort_mode)} · {density_label} ⌄"
+                        }
+                    }
+                    DropdownContent {
+                        align: "end",
+                        span { class: "block px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-muted-foreground", "Sort" }
+                        DropdownItem::<String> {
+                            value: "sort_default".to_string(),
+                            index: 0usize,
+                            on_select: move |_| set_sort_mode(SortMode::Default),
+                            "Default{dir_arrow(SortMode::Default)}"
+                        }
+                        DropdownItem::<String> {
+                            value: "sort_due".to_string(),
+                            index: 1usize,
+                            on_select: move |_| set_sort_mode(SortMode::DueDate),
+                            "Due date{dir_arrow(SortMode::DueDate)}"
+                        }
+                        DropdownItem::<String> {
+                            value: "sort_custom".to_string(),
+                            index: 2usize,
+                            on_select: move |_| set_sort_mode(SortMode::Custom),
+                            "Custom (drag to reorder){dir_arrow(SortMode::Custom)}"
+                        }
+                        DropdownItem::<String> {
+                            value: "sort_entity".to_string(),
+                            index: 3usize,
+                            on_select: move |_| set_sort_mode(SortMode::ByEntity),
+                            "By entity{dir_arrow(SortMode::ByEntity)}"
+                        }
+                        span { class: "block px-3 py-1.5 mt-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground border-t border-border", "View" }
+                        DropdownItem::<String> {
+                            value: "density_compact".to_string(),
+                            index: 4usize,
+                            on_select: move |_| set_density(ListDensity::Compact),
+                            "Compact"
+                        }
+                        DropdownItem::<String> {
+                            value: "density_full".to_string(),
+                            index: 5usize,
+                            on_select: move |_| set_density(ListDensity::Full),
+                            "Full"
+                        }
+                    }
                 }
             }
         }
@@ -670,9 +823,16 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
                                                 "Convert to task"
                                             }
                                         }
-                                        ContextMenuItem {
-                                            on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 3i64) },
-                                            "Convert to note"
+                                        // Momento is deliberately excluded from every
+                                        // convert-to here — it's only ever created
+                                        // through its own dedicated flow (the entity's
+                                        // Momentos tab), and converting one away would
+                                        // silently discard its RRULE/occurrence state.
+                                        if moment.moment_type_id != 4i64 {
+                                            ContextMenuItem {
+                                                on_select: { let id = moment.id.clone(); move |_| onConvertTo(id.clone(), 3i64) },
+                                                "Convert to note"
+                                            }
                                         }
                                         ContextMenuItem {
                                             on_select: { let m = moment.clone(); move |_| onDuplicate(m.clone()) },
@@ -705,11 +865,13 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     let mut is_hovering = use_signal(|| false);
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
-    let mut bg = match (is_hovering(), props.moment.moment_type_id == 2i64) {
-        (true, true)   => BGpromiseHover,
-        (true, false)  => BGhover,
-        (false, true)  => BGpromise,
-        (false, false) => BG,
+    let mut bg = match (is_hovering(), props.moment.moment_type_id) {
+        (true, 2)  => BGpromiseHover,
+        (true, 4)  => BGmomentoHover,
+        (true, _)  => BGhover,
+        (false, 2) => BGpromise,
+        (false, 4) => BGmomento,
+        (false, _) => BG,
     };
     let title = props.moment.title.clone();
     let description = props.moment.description.clone().unwrap_or_default();
@@ -747,11 +909,13 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     // -date label never actually rendered for any moment, ever — same bug
     // class already found and fixed once in urgency.rs, reused here instead
     // of re-deriving a second copy of the same fix.
+    let local_offset = *state.local_utc_offset_minutes.read();
     let due_display = props.moment.due_at.as_deref()
         .and_then(crate::urgency::parse_moment_datetime)
         .map(|dt| {
             let is_overdue = dt < chrono::Utc::now() && props.moment.completed_at.is_none();
-            (dt.format("%b %d").to_string(), is_overdue)
+            let local = dt.naive_utc() - chrono::Duration::minutes(local_offset as i64);
+            (local.format("%b %d").to_string(), is_overdue)
         });
 
     // A moment can't be completed while what it depends on isn't — see
@@ -776,6 +940,42 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     // the detail panel already names the blocker(s) (see ab_task_cmp's
     // "Blocked by" line), the row itself just never did.
     let blocked_on_title = if unfinished_blockers.is_empty() { None } else { Some(unfinished_blockers.join(", ")) };
+
+    // Momento's own completion checkbox (2026-08-03) — reflects/toggles the
+    // soonest upcoming occurrence, not this row's own completed_at (a
+    // momento template is never "completed" itself, see MomentMetadata's
+    // doc comment). A separate, much simpler handler than onCheckClicked
+    // below — no blocking/cascade/fade semantics apply to a momento.
+    let momento_next = if props.moment.moment_type_id == 4i64 {
+        let meta = props.moment.metadata.clone().unwrap_or_default();
+        crate::momento::next_occurrences(props.moment.due_at.as_deref().unwrap_or_default(), &meta, chrono::Utc::now().date_naive(), 1)
+            .into_iter().next()
+    } else {
+        None
+    };
+    let on_momento_check = {
+        let moment_id = props.moment.id.clone();
+        let momento_next_for_check = momento_next.clone();
+        move |checked: bool| {
+            let Some(occ) = momento_next_for_check.clone() else { return };
+            let date = occ.date.format("%Y-%m-%d").to_string();
+            let id = moment_id.clone();
+            let token = auth_token;
+            let vault = active_vault;
+            spawn(async move {
+                let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                patch_moment_metadata(&storage, moments, id, move |m| {
+                    if checked {
+                        if !m.momento_completed_occurrences.contains(&date) {
+                            m.momento_completed_occurrences.push(date);
+                        }
+                    } else {
+                        m.momento_completed_occurrences.retain(|d| d != &date);
+                    }
+                }).await;
+            });
+        }
+    };
 
     let onCheckClicked = move |checked: bool| {
         if is_blocked {
@@ -824,7 +1024,15 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
             },
             div {
                 onclick: move |e| e.stop_propagation(),
-                if !props.is_note.clone().unwrap_or(false) {
+                if props.moment.moment_type_id == 4i64 {
+                    if let Some(occ) = momento_next.clone() {
+                        CheckboxCmp {
+                            checked: occ.completed,
+                            on_change: on_momento_check,
+                            disabled: false,
+                        },
+                    }
+                } else if !props.is_note.clone().unwrap_or(false) {
                     CheckboxCmp {
                         checked:is_completed(),
                         on_change: onCheckClicked,
@@ -918,11 +1126,12 @@ pub fn MomentInputCmp() -> Element {
     let mut title_el = use_signal(|| None::<std::rc::Rc<MountedData>>);
     let focus_composer = state.focus_composer;
     let mut last_seen_focus_req = use_signal(move || *focus_composer.read());
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     // Two MomentInputCmp instances are mounted at once (the mobile popup
     // one here in the layout, and the desktop one in views/home.rs) — only
-    // one is ever actually visible at a given viewport width (Tailwind's
-    // hidden/xl:block vs xl:hidden), so set_focus on the other is a
+    // one is ever actually visible at a given viewport size (see
+    // AppState::is_desktop_viewport), so set_focus on the other is a
     // harmless no-op. Compares against the last-seen counter value instead
     // of reacting unconditionally, since use_effect also runs once on
     // mount and this must not steal focus on first render.
@@ -1058,6 +1267,12 @@ pub fn MomentInputCmp() -> Element {
                             until_at: parsed.until_at.clone(),
                             depends_on: dep_ids,
                             additional_entity_ids: parsed.additional_entity_ids.clone(),
+                            // Momentos are never created via quick-capture —
+                            // only through the dedicated Momentos tab flow.
+                            recurrence_rule: None,
+                            momento_completed_occurrences: vec![],
+                            momento_excluded_occurrences: vec![],
+                            reveal_lead: None,
                         };
                         if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
                             if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
@@ -1202,7 +1417,7 @@ pub fn MomentInputCmp() -> Element {
             }
 
             // Desktop-only counterpart to the "Add Moment" button below
-            // (that one's xl:hidden — mobile only). Tabbing into the
+            // (that one's mobile-only — see AppState::is_desktop_viewport). Tabbing into the
             // description textarea had nowhere to go from there: Enter in a
             // textarea means newline, not submit, and there was no visible
             // button on desktop to tab to or click — so finishing a moment
@@ -1212,7 +1427,7 @@ pub fn MomentInputCmp() -> Element {
             // itself.
             if *description_open.read() {
                 button {
-                    class: "hidden xl:block w-full mt-2 rounded-md py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer",
+                    class: if *is_desktop_viewport.read() { "block w-full mt-2 rounded-md py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer" } else { "hidden" },
                     style: "background-color:{HL};",
                     onclick: move |_| submit_moment(),
                     "Add Moment",
@@ -1220,7 +1435,7 @@ pub fn MomentInputCmp() -> Element {
             }
 
             button {
-                class: "xl:hidden block w-full mt-2 rounded-md py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer",
+                class: if *is_desktop_viewport.read() { "hidden" } else { "block w-full mt-2 rounded-md py-2 text-sm font-semibold text-white transition-opacity hover:opacity-90 cursor-pointer" },
                 style: "background-color:{HL};",
                 onclick: move |e| submit_moment(),
                 "Add Moment",
@@ -1521,6 +1736,7 @@ pub fn ab_task_cmp() -> Element {
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let entities = state.entities;
+    let is_desktop_viewport = state.is_desktop_viewport;
     let mut reassign_error = use_signal(|| None::<String>);
     // Searchable depends-on picker state (replaces a plain <select> that
     // used to be scoped to only the current entity's own moments — see the
@@ -1566,11 +1782,16 @@ pub fn ab_task_cmp() -> Element {
     let title = live_moment.title.clone();
     let gravity = live_moment.gravity.unwrap_or(0);
     let due_at = live_moment.due_at.clone();
+    // Displayed/edited in local time, stored in UTC — see
+    // AppState::local_utc_offset_minutes's doc comment.
+    let local_offset = *state.local_utc_offset_minutes.read();
+    let due_at_local = due_at.as_deref().map(|d| utc_str_to_local(d, local_offset));
     let mut ReactionForm = use_signal(ReactionForm::default);
 
     let moment_kind = match moment.moment_type_id {
         2i64 => "Promise",
         3i64 => "Note",
+        4i64 => "Momento",
         _ => "Task",
     };
 
@@ -1807,21 +2028,24 @@ pub fn ab_task_cmp() -> Element {
                         // "YYYY-MM-DDTHH:MM" storage format as before.
                         input {
                             r#type: "date",
+                            // See the Scheduled/Until inputs below for why —
+                            // same "force US date format, not OS locale" fix.
+                            lang: "en-US",
                             class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                            value: "{due_at.clone().unwrap_or_default().chars().take(10).collect::<String>()}",
+                            value: "{due_at_local.clone().unwrap_or_default().chars().take(10).collect::<String>()}",
                             // oninput, not onchange — onchange only fires on blur, so
                             // closing the activity panel right after picking a date
                             // (without clicking elsewhere first) silently dropped it.
                             oninput: {
                                 let id = id.clone();
-                                let due_at = due_at.clone();
+                                let due_at_local = due_at_local.clone();
                                 move |e: Event<FormData>| {
                                     let id = id.clone();
                                     let token = auth_token;
                                     let vault = active_vault;
                                     let date = e.value();
-                                    let time = due_at.as_deref().and_then(|d| d.get(11..16)).unwrap_or("00:00").to_string();
-                                    let new_due = if date.is_empty() { None } else { Some(format!("{date}T{time}")) };
+                                    let time = due_at_local.as_deref().and_then(|d| d.get(11..16)).unwrap_or("00:00").to_string();
+                                    let new_due = if date.is_empty() { None } else { local_str_to_utc(&format!("{date}T{time}"), local_offset) };
                                     spawn(async move {
                                         let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                         match storage.update_moment_field(id.clone(), "due_at", serde_json::json!(new_due)).await {
@@ -1839,23 +2063,24 @@ pub fn ab_task_cmp() -> Element {
                         }
                         input {
                             r#type: "time",
+                            lang: "en-US",
                             class: "rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                            value: "{due_at.clone().and_then(|d| d.get(11..16).map(str::to_string)).unwrap_or_default()}",
+                            value: "{due_at_local.clone().and_then(|d| d.get(11..16).map(str::to_string)).unwrap_or_default()}",
                             oninput: {
                                 let id = id.clone();
-                                let due_at = due_at.clone();
+                                let due_at_local = due_at_local.clone();
                                 move |e: Event<FormData>| {
                                     let id = id.clone();
                                     let token = auth_token;
                                     let vault = active_vault;
-                                    let date = due_at.as_deref().map(|d| d.chars().take(10).collect::<String>()).unwrap_or_default();
+                                    let date = due_at_local.as_deref().map(|d| d.chars().take(10).collect::<String>()).unwrap_or_default();
                                     if date.is_empty() {
                                         // No date set yet — a bare time means
                                         // nothing, so there's nothing to save.
                                         return;
                                     }
                                     let time = if e.value().is_empty() { "00:00".to_string() } else { e.value() };
-                                    let new_due = Some(format!("{date}T{time}"));
+                                    let new_due = local_str_to_utc(&format!("{date}T{time}"), local_offset);
                                     spawn(async move {
                                         let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                         match storage.update_moment_field(id.clone(), "due_at", serde_json::json!(new_due)).await {
@@ -1907,7 +2132,7 @@ pub fn ab_task_cmp() -> Element {
                                 },
                             }
                             button {
-                                class: "hidden xl:flex shrink-0 h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer",
+                                class: if *is_desktop_viewport.read() { "flex shrink-0 h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer" } else { "hidden" },
                                 title: "Expand to full-screen editor",
                                 onclick: move |_| full_editor_open.set(true),
                                 fa_expand {}
@@ -2189,19 +2414,29 @@ pub fn ab_task_cmp() -> Element {
                                     label { class: "block mb-1.5 text-xs font-medium text-foreground", "Scheduled" }
                                     input {
                                         r#type: "datetime-local",
+                                        // Forces Chrome/Firefox to render this input's
+                                        // date/time segments in a fixed, predictable
+                                        // format instead of whatever the OS/browser
+                                        // locale happens to be (2026-08-01 — a native
+                                        // date input's *displayed* format follows its
+                                        // `lang`, not anything controllable via value/
+                                        // CSS; this was showing up as day-first
+                                        // "01/08/2026" instead of the US "08/01/2026"
+                                        // this app's users expect).
+                                        lang: "en-US",
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                        value: "{current_metadata.scheduled_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
+                                        value: "{current_metadata.scheduled_at.clone().map(|s| utc_str_to_local(&s, local_offset)).unwrap_or_default().chars().take(16).collect::<String>()}",
                                         oninput: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
                                                 let token = auth_token;
                                                 let vault = active_vault;
-                                                let val = e.value();
+                                                let val = local_str_to_utc(&e.value(), local_offset);
                                                 spawn(async move {
                                                     let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                                     patch_moment_metadata(&storage, moments, id, |m| {
-                                                        m.scheduled_at = if val.is_empty() { None } else { Some(val) };
+                                                        m.scheduled_at = val;
                                                     }).await;
                                                 });
                                             }
@@ -2214,19 +2449,20 @@ pub fn ab_task_cmp() -> Element {
                                     label { class: "block mb-1.5 text-xs font-medium text-foreground", "Until" }
                                     input {
                                         r#type: "datetime-local",
+                                        lang: "en-US",
                                         class: "w-full rounded-md border border-input bg-background text-sm text-foreground px-3 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                                        value: "{current_metadata.until_at.clone().unwrap_or_default().chars().take(16).collect::<String>()}",
+                                        value: "{current_metadata.until_at.clone().map(|s| utc_str_to_local(&s, local_offset)).unwrap_or_default().chars().take(16).collect::<String>()}",
                                         oninput: {
                                             let id = id.clone();
                                             move |e: Event<FormData>| {
                                                 let id = id.clone();
                                                 let token = auth_token;
                                                 let vault = active_vault;
-                                                let val = e.value();
+                                                let val = local_str_to_utc(&e.value(), local_offset);
                                                 spawn(async move {
                                                     let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
                                                     patch_moment_metadata(&storage, moments, id, |m| {
-                                                        m.until_at = if val.is_empty() { None } else { Some(val) };
+                                                        m.until_at = val;
                                                     }).await;
                                                 });
                                             }
@@ -2597,7 +2833,7 @@ pub fn ab_task_cmp() -> Element {
 // pattern already fixed for depends_on/tags above — an `impl Trait` mutator
 // closure only works as a real fn, not a stored closure, so this is a
 // module-level fn rather than another per-field-duplicated closure.
-async fn patch_moment_metadata(
+pub(crate) async fn patch_moment_metadata(
     storage: &ActiveStorage,
     mut moments: Signal<Vec<MomentType>>,
     id: String,
@@ -2821,6 +3057,10 @@ pub fn OnTheFlyCmp() -> Element {
                                                         until_at: parsed.until_at.clone(),
                                                         depends_on: Vec::new(),
                                                         additional_entity_ids: parsed.additional_entity_ids.clone(),
+                                                        recurrence_rule: None,
+                                                        momento_completed_occurrences: vec![],
+                                                        momento_excluded_occurrences: vec![],
+                                                        reveal_lead: None,
                                                     };
                                                     if storage.update_moment_field(created_id.clone(), "metadata", serde_json::json!(meta)).await.is_ok() {
                                                         if let Some(m) = moments.write().iter_mut().find(|m| m.id == created_id) {
@@ -2889,7 +3129,20 @@ pub fn OnTheFlyCmp() -> Element {
 // dependency just for this.
 fn render_markdown_lite(src: &str) -> String {
     fn escape_html(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    }
+    // Link targets are user-authored note text landing straight in an href
+    // attribute via dangerous_inner_html — a javascript:/data: scheme here
+    // would execute in the app's own origin on click. Only allow schemes
+    // that can't run script; everything else falls back to plain text
+    // rather than becoming a clickable link.
+    fn is_safe_link_scheme(url: &str) -> bool {
+        let lower = url.trim().to_ascii_lowercase();
+        lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("mailto:")
     }
     // Inline spans: code first (so its contents aren't further mangled by
     // bold/italic/link matching), then links, then bold, then italic.
@@ -2914,7 +3167,15 @@ fn render_markdown_lite(src: &str) -> String {
                         if let Some(paren_end) = s[i + close + 2..].find(')') {
                             let text = &s[i + 1..i + close];
                             let url = &s[i + close + 2..i + close + 2 + paren_end];
-                            out.push_str(&format!("<a href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"underline\">{text}</a>"));
+                            if is_safe_link_scheme(url) {
+                                out.push_str(&format!("<a href=\"{url}\" target=\"_blank\" rel=\"noopener noreferrer\" class=\"underline\">{text}</a>"));
+                            } else {
+                                out.push('[');
+                                out.push_str(text);
+                                out.push_str("](");
+                                out.push_str(url);
+                                out.push(')');
+                            }
                             i = i + close + 2 + paren_end + 1;
                             continue;
                         }
@@ -3022,6 +3283,35 @@ mod markdown_lite_tests {
         assert!(!html.contains("<script>"));
         assert!(html.contains("&lt;script&gt;"));
     }
+
+    #[test]
+    fn rejects_javascript_scheme_links() {
+        let html = render_markdown_lite("[click](javascript:alert(document.cookie))");
+        assert!(!html.contains("<a "));
+        assert!(!html.contains("href="));
+    }
+
+    #[test]
+    fn rejects_data_scheme_links() {
+        let html = render_markdown_lite("[click](data:text/html,<script>alert(1)</script>)");
+        assert!(!html.contains("<a "));
+        assert!(!html.contains("href="));
+    }
+
+    #[test]
+    fn allows_mailto_links() {
+        let html = render_markdown_lite("[email me](mailto:test@example.com)");
+        assert!(html.contains("href=\"mailto:test@example.com\""));
+    }
+
+    #[test]
+    fn quotes_in_link_target_cannot_break_out_of_the_href_attribute() {
+        let html = render_markdown_lite("[x](https://example.com\" onmouseover=\"alert(1))");
+        // The quote must be escaped before it ever reaches the href attribute,
+        // so no bare onmouseover="..." attribute can be injected.
+        assert!(!html.contains("onmouseover=\"alert"));
+        assert!(html.contains("&quot;"));
+    }
 }
 
 #[component]
@@ -3032,6 +3322,7 @@ pub fn FullScreenEditorModalCmp() -> Element {
     let auth_token = state.auth_token;
     let active_vault = state.active_vault;
     let mut full_editor_open = state.full_editor_open;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     if !*full_editor_open.read() {
         return rsx! {};
@@ -3046,6 +3337,7 @@ pub fn FullScreenEditorModalCmp() -> Element {
     let moment_kind = match live_moment.moment_type_id {
         2i64 => "Promise",
         3i64 => "Note",
+        4i64 => "Momento",
         _ => "Task",
     };
 
@@ -3063,7 +3355,7 @@ pub fn FullScreenEditorModalCmp() -> Element {
 
     rsx! {
         div {
-            class: "hidden xl:flex fixed inset-0 bg-black/40 z-100 items-center justify-center",
+            class: if *is_desktop_viewport.read() { "flex fixed inset-0 bg-black/40 z-100 items-center justify-center" } else { "hidden" },
             onclick: move |_| full_editor_open.set(false),
             div {
                 class: "bg-background w-full h-full flex flex-col",
@@ -3164,6 +3456,7 @@ pub fn ScheduledViewCmp() -> Element {
     let mut activity_bar_view = state.activity_bar_view;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
+    let local_offset = *state.local_utc_offset_minutes.read();
 
     let now = chrono::Utc::now();
 
@@ -3218,7 +3511,127 @@ pub fn ScheduledViewCmp() -> Element {
                         }
                         span {
                             class: "text-xs text-muted-foreground shrink-0",
-                            "{dt.format(\"%b %d\")}"
+                            "{(dt.naive_utc() - chrono::Duration::minutes(local_offset as i64)).format(\"%b %d\")}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Momentos (2026-08-02) — every entity's recurring/personal moments in one
+// cross-entity list, sorted by next-upcoming-occurrence (via
+// src/momento.rs's RRULE expansion, same as the per-entity Momentos tab).
+// Clicking a row opens that entity's Momentos tab directly (not the normal
+// Task panel — a momento's real "detail view" is the occurrence list, not
+// the single-moment editor every other type uses).
+#[component]
+pub fn MomentosViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let mut moments = state.moments;
+    let entities = state.entities;
+    let mut current_entity = state.current_entity;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+    let auth_token = state.auth_token;
+    let active_vault = state.active_vault;
+
+    let now = chrono::Utc::now();
+    let today = now.date_naive();
+
+    // This is a dedicated momentos-only summary — it always shows every
+    // momento regardless of its reveal-timing setting (see
+    // MomentMetadata::reveal_lead's doc comment). reveal_lead only ever
+    // hides a momento from the general moment list (Inbox/entity list —
+    // see views/home.rs), never from here or from the per-entity Momentos
+    // tab (ab_momentos_cmp); you navigated to a momentos-specific view on
+    // purpose, so there's nothing to declutter.
+    let mut upcoming: Vec<(MomentType, Option<crate::momento::Occurrence>)> = moments.read().iter()
+        .filter(|m| m.moment_type_id == 4i64)
+        .map(|m| {
+            let meta = m.metadata.clone().unwrap_or_default();
+            let next = crate::momento::next_occurrences(m.due_at.as_deref().unwrap_or_default(), &meta, today, 1)
+                .into_iter().next();
+            (m.clone(), next)
+        })
+        .collect();
+    // Momentos with no computable next occurrence (a malformed rule, or no
+    // due_at) sort to the end rather than being dropped outright — still
+    // visible/editable here, just not claiming to know when they're next.
+    upcoming.sort_by_key(|(_, occ)| occ.as_ref().map(|o| o.date));
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+            if upcoming.is_empty() {
+                div {
+                    class: "text-sm text-muted-foreground text-center py-8",
+                    "No momentos yet — add one from an entity's Momentos tab."
+                }
+            } else {
+                for (m, occ) in upcoming.iter() {
+                    div {
+                        key: "{m.id}",
+                        class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                        onclick: {
+                            let entity_id = m.entity_id.clone();
+                            move |_| {
+                                let entity = entities.read().iter().find(|e| e.id == entity_id).cloned();
+                                current_entity.set(entity);
+                                activity_bar_view.set(ABView::Momentos);
+                                backdropTgl.set(true);
+                                activity_bar_tgl.set(true);
+                            }
+                        },
+                        div {
+                            class: "flex items-center gap-3 min-w-0",
+                            if let Some(o) = occ.clone() {
+                                div {
+                                    onclick: move |e| e.stop_propagation(),
+                                    CheckboxCmp {
+                                        checked: o.completed,
+                                        on_change: {
+                                            let moment_id = m.id.clone();
+                                            let date = o.date.format("%Y-%m-%d").to_string();
+                                            move |checked: bool| {
+                                                let id = moment_id.clone();
+                                                let date = date.clone();
+                                                let token = auth_token;
+                                                let vault = active_vault;
+                                                spawn(async move {
+                                                    let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+                                                    patch_moment_metadata(&storage, moments, id, move |meta| {
+                                                        if checked {
+                                                            if !meta.momento_completed_occurrences.contains(&date) {
+                                                                meta.momento_completed_occurrences.push(date);
+                                                            }
+                                                        } else {
+                                                            meta.momento_completed_occurrences.retain(|d| d != &date);
+                                                        }
+                                                    }).await;
+                                                });
+                                            }
+                                        },
+                                        disabled: false,
+                                    }
+                                }
+                            }
+                            div {
+                                class: "flex flex-col min-w-0",
+                                span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                                span { class: "text-xs text-muted-foreground", "{entity_name(&m.entity_id)}" }
+                            }
+                        }
+                        span {
+                            class: "text-xs shrink-0 px-2 py-0.5 rounded-full border border-border text-blue-600",
+                            if let Some(o) = occ { "{o.date.format(\"%b %d\")}" } else { "—" }
                         }
                     }
                 }
@@ -3988,6 +4401,7 @@ pub fn DueViewCmp() -> Element {
     let mut activity_bar_view = state.activity_bar_view;
     let mut activity_bar_tgl = state.activity_bar_tgl;
     let mut backdropTgl = state.backdropTgl;
+    let local_offset = *state.local_utc_offset_minutes.read();
 
     let now = chrono::Utc::now();
     let today = now.date_naive();
@@ -3999,7 +4413,14 @@ pub fn DueViewCmp() -> Element {
     // not just de-emphasized into a lower bucket.
     let mut due: Vec<MomentType> = moments.read().iter()
         .filter(|m| {
-            if m.completed_at.is_some() || crate::urgency::is_waiting(m, now) {
+            // Momento's due_at is a fixed RRULE anchor, not a rolling due
+            // date — it'd otherwise show up here as permanently "overdue"
+            // by this exact overdue-only rule. See its own Momentos tab/
+            // view for the RRULE-aware equivalent.
+            if m.moment_type_id == 4i64 {
+                return false;
+            }
+            if m.completed_at.is_some() || crate::urgency::is_waiting(m, now) || crate::urgency::is_missed(m, now) {
                 return false;
             }
             let Some(due_at) = m.due_at.as_ref() else { return false; };
@@ -4047,7 +4468,84 @@ pub fn DueViewCmp() -> Element {
                             }
                             span {
                                 class: "text-xs text-destructive shrink-0",
-                                "{m.due_at.as_deref().unwrap_or(\"\").chars().take(10).collect::<String>()}"
+                                "{m.due_at.as_deref().map(|d| utc_str_to_local(d, local_offset)).unwrap_or_default().chars().take(10).collect::<String>()}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Everything with an until_at (taskwarrior-style deadline, see
+// urgency::is_missed) that passed without being completed — hidden from
+// every normal view (Inbox, entity list, Priority, Due) the moment that
+// happens, same relationship Scheduled has to scheduled_at. This is the
+// one place to go find them; nothing here can be "un-missed" except by
+// completing it (which removes it from this list) or editing its until_at
+// forward (components::moment's until_at editor, in the moment detail
+// panel).
+#[component]
+pub fn MissedViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let moments = state.moments;
+    let entities = state.entities;
+    let mut current_moment = state.current_moment;
+    let mut activity_bar_view = state.activity_bar_view;
+    let mut activity_bar_tgl = state.activity_bar_tgl;
+    let mut backdropTgl = state.backdropTgl;
+    let local_offset = *state.local_utc_offset_minutes.read();
+
+    let now = chrono::Utc::now();
+
+    let mut missed: Vec<MomentType> = moments.read().iter()
+        .filter(|m| crate::urgency::is_missed(m, now))
+        .cloned()
+        .collect();
+    missed.sort_by(|a, b| {
+        let until = |m: &MomentType| m.metadata.as_ref().and_then(|meta| meta.until_at.clone()).unwrap_or_default();
+        until(b).cmp(&until(a))
+    });
+
+    let entity_name = move |entity_id: &str| entities.read().iter()
+        .find(|e| e.id == entity_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "Unknown".to_string());
+    let entity_names_for = move |m: &MomentType| m.entity_ids().iter().map(|id| entity_name(id)).collect::<Vec<_>>().join(", ");
+
+    rsx! {
+        div {
+            class: "mx-4 mb-3 flex flex-col gap-4",
+            if missed.is_empty() {
+                div {
+                    class: "rounded-lg border border-border bg-background text-sm text-muted-foreground text-center py-8",
+                    "Nothing missed."
+                }
+            } else {
+                div {
+                    class: "rounded-lg border border-border bg-background divide-y divide-border overflow-hidden",
+                    for m in missed.iter() {
+                        div {
+                            key: "{m.id}",
+                            class: "flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-muted/50 transition-colors",
+                            onclick: {
+                                let m = m.clone();
+                                move |_| {
+                                    current_moment.set(Some(m.clone()));
+                                    activity_bar_view.set(ABView::Task);
+                                    backdropTgl.set(true);
+                                    activity_bar_tgl.set(true);
+                                }
+                            },
+                            div {
+                                class: "flex flex-col min-w-0",
+                                span { class: "text-sm font-medium text-foreground truncate", "{m.title}" }
+                                span { class: "text-xs text-muted-foreground", "{entity_names_for(m)}" }
+                            }
+                            span {
+                                class: "text-xs text-destructive shrink-0",
+                                "{m.metadata.as_ref().and_then(|meta| meta.until_at.clone()).map(|d| utc_str_to_local(&d, local_offset)).unwrap_or_default().chars().take(10).collect::<String>()}"
                             }
                         }
                     }
@@ -4072,7 +4570,13 @@ pub fn PriorityViewCmp() -> Element {
     let all = moments.read().clone();
     let all_entities = entities.read().clone();
     let mut ranked: Vec<(MomentType, crate::urgency::UrgencyBreakdown)> = all.iter()
-        .filter(|m| m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now))
+        // Momento excluded here too — its due_at is a fixed RRULE anchor
+        // date, not a rolling "next occurrence," so it'd rank meaninglessly
+        // (usually as permanently, confusingly overdue) in an urgency-sorted
+        // list that assumes due_at means what it means for task/promise.
+        // See its own dedicated Momentos tab/view for the RRULE-aware
+        // equivalent.
+        .filter(|m| m.moment_type_id != 3i64 && m.moment_type_id != 4i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now))
         .map(|m| (m.clone(), crate::urgency::compute_urgency(m, &all, &all_entities, now, &weights)))
         .collect();
     ranked.sort_by(|a, b| b.1.total().partial_cmp(&a.1.total()).unwrap_or(std::cmp::Ordering::Equal));

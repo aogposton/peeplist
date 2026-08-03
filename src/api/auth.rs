@@ -4,6 +4,30 @@ use std::env;
 use super::client::SupabaseClient;
 use crate::types::*;
 
+// Distinguishes "never reached the server" from "the server said no" — the
+// two session-liveness checks in layouts/navbar.rs (the mount-time check
+// and the 50-minute proactive refresh loop) used to collapse both into a
+// plain String and treat any failure as "token is dead, log out." That
+// meant going offline and refreshing the page reliably logged the Synced
+// vault out from under you: the validity check AND its refresh fallback
+// both fail identically when there's no network to reach at all, with
+// nothing distinguishing that from an actually-expired/revoked token.
+// Mirrors StorageError::Network vs StorageError::Remote (api/storage.rs).
+#[derive(Debug)]
+pub enum AuthError {
+    Network(reqwest::Error),
+    Rejected(String),
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::Network(e) => write!(f, "{e}"),
+            AuthError::Rejected(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
 // Self-service account creation — closes the gap flagged in the local-first
 // pivot plan (Phase 1f, deliberately deferred until now): before this,
 // only an account created by hand directly in Supabase could ever log in.
@@ -76,19 +100,20 @@ pub async fn login(email: String, password: String, captcha_token: Option<String
 
 /// Checks whether an access token is still accepted by Supabase.
 /// Used on app load to detect a token that has expired/died server-side
-/// without the user explicitly logging out.
-pub async fn get_current_user(token: String) -> Result<AuthUser, String> {
+/// without the user explicitly logging out. See AuthError's own doc
+/// comment for why the error type distinguishes offline from rejected.
+pub async fn get_current_user(token: String) -> Result<AuthUser, AuthError> {
     let response = SupabaseClient::new(token)
         .auth_get("user")
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AuthError::Network)?;
 
     if !response.status().is_success() {
-        return Err(format!("token rejected with status {}", response.status()));
+        return Err(AuthError::Rejected(format!("token rejected with status {}", response.status())));
     }
 
-    response.json::<AuthUser>().await.map_err(|e| e.to_string())
+    response.json::<AuthUser>().await.map_err(AuthError::Network)
 }
 
 /// Changes the password on the currently-authenticated Supabase user.
@@ -145,21 +170,21 @@ pub async fn request_password_reset(email: String, redirect_to: String, captcha_
     Ok(())
 }
 
-pub async fn refresh_access_token(refresh_token: String) -> Result<LoginResponse, String> {
+pub async fn refresh_access_token(refresh_token: String) -> Result<LoginResponse, AuthError> {
     let response = SupabaseClient::new("".to_string())
         .auth_post("token?grant_type=refresh_token")
         .json(&serde_json::json!({ "refresh_token": refresh_token }))
         .send()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(AuthError::Network)?;
 
     let status = response.status();
-    let text = response.text().await.map_err(|e| e.to_string())?;
+    let text = response.text().await.map_err(AuthError::Network)?;
 
     if !status.is_success() {
-        return Err(format!("Refresh failed ({}): {}", status, text));
+        return Err(AuthError::Rejected(format!("Refresh failed ({}): {}", status, text)));
     }
 
     serde_json::from_str::<LoginResponse>(&text)
-        .map_err(|e| format!("Failed to parse refresh response: {} — body was: {}", e, text))
+        .map_err(|e| AuthError::Rejected(format!("Failed to parse refresh response: {} — body was: {}", e, text)))
 }

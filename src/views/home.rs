@@ -18,6 +18,8 @@ use crate::components::{
     NotesViewCmp,
     SettingsCmp,
     RecentlyDeletedViewCmp,
+    MomentosViewCmp,
+    MissedViewCmp,
 };
 
 use crate::api::ActiveStorage;
@@ -40,12 +42,29 @@ pub fn Home() -> Element {
     let active_vault = state.active_vault;
     let mut hide_notes = state.hide_notes;
     let mut hide_completed = state.hide_completed;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     let has_tag = |m: &MomentType, tag: &str| {
         m.metadata.as_ref().is_some_and(|meta| meta.tags.iter().any(|t| t == tag))
     };
     let has_project = |m: &MomentType, project: &str| {
         m.metadata.as_ref().and_then(|meta| meta.project.as_deref()) == Some(project)
+    };
+    // The one place reveal_lead actually hides anything (see
+    // MomentMetadata::reveal_lead's doc comment) — the general moment
+    // list, not the dedicated Momentos tab/sidebar (those always show
+    // everything; see MomentosViewCmp/ab_momentos_cmp). Non-momentos pass
+    // through unaffected.
+    let momento_visible = |m: &MomentType, now: chrono::DateTime<chrono::Utc>| {
+        if m.moment_type_id != 4i64 {
+            return true;
+        }
+        let meta = m.metadata.clone().unwrap_or_default();
+        let today = now.date_naive();
+        match crate::momento::next_occurrences(m.due_at.as_deref().unwrap_or_default(), &meta, today, 1).into_iter().next() {
+            Some(occ) => crate::momento::is_revealed(occ.datetime, meta.reveal_lead.as_deref(), now),
+            None => true,
+        }
     };
 
     use_effect(move || {
@@ -87,6 +106,8 @@ pub fn Home() -> Element {
                     let now = chrono::Utc::now();
                     let visible: Vec<MomentType> = moments.read().iter()
                         .filter(|m| !crate::urgency::is_waiting(m, now))
+                        .filter(|m| !crate::urgency::is_missed(m, now))
+                        .filter(|m| momento_visible(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
                         .filter(|m| project_filter.read().as_ref().map_or(true, |p| has_project(m, p)))
                         .cloned()
@@ -94,7 +115,7 @@ pub fn Home() -> Element {
                     rsx! {
                         entity_view_cmp { }
                         div {class:"h-4"}
-                        div { class: "hidden xl:block", MomentInputCmp { } }
+                        div { class: if *is_desktop_viewport.read() { "block" } else { "hidden" }, MomentInputCmp { } }
                         div {class:"h-4"}
                         MomentListCmp { moments: visible.clone() }
                         div {
@@ -125,6 +146,8 @@ pub fn Home() -> Element {
                     let visible: Vec<MomentType> = moments.read().iter()
                         .filter(|m| current_entity.read().as_ref().map_or(false, |e| m.involves_entity(&e.id)))
                         .filter(|m| !crate::urgency::is_waiting(m, now))
+                        .filter(|m| !crate::urgency::is_missed(m, now))
+                        .filter(|m| momento_visible(m, now))
                         .filter(|m| tag_filter.read().as_ref().map_or(true, |tag| has_tag(m, tag)))
                         .filter(|m| project_filter.read().as_ref().map_or(true, |p| has_project(m, p)))
                         .cloned()
@@ -132,7 +155,7 @@ pub fn Home() -> Element {
                     rsx! {
                         entity_view_cmp { }
                         div {class:"h-4"}
-                        div { class: "hidden xl:block", MomentInputCmp { } }
+                        div { class: if *is_desktop_viewport.read() { "block" } else { "hidden" }, MomentInputCmp { } }
                         div {class:"h-4"}
                         MomentListCmp { moments: visible.clone() }
                         div {
@@ -208,6 +231,22 @@ pub fn Home() -> Element {
                         p { class: "text-sm text-muted-foreground mb-4", "Deleted moments in this vault. Restore one to bring it back to its entity." }
                     }
                     RecentlyDeletedViewCmp { }
+                },
+                Momentos => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Momentos" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Every recurring/personal moment, across everyone, next-upcoming first." }
+                    }
+                    MomentosViewCmp { }
+                },
+                Missed => rsx! {
+                    div {
+                        class: "px-4 pt-4",
+                        h1 { class: "text-2xl font-semibold text-foreground mb-1", "Missed" }
+                        p { class: "text-sm text-muted-foreground mb-4", "Had a deadline, and it passed without getting done." }
+                    }
+                    MissedViewCmp { }
                 }
             }
             }

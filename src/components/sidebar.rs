@@ -8,8 +8,29 @@ use crate::types::{EntityType, MomentType, NewEntityType};
 use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger};
 use crate::components::context_menu::{ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuTrigger};
 
-const NAV_LINK_CLASS: &str = "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
-const NAV_LINK_ICON_CLASS: &str = "flex items-center gap-2 rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer";
+// Sidebar row sizing: bigger by default (mobile-first — real touch targets
+// were coming out "comically small" per a real phone report), reverting to
+// the original compact desktop sizing once AppState::is_desktop_viewport
+// says this is really a desktop-sized viewport. Functions, not plain
+// constants, since the choice is now a runtime Rust/JS viewport reading
+// (see AppState::is_desktop_viewport's doc comment) rather than a Tailwind
+// CSS breakpoint — a CSS-variant version of this shipped first but failed
+// silently on a real iPhone SE despite working in Chrome's device emulation.
+fn nav_link_class(is_desktop: bool) -> &'static str {
+    if is_desktop {
+        "block rounded-md px-3 py-2 text-sm font-medium text-foreground hover:bg-muted transition-colors cursor-pointer"
+    } else {
+        "block rounded-md px-3 py-3 text-base font-medium text-foreground hover:bg-muted transition-colors cursor-pointer"
+    }
+}
+
+fn nav_link_active_class(is_desktop: bool) -> &'static str {
+    if is_desktop {
+        "block rounded-md px-3 py-2 text-sm font-medium bg-muted text-foreground cursor-pointer"
+    } else {
+        "block rounded-md px-3 py-3 text-base font-medium bg-muted text-foreground cursor-pointer"
+    }
+}
 
 // (View, icon, label) for every hideable sidebar view — see View::
 // as_storage_str/from_storage_str (main.rs) for why Entity/Settings aren't
@@ -21,10 +42,12 @@ const VIEW_ENTRIES: &[(View, fn() -> Element, &str)] = &[
     (View::Priority, fa_bolt, "Expedite"),
     (View::Due, fa_calendar, "Due"),
     (View::Scheduled, fa_clock, "Scheduled"),
+    (View::Missed, fa_calendar_xmark, "Missed"),
     (View::Blocking, fa_lock, "Blocking"),
     (View::Notes, fa_note_sticky, "Notes"),
     (View::AllEntities, fa_circle_nodes, "All Entities"),
     (View::RecentlyDeleted, fa_trash, "Recently Deleted"),
+    (View::Momentos, fa_repeat, "Momentos"),
 ];
 
 #[component]
@@ -36,6 +59,7 @@ pub fn views_list_cmp() -> Element {
     let mut project_filter = state.project_filter;
     let mut hidden_views = state.hidden_views;
     let entities = state.entities;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     rsx! {
         div {
@@ -46,7 +70,11 @@ pub fn views_list_cmp() -> Element {
                         key: "{label}",
                         class: "group flex items-center rounded-md hover:bg-muted transition-colors",
                         a {
-                            class: "flex-1 flex items-center gap-2 px-3 py-2 text-sm font-medium text-foreground cursor-pointer min-w-0",
+                            class: if *is_desktop_viewport.read() {
+                                "flex-1 flex items-center gap-2 px-3 py-2 text-sm font-medium text-foreground cursor-pointer min-w-0"
+                            } else {
+                                "flex-1 flex items-center gap-2 px-3 py-3 text-base font-medium text-foreground cursor-pointer min-w-0"
+                            },
                             onclick: move |_| {
                                 // SelfEntity reuses View::Entity's own
                                 // rendering (see views/home.rs's combined
@@ -116,13 +144,13 @@ pub fn entity_list_cmp() -> Element {
     let mut moments = state.moments;
     let mut current_entity = state.current_entity;
     let mut currentView = state.currentView;
-    let mut entityModalTgl = state.entityModalTgl;
     let mut tag_filter = state.tag_filter;
     let mut project_filter = state.project_filter;
     let mut expanded = use_signal(|| true);
     let active_vault = state.active_vault;
     let auth_token = state.auth_token;
     let autohide_entities = state.autohide_entities;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     // Same delete-vs-reassign choice as tag/project deletion (see
     // tag_list_cmp/project_list_cmp) — user asked for entity delete to work
@@ -304,7 +332,7 @@ pub fn entity_list_cmp() -> Element {
     // sidebar list only.
     let now = chrono::Utc::now();
     let has_active_moment = |entity_id: &str| moments.read().iter()
-        .any(|m| m.involves_entity(entity_id) && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now));
+        .any(|m| m.involves_entity(entity_id) && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now));
     let mut visible_entities: Vec<_> = entities.read().iter()
         .filter(|e| !is_self_entity(e))
         .filter(|e| !*autohide_entities.read() || has_active_moment(&e.id))
@@ -319,18 +347,12 @@ pub fn entity_list_cmp() -> Element {
         div {
             class: "px-3 mt-6 pt-4 border-t border-border flex flex-col gap-y-1",
             div {
-                class: "flex items-center justify-between mb-1",
+                class: "flex items-center mb-1",
                 span {
                     class: "flex items-center gap-1 text-xs font-semibold uppercase tracking-wide text-muted-foreground cursor-pointer select-none",
                     onclick: move |_| { let v = *expanded.read(); expanded.set(!v); },
                     span { class: "text-[10px]", if *expanded.read() { "▾" } else { "▸" } }
                     "Entities"
-                }
-                button {
-                    class: "h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer",
-                    title: "Add entity",
-                    onclick: move |_| entityModalTgl.set(true),
-                    fa_plus {}
                 }
             }
             if let Some(msg) = delete_error.read().as_ref() {
@@ -351,7 +373,7 @@ pub fn entity_list_cmp() -> Element {
                         key: "{entity.id}",
                         ContextMenuTrigger {
                             a {
-                                class: NAV_LINK_CLASS,
+                                class: nav_link_class(*is_desktop_viewport.read()),
                                 onclick: {
                                     let entity = entity.clone();
                                     move |_| {
@@ -502,6 +524,7 @@ pub fn tag_list_cmp() -> Element {
     let mut expanded = use_signal(|| true);
     let active_vault = state.active_vault;
     let auth_token = state.auth_token;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     let mut tags: Vec<String> = moments.read().iter()
         .filter_map(|m| m.metadata.as_ref())
@@ -587,9 +610,9 @@ pub fn tag_list_cmp() -> Element {
                         ContextMenuTrigger {
                             a {
                                 class: if tag_filter.read().as_deref() == Some(tag.as_str()) {
-                                    "block rounded-md px-3 py-2 text-sm font-medium bg-muted text-foreground cursor-pointer"
+                                    nav_link_active_class(*is_desktop_viewport.read())
                                 } else {
-                                    NAV_LINK_CLASS
+                                    nav_link_class(*is_desktop_viewport.read())
                                 },
                                 onclick: {
                                     let tag = tag.clone();
@@ -696,6 +719,7 @@ pub fn project_list_cmp() -> Element {
     let active_vault = state.active_vault;
     let auth_token = state.auth_token;
     let autohide_entities = state.autohide_entities;
+    let is_desktop_viewport = state.is_desktop_viewport;
 
     // Same auto-hide treatment as entities (2026-07-23/28) — "I need
     // projects to fall off the list the same way as my entities fall off
@@ -708,7 +732,7 @@ pub fn project_list_cmp() -> Element {
     let project_has_active_moment = |project: &str| moments.read().iter()
         .any(|m| {
             m.metadata.as_ref().and_then(|meta| meta.project.as_deref()) == Some(project)
-                && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now)
+                && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now)
         });
 
     let mut projects: Vec<String> = moments.read().iter()
@@ -793,9 +817,9 @@ pub fn project_list_cmp() -> Element {
                         ContextMenuTrigger {
                             a {
                                 class: if project_filter.read().as_deref() == Some(project.as_str()) {
-                                    "block rounded-md px-3 py-2 text-sm font-medium bg-muted text-foreground cursor-pointer"
+                                    nav_link_active_class(*is_desktop_viewport.read())
                                 } else {
-                                    NAV_LINK_CLASS
+                                    nav_link_class(*is_desktop_viewport.read())
                                 },
                                 onclick: {
                                     let project = project.clone();
