@@ -19,7 +19,8 @@
 //   scheduled:<date>     same date grammar as due — hides the moment from
 //                        the normal views until this date (see the
 //                        Scheduled view). wait: is an alias (taskwarrior's
-//                        own name for this).
+//                        own name for this); sched: is a plain shorthand
+//                        alias (matching deps: for depends:).
 //   until:<date>         same date grammar as due
 //   depends:<title>      blocked by another open moment, matched by title —
 //                        no spaces (stops at whitespace) unless quoted, same
@@ -29,8 +30,11 @@
 //                        search — see ParsedCapture.depends_on_title).
 //   +<tag> / -<tag>      add / remove a tag (single word)
 //   +"<tag>" / -"<tag>"  add / remove a tag containing spaces
-//   ;t; / ;p; / ;n;      set the moment's type: task / promise / note —
-//                        home-row, stands alone as its own word
+//   ;t; / ;p; / ;n; / ;i; set the moment's type: task / promise / note /
+//                        info — home-row, stands alone as its own word. Info
+//                        is a Note subtype that never shows in the normal
+//                        moment flow, only in Notes and the entity's Info
+//                        panel — see components/entity.rs's ab_info_cmp.
 //
 // Anything that isn't recognized (including a malformed date, an
 // unrecognized @name, or an unterminated quote) is left as plain text and
@@ -170,6 +174,16 @@ fn classify_word(word: &str) -> TokenKind {
     if word == ";n;" {
         return TokenKind::MomentType(3);
     }
+    // Info (5) — a subtype of Note (3): hidden from the normal moment flow
+    // like Momento (4) is (see home.rs's info_visible/momento_visible), but
+    // otherwise rendered wherever Notes are, plus surfaced in the entity
+    // Info panel (components/entity.rs's ab_info_cmp). Unlike Momento, this
+    // one *is* reachable from quick-capture — it's meant as a fast way to
+    // jot a fact about whichever entity you're @-mentioning, not a
+    // scheduled-recurrence construct.
+    if word == ";i;" {
+        return TokenKind::MomentType(5);
+    }
     if let Some(rest) = word.strip_prefix('+') {
         if !rest.is_empty() {
             return TokenKind::TagAdd(rest.to_string());
@@ -196,8 +210,9 @@ fn classify_word(word: &str) -> TokenKind {
                 }
                 // wait: is taskwarrior's own name for this — same field,
                 // same syntax, just the more familiar word for what it
-                // actually does (hide until this date).
-                "scheduled" | "wait" => {
+                // actually does (hide until this date). sched: is a plain
+                // shorthand alias (2026-08-07, matching deps: for depends:).
+                "scheduled" | "wait" | "sched" => {
                     if let Some(d) = parse_date_token(val) {
                         return TokenKind::Scheduled(d);
                     }
@@ -493,7 +508,9 @@ mod tests {
     fn wait_is_an_alias_for_scheduled() {
         let scheduled = parse("Call back scheduled:2026-08-01", &entities());
         let wait = parse("Call back wait:2026-08-01", &entities());
+        let sched = parse("Call back sched:2026-08-01", &entities());
         assert_eq!(scheduled.scheduled_at, wait.scheduled_at);
+        assert_eq!(scheduled.scheduled_at, sched.scheduled_at);
         assert!(wait.scheduled_at.is_some());
     }
 
@@ -502,6 +519,7 @@ mod tests {
         assert_eq!(parse("Call mom ;t;", &entities()).moment_type_id, Some(1));
         assert_eq!(parse("Call mom ;p;", &entities()).moment_type_id, Some(2));
         assert_eq!(parse("Call mom ;n;", &entities()).moment_type_id, Some(3));
+        assert_eq!(parse("Call mom ;i;", &entities()).moment_type_id, Some(5));
         assert_eq!(parse("Call mom", &entities()).moment_type_id, None);
     }
 

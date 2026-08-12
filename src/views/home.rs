@@ -43,6 +43,15 @@ pub fn Home() -> Element {
     let mut hide_notes = state.hide_notes;
     let mut hide_completed = state.hide_completed;
     let is_desktop_viewport = state.is_desktop_viewport;
+    let sidebar_collapsed = state.sidebar_collapsed;
+    // The fixed hamburger button (layouts::Navbar) sits top-left, roughly
+    // 4px-52px from the top — shown whenever the docked sidebar isn't
+    // (mobile, or a narrow/collapsed desktop window; same condition the
+    // hamburger button itself uses). Inbox/Entity/Self already clear it
+    // naturally (entity_view_cmp's profile header has its own top space),
+    // but every other view's plain `h1`-under-`pt-4` heading sat right in
+    // its bounding box on a touch-sized viewport — 2026-08-03 bug report.
+    let heading_top_pad = if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "pt-4" } else { "pt-16" };
 
     let has_tag = |m: &MomentType, tag: &str| {
         m.metadata.as_ref().is_some_and(|meta| meta.tags.iter().any(|t| t == tag))
@@ -177,7 +186,7 @@ pub fn Home() -> Element {
                 },
                 Priority => rsx! {
                     div {
-                        class: "px-4 pt-4 flex items-start justify-between gap-3",
+                        class: "px-4 {heading_top_pad} flex items-start justify-between gap-3",
                         div {
                             h1 { class: "text-2xl font-semibold text-foreground mb-1", "Expedite" }
                             p { class: "text-sm text-muted-foreground mb-4", "Open tasks and promises across everyone, ranked by urgency." }
@@ -191,7 +200,7 @@ pub fn Home() -> Element {
                 },
                 Due => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Due" }
                         p { class: "text-sm text-muted-foreground mb-4", "Only what's overdue — nothing due today or later shows up here." }
                     }
@@ -199,7 +208,7 @@ pub fn Home() -> Element {
                 },
                 Scheduled => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Scheduled" }
                         p { class: "text-sm text-muted-foreground mb-4", "Waiting to come back into view — check on these before they arrive." }
                     }
@@ -207,7 +216,7 @@ pub fn Home() -> Element {
                 },
                 Blocking => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Blocking" }
                         p { class: "text-sm text-muted-foreground mb-4", "Still open, and standing between other things and done." }
                     }
@@ -215,7 +224,7 @@ pub fn Home() -> Element {
                 },
                 Notes => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Notes" }
                         p { class: "text-sm text-muted-foreground mb-4", "Every note, in one place, newest first." }
                     }
@@ -226,7 +235,7 @@ pub fn Home() -> Element {
                 },
                 RecentlyDeleted => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Recently Deleted" }
                         p { class: "text-sm text-muted-foreground mb-4", "Deleted moments in this vault. Restore one to bring it back to its entity." }
                     }
@@ -234,7 +243,7 @@ pub fn Home() -> Element {
                 },
                 Momentos => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Momentos" }
                         p { class: "text-sm text-muted-foreground mb-4", "Every recurring/personal moment, across everyone, next-upcoming first." }
                     }
@@ -242,7 +251,7 @@ pub fn Home() -> Element {
                 },
                 Missed => rsx! {
                     div {
-                        class: "px-4 pt-4",
+                        class: "px-4 {heading_top_pad}",
                         h1 { class: "text-2xl font-semibold text-foreground mb-1", "Missed" }
                         p { class: "text-sm text-muted-foreground mb-4", "Had a deadline, and it passed without getting done." }
                     }

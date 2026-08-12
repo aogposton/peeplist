@@ -40,7 +40,7 @@ use web_sys::window;
 use gloo_timers::future::TimeoutFuture;
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::dropdown::{Dropdown, DropdownContent, DropdownItem, DropdownTrigger, DropdownSeparator};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // Refresh the access token this long before it would otherwise expire via
 // inactivity/backend expiry, so a live session never silently dies underneath
@@ -110,10 +110,29 @@ fn remap_id(id: &str, id_map: &HashMap<String, String>) -> String {
     id_map.get(id).cloned().unwrap_or_else(|| id.to_string())
 }
 
+// Recurses into arrays/objects, not just a bare top-level string — the
+// "metadata" field's queued value is a whole MomentMetadata object, and a
+// temp id needing remap can be buried inside it (additional_entity_ids,
+// depends_on), not just at the top level. A flat-only version of this
+// (pre-2026-08-07) meant a moment co-created with a brand-new second entity
+// in the same batch — e.g. a fresh @mention added inline via "+ Add..." —
+// flushed to Supabase with metadata.additional_entity_ids still pointing at
+// the client-only temp uuid, a reference that could never resolve to a real
+// row server-side: the entity would sync fine on its own, just permanently
+// disconnected from the moment that was supposed to reference it.
 fn remap_value(value: serde_json::Value, id_map: &HashMap<String, String>) -> serde_json::Value {
-    match &value {
-        serde_json::Value::String(s) if id_map.contains_key(s) => serde_json::Value::String(id_map[s].clone()),
-        _ => value,
+    match value {
+        serde_json::Value::String(s) => match id_map.get(&s) {
+            Some(real) => serde_json::Value::String(real.clone()),
+            None => serde_json::Value::String(s),
+        },
+        serde_json::Value::Array(arr) => serde_json::Value::Array(
+            arr.into_iter().map(|v| remap_value(v, id_map)).collect()
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.into_iter().map(|(k, v)| (k, remap_value(v, id_map))).collect()
+        ),
+        other => other,
     }
 }
 
@@ -193,9 +212,13 @@ enum FlushOutcome {
 // comes back as a retryable failure, this stops entirely: that op and
 // everything queued behind it stays exactly as persisted, untouched, for
 // the next tick — no attempt to guess what else might also be affected.
-async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, mut entities: Signal<Vec<EntityType>>) {
+async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, mut entities: Signal<Vec<EntityType>>, mut on_the_fly_task: Signal<Option<MomentType>>) {
     let ops = sync_queue::peek();
-    let mut id_map: HashMap<String, String> = HashMap::new();
+    // Seeded from every temp_id this device has ever resolved, not just
+    // ones resolved earlier in *this* pass — see
+    // sync_queue::RESOLVED_IDS's doc comment for why that distinction is
+    // load-bearing.
+    let mut id_map: HashMap<String, String> = sync_queue::RESOLVED_IDS.read().clone();
 
     for op in ops {
         let outcome = match op {
@@ -204,6 +227,7 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
                 match crate::api::moment::createMoment(new.clone(), token.clone()).await {
                     Ok(created) => {
                         id_map.insert(temp_id.clone(), created.id.clone());
+                        sync_queue::RESOLVED_IDS.write().insert(temp_id.clone(), created.id.clone());
                         let mut all = synced_mirror::get_moments().unwrap_or_default();
                         match all.iter().position(|m| m.id == temp_id) {
                             Some(pos) => all[pos] = created.clone(),
@@ -211,7 +235,24 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
                         }
                         synced_mirror::set_moments(&all);
                         moments.write().retain(|m| m.id != temp_id);
-                        moments.write().push(created);
+                        moments.write().push(created.clone());
+                        // "On the fly" (components/moment.rs's OnTheFlyCmp)
+                        // caches its own snapshot of this same just-created
+                        // moment, temp_id included, to render its "go do
+                        // this now" screen and complete it on the immediate-
+                        // flush trigger's schedule (task #58) reconciling
+                        // the temp_id here — before the user got a chance to
+                        // click Done — instead of getting the create and
+                        // the completion-update into the same flush pass
+                        // (where remap_id below would have handled it) —
+                        // left this snapshot's id stale forever, so clicking
+                        // Done queued an update against an id the server had
+                        // never heard of. Silent no-op: the PATCH matched
+                        // zero rows, still returned 200, so the op still
+                        // reported success.
+                        if on_the_fly_task.read().as_ref().is_some_and(|t| t.id == temp_id) {
+                            on_the_fly_task.set(Some(created));
+                        }
                         FlushOutcome::Done
                     }
                     Err(e) => {
@@ -226,6 +267,7 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
                 match crate::api::entity::createEntity(new.clone(), token.clone()).await {
                     Ok(created) => {
                         id_map.insert(temp_id.clone(), created.id.clone());
+                        sync_queue::RESOLVED_IDS.write().insert(temp_id.clone(), created.id.clone());
                         let mut all = synced_mirror::get_entities().unwrap_or_default();
                         match all.iter().position(|e| e.id == temp_id) {
                             Some(pos) => all[pos] = created.clone(),
@@ -247,6 +289,7 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
                 match crate::api::moment::createReaction(new.clone(), token.clone()).await {
                     Ok(created) => {
                         id_map.insert(temp_id.clone(), created.id.clone());
+                        sync_queue::RESOLVED_IDS.write().insert(temp_id.clone(), created.id.clone());
                         let mut all = synced_mirror::get_moments().unwrap_or_default();
                         if let Some(m) = all.iter_mut().find(|m| m.id == created.moment_id) {
                             let reactions = m.reactions.get_or_insert_with(Vec::new);
@@ -295,6 +338,19 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
                             }
                         }
                     }
+                    // A genuine server rejection (most commonly: `real_id`
+                    // never actually resolved to a real id — the create it
+                    // depended on had already been reconciled in an earlier,
+                    // separate flush pass, so this pass's own id_map had
+                    // nothing to remap it with — see remap_id's doc comment)
+                    // can never succeed no matter how many times it's
+                    // retried. Drop it instead of hammering this endpoint
+                    // forever — confirmed live: this exact op, stuck on a
+                    // stale id, retried every single tick indefinitely.
+                    Err(crate::api::StorageError::Remote(e)) => {
+                        clog!("Sync flush: server rejected conflict check for moment {}, dropping this edit to '{}' ({})", real_id, field, e);
+                        FlushOutcome::Done
+                    }
                     Err(e) => {
                         clog!("Sync flush: couldn't check moment {} for conflicts, will retry next tick ({})", real_id, e);
                         FlushOutcome::Retry
@@ -323,6 +379,12 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
                                 FlushOutcome::Retry
                             }
                         }
+                    }
+                    // See the matching UpdateMomentField arm above — same
+                    // reasoning, same fix.
+                    Err(crate::api::StorageError::Remote(e)) => {
+                        clog!("Sync flush: server rejected conflict check for entity {}, dropping this edit to '{}' ({})", real_id, field, e);
+                        FlushOutcome::Done
                     }
                     Err(e) => {
                         clog!("Sync flush: couldn't check entity {} for conflicts, will retry next tick ({})", real_id, e);
@@ -393,15 +455,117 @@ async fn flush_sync_queue(token: String, mut moments: Signal<Vec<MomentType>>, m
 // Signal handles at all — see storage.rs). Run after the queue replay
 // above so this device's own just-flushed writes are already reflected in
 // what comes back, not overwritten a moment later.
+//
+// Every create goes through the queue and isn't actually sent to the
+// server until a flush tick picks it up (see SupabaseStorage::create_moment/
+// create_entity) — including one created moments ago while fully online,
+// still waiting for the *next* tick. If that happens while this tick's own
+// fetch is in flight (or was already snapshotted just before), the
+// server's response has no idea the new record exists yet. Wholesale-
+// overwriting the mirror/Signal with that response would wipe the
+// still-optimistic record from view until a later tick actually creates it
+// server-side — confirmed live: add a moment, watch it vanish a couple
+// seconds later, refresh and it's back (because by then a later tick
+// really had created it). Nothing was ever lost — the queue still had it
+// the whole time — but the UI lied about it in the meantime. Re-adding
+// anything still referenced by a currently-queued create keeps the
+// optimistic view stable across this overwrite; once that create actually
+// flushes, it drops out of `pending` on its own and the server's copy (with
+// its real id) takes over normally.
 async fn refresh_mirror_and_signals(token: String, mut moments: Signal<Vec<MomentType>>, mut entities: Signal<Vec<EntityType>>) {
+    let pending = sync_queue::peek();
+    let pending_moment_ids: HashSet<String> = pending.iter().filter_map(|op| match op {
+        QueuedOp::CreateMoment { temp_id, .. } => Some(temp_id.clone()),
+        _ => None,
+    }).collect();
+    let pending_entity_ids: HashSet<String> = pending.iter().filter_map(|op| match op {
+        QueuedOp::CreateEntity { temp_id, .. } => Some(temp_id.clone()),
+        _ => None,
+    }).collect();
+
+    // Anything with an update/delete/restore still queued against it (not
+    // yet confirmed by the server) would otherwise get clobbered back to
+    // its stale, pre-edit state by this very refetch — completing a moment,
+    // for instance, optimistically sets completed_at locally, but if this
+    // refresh's own network round-trip is already in flight (or starts)
+    // before that completion has actually been sent, the server's answer
+    // still says "not completed," and blindly overwriting with it undoes
+    // the completion in the UI until a *later* tick actually sends the real
+    // update — confirmed live: complete a moment, watch it flash back into
+    // the list a moment later, then disappear again once the real update
+    // lands. `id` here may still be a client-minted temp_id if the create
+    // it's queued behind hasn't been remapped by *this* pass — see
+    // sync_queue::RESOLVED_IDS's doc comment — so it's remapped the same
+    // way flush_sync_queue's own per-op handling does, before comparing
+    // against the freshly fetched (always-real-id) rows below.
+    let resolved = sync_queue::RESOLVED_IDS.read().clone();
+    let remap = |id: &str| resolved.get(id).cloned().unwrap_or_else(|| id.to_string());
+    let pending_moment_edit_ids: HashSet<String> = pending.iter().filter_map(|op| match op {
+        QueuedOp::UpdateMomentField { id, .. } => Some(remap(id)),
+        QueuedOp::DeleteMoment(m) => Some(remap(&m.id)),
+        QueuedOp::RestoreMoment(id) => Some(remap(id)),
+        _ => None,
+    }).collect();
+    let pending_entity_edit_ids: HashSet<String> = pending.iter().filter_map(|op| match op {
+        QueuedOp::UpdateEntityField { id, .. } => Some(remap(id)),
+        QueuedOp::DeleteEntity(id) => Some(remap(id)),
+        _ => None,
+    }).collect();
+
     if let Ok(mut open) = crate::api::moment::getMoments(token.clone()).await {
         if let Ok(deleted) = crate::api::moment::getDeletedMoments(token.clone()).await {
             open.extend(deleted);
         }
+        // The mirror already holds this device's latest optimistic edit —
+        // every write path (update_moment_field, delete_moment,
+        // restore_moment) patches it immediately, before queuing — so
+        // falling back to that instead of the freshly fetched row keeps
+        // this stable regardless of what this refresh's own timing happens
+        // to race against. Moments are only ever soft-deleted (deleted_at
+        // set/cleared, never removed outright), so the mirror always still
+        // has a row to fall back to here — unlike entities below.
+        if !pending_moment_edit_ids.is_empty() {
+            let mirror = synced_mirror::get_moments().unwrap_or_default();
+            for row in open.iter_mut() {
+                if pending_moment_edit_ids.contains(&row.id) {
+                    if let Some(local) = mirror.iter().find(|m| m.id == row.id) {
+                        *row = local.clone();
+                    }
+                }
+            }
+        }
+        let still_local: Vec<MomentType> = moments.read().iter()
+            .filter(|m| pending_moment_ids.contains(&m.id))
+            .cloned()
+            .collect();
+        open.extend(still_local);
         synced_mirror::set_moments(&open);
         moments.set(open.into_iter().filter(|m| m.deleted_at.is_none()).collect());
     }
-    if let Ok(fresh) = crate::api::entity::getEntities(token.clone()).await {
+    if let Ok(mut fresh) = crate::api::entity::getEntities(token.clone()).await {
+        // Same reasoning as moments above, except delete_entity actually
+        // removes the row from the mirror outright (a real hard delete,
+        // not soft) — so a queued-but-not-yet-flushed entity delete has no
+        // mirror row to fall back to. In that case the mirror's *absence*
+        // of the row is itself the correct local state, so it's dropped
+        // from the fresh server list too, rather than kept as a stale
+        // not-yet-deleted row.
+        if !pending_entity_edit_ids.is_empty() {
+            let mirror = synced_mirror::get_entities().unwrap_or_default();
+            fresh.retain(|e| !pending_entity_edit_ids.contains(&e.id) || mirror.iter().any(|m| m.id == e.id));
+            for row in fresh.iter_mut() {
+                if pending_entity_edit_ids.contains(&row.id) {
+                    if let Some(local) = mirror.iter().find(|m| m.id == row.id) {
+                        *row = local.clone();
+                    }
+                }
+            }
+        }
+        let still_local: Vec<EntityType> = entities.read().iter()
+            .filter(|e| pending_entity_ids.contains(&e.id))
+            .cloned()
+            .collect();
+        fresh.extend(still_local);
         synced_mirror::set_entities(&fresh);
         entities.set(fresh);
     }
@@ -458,6 +622,49 @@ struct ViewportSize {
 const TIMEZONE_OFFSET_SCRIPT: &str = r#"
     dioxus.send(new Date().getTimezoneOffset());
 "#;
+
+// AppState::is_touch_device's doc comment — a one-shot read, same posture
+// as TIMEZONE_OFFSET_SCRIPT above (a device either has a touch pointer or
+// it doesn't; unlike window size this isn't something that changes mid-
+// session). maxTouchPoints is the fallback for browsers where
+// 'ontouchstart' was never reliable (older desktop Chrome briefly exposed
+// it on some hybrid laptops); either signal being truthy is enough.
+const TOUCH_CAPABLE_SCRIPT: &str = r#"
+    dioxus.send('ontouchstart' in window || navigator.maxTouchPoints > 0);
+"#;
+
+// AppState::pwa_standalone's doc comment — one-shot, same posture as
+// TOUCH_CAPABLE_SCRIPT (whether the app is already installed doesn't
+// change without a full relaunch, which is a fresh page load anyway).
+const STANDALONE_CHECK_SCRIPT: &str = r#"
+    dioxus.send(window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true);
+"#;
+
+// AppState::pwa_install_available's doc comment. A live listener, not a
+// one-shot read — unlike touch capability, whether the browser is willing
+// to prompt for install can genuinely change *during* the session (Chrome
+// fires `beforeinstallprompt` some time after load, on its own schedule,
+// not necessarily before this even registers) and can go away again once
+// used (`appinstalled`, or the captured event just going stale after its
+// single allowed `.prompt()` call). `preventDefault()` here is what stops
+// Chrome from showing its own mini-infobar automatically — Settings owns
+// presenting this now, not the browser.
+const INSTALL_PROMPT_LISTENER_SCRIPT: &str = r#"
+    window.addEventListener('beforeinstallprompt', (e) => {
+        e.preventDefault();
+        window.__bsbInstallPrompt = e;
+        dioxus.send(true);
+    });
+    window.addEventListener('appinstalled', () => {
+        window.__bsbInstallPrompt = null;
+        dioxus.send(false);
+    });
+"#;
+
+// The matching "fire this once, on demand" script — components::settings'
+// install button — replaying the single captured `beforeinstallprompt`
+// event (a browser API only allows calling `.prompt()` on it once ever) —
+// is defined locally there instead of here; see its own comment for why.
 
 #[derive(serde::Deserialize, Clone)]
 struct GlobalKeyEvent {
@@ -561,7 +768,14 @@ pub fn vault_switcher_cmp() -> Element {
     let mut currentView = state.currentView;
     let mut current_entity = state.current_entity;
     let is_desktop_viewport = state.is_desktop_viewport;
+    let is_touch_device = state.is_touch_device;
     let mut confirming_removal_of = use_signal(|| None::<VaultKind>);
+    // The popup Dropdown below only actually works with a mouse — see its
+    // own comment further down. is_desktop_viewport alone (window size
+    // only) put iPad in the same bucket as a real desktop despite being
+    // touch, so this also has to check is_touch_device (AppState) directly,
+    // not just viewport width.
+    let use_popup_switcher = *is_desktop_viewport.read() && !*is_touch_device.read();
 
     // Keyed off auth_token, not user_email — user_email is only populated
     // once the mount-time session check (see the effect below) actually
@@ -644,20 +858,21 @@ pub fn vault_switcher_cmp() -> Element {
     };
 
     rsx! {
-        // Below the xl breakpoint (phones, and — per the user, 2026-07-23 —
-        // iPads too, which fall in the same bucket) the Dropdown version
-        // below is unusable: tapping any item inside it closes the menu
-        // instead of selecting it, near-certainly the same class of bug
-        // already root-caused for the right-click ContextMenu (see
-        // components/context_menu/component.rs) — a touch's pointerdown
-        // firing the library's outside-dismiss handler before its own
-        // click/tap handler gets a chance to run. Rather than chase that
-        // down inside a shared lumen_blocks component too, this sidesteps
-        // it entirely on touch-sized viewports: no popup, just always-
-        // visible rows. Revisit properly if this turns out to matter for
-        // more than vault-switching.
+        // On any touch device (phones, and iPads — 2026-07-23, then again
+        // 2026-08-03 once is_touch_device could actually tell an iPad apart
+        // from a wide desktop window instead of guessing off viewport size
+        // alone) the Dropdown version below is unusable: tapping any item
+        // inside it closes the menu instead of selecting it, near-certainly
+        // the same class of bug already root-caused for the right-click
+        // ContextMenu (see components/context_menu/component.rs) — a
+        // touch's pointerdown firing the library's outside-dismiss handler
+        // before its own click/tap handler gets a chance to run. Rather
+        // than chase that down inside a shared lumen_blocks component too,
+        // this sidesteps it entirely on touch devices: no popup, just
+        // always-visible rows. Revisit properly if this turns out to
+        // matter for more than vault-switching.
         div {
-            class: if *is_desktop_viewport.read() { "hidden px-3 flex flex-col gap-y-0.5" } else { "px-3 flex flex-col gap-y-0.5" },
+            class: if use_popup_switcher { "hidden px-3 flex flex-col gap-y-0.5" } else { "px-3 flex flex-col gap-y-0.5" },
             for entry in entries.iter() {
                 {
                     let kind = entry.kind;
@@ -708,7 +923,7 @@ pub fn vault_switcher_cmp() -> Element {
             }
         }
         div {
-            class: if *is_desktop_viewport.read() { "block px-3" } else { "hidden px-3" },
+            class: if use_popup_switcher { "block px-3" } else { "hidden px-3" },
             div {
                 class: "w-full sidebar-vault-switcher",
                 Dropdown {
@@ -828,14 +1043,22 @@ pub fn Navbar() -> Element {
     let mut focus_composer = state.focus_composer;
     let mut on_the_fly_open = state.on_the_fly_open;
     let mut refresh_loop_started = use_signal(|| false);
+    let mut session_check_started = use_signal(|| false);
     let mut keyboard_listener_started = use_signal(|| false);
     let mut viewport_listener_started = use_signal(|| false);
     let mut is_desktop_viewport = state.is_desktop_viewport;
     let mut sidebar_collapsed = state.sidebar_collapsed;
     let mut timezone_offset_read = use_signal(|| false);
+    let mut touch_capability_read = use_signal(|| false);
+    let mut is_touch_device = state.is_touch_device;
+    let mut standalone_check_read = use_signal(|| false);
+    let mut pwa_standalone = state.pwa_standalone;
+    let mut install_listener_started = use_signal(|| false);
+    let mut pwa_install_available = state.pwa_install_available;
     let mut local_utc_offset_minutes = state.local_utc_offset_minutes;
     let moments = state.moments;
     let entities = state.entities;
+    let on_the_fly_task = state.on_the_fly_task;
     let mut sync_flush_loop_started = use_signal(|| false);
     let mut sync_online_listener_started = use_signal(|| false);
     let mut sync_flushing = use_signal(|| false);
@@ -860,7 +1083,7 @@ pub fn Navbar() -> Element {
                 }
                 sync_flushing.set(true);
                 if let Some(token) = refresh_before_flush(auth_token).await {
-                    flush_sync_queue(token, moments, entities).await;
+                    flush_sync_queue(token, moments, entities, on_the_fly_task).await;
                 }
                 sync_flushing.set(false);
             }
@@ -883,10 +1106,57 @@ pub fn Navbar() -> Element {
                 }
                 sync_flushing.set(true);
                 if let Some(token) = refresh_before_flush(auth_token).await {
-                    flush_sync_queue(token, moments, entities).await;
+                    flush_sync_queue(token, moments, entities, on_the_fly_task).await;
                 }
                 sync_flushing.set(false);
             }
+        });
+    });
+
+    // Flushes right after something's actually queued, instead of waiting
+    // up to SYNC_FLUSH_INTERVAL_MS for the periodic tick — the common case
+    // (genuinely online) shouldn't have to wait a rhythm out. The periodic
+    // tick and 'online' listener above stay exactly as they were: this
+    // doesn't replace the fallback, it just usually beats it to the punch.
+    // `sync_queue::FLUSH_REQUESTED` (a plain counter, bumped by every
+    // `push`) has to be read synchronously here, not just inside `spawn`,
+    // for Dioxus to track it as this effect's dependency — same reasoning
+    // as the mount-time session check's own doc comment above.
+    //
+    // auth_token/sync_flushing are read via `.peek()`, not `.read()`, here
+    // — deliberately NOT tracked as reactive dependencies of this effect,
+    // unlike FLUSH_REQUESTED. This one bit us badly (2026-08-07): with
+    // `.read()`, this effect was ALSO subscribed to sync_flushing's own
+    // changes — and this same effect body is what WRITES sync_flushing
+    // (true right before spawning, false once the flush finishes). Every
+    // one of those writes re-triggered this exact effect, which flushed
+    // again, which wrote sync_flushing again, forever — a genuine infinite
+    // loop, confirmed live via diagnostic logging: it fired continuously,
+    // roughly every 200-300ms, indefinitely, with FLUSH_REQUESTED sitting
+    // unchanged at 0 the entire time (nothing was even being queued — an
+    // idle app was still hammering Supabase with a full getMoments/
+    // getEntities/getEntityTypes refetch several times a second). That's
+    // what was actually behind two seemingly unrelated bug reports: a
+    // moment's completion flickering (disappear/reappear/disappear as each
+    // of these redundant refetches raced the real update and repeatedly
+    // overwrote the moments Signal) and the entity graph view visibly
+    // re-laying-out every fraction of a second (its own effect depends on
+    // that same moments/entities Signal, so every one of these redundant
+    // overwrites re-triggered it too). `.peek()` reads the current value
+    // without subscribing, so writing to either signal elsewhere no longer
+    // loops back into re-running this effect — its only real trigger is a
+    // genuine new push.
+    use_effect(move || {
+        let _ = *sync_queue::FLUSH_REQUESTED.read();
+        if auth_token.peek().is_none() || *sync_flushing.peek() {
+            return;
+        }
+        sync_flushing.set(true);
+        spawn(async move {
+            if let Some(token) = refresh_before_flush(auth_token).await {
+                flush_sync_queue(token, moments, entities, on_the_fly_task).await;
+            }
+            sync_flushing.set(false);
         });
     });
 
@@ -922,6 +1192,52 @@ pub fn Navbar() -> Element {
             let mut eval = document::eval(TIMEZONE_OFFSET_SCRIPT);
             if let Ok(offset) = eval.recv::<i32>().await {
                 local_utc_offset_minutes.set(offset);
+            }
+        });
+    });
+
+    // One-shot, same guard pattern as above — see
+    // AppState::is_touch_device/TOUCH_CAPABLE_SCRIPT.
+    use_effect(move || {
+        if *touch_capability_read.read() {
+            return;
+        }
+        touch_capability_read.set(true);
+        spawn(async move {
+            let mut eval = document::eval(TOUCH_CAPABLE_SCRIPT);
+            if let Ok(touch) = eval.recv::<bool>().await {
+                is_touch_device.set(touch);
+            }
+        });
+    });
+
+    // One-shot, same guard pattern as above — see
+    // AppState::pwa_standalone/STANDALONE_CHECK_SCRIPT.
+    use_effect(move || {
+        if *standalone_check_read.read() {
+            return;
+        }
+        standalone_check_read.set(true);
+        spawn(async move {
+            let mut eval = document::eval(STANDALONE_CHECK_SCRIPT);
+            if let Ok(standalone) = eval.recv::<bool>().await {
+                pwa_standalone.set(standalone);
+            }
+        });
+    });
+
+    // Live listener, not one-shot — see INSTALL_PROMPT_LISTENER_SCRIPT's own
+    // doc comment for why. Same started-once guard pattern as the other
+    // listeners in this file (ONLINE_SCRIPT, GLOBAL_KEYDOWN_SCRIPT).
+    use_effect(move || {
+        if *install_listener_started.read() {
+            return;
+        }
+        install_listener_started.set(true);
+        spawn(async move {
+            let mut eval = document::eval(INSTALL_PROMPT_LISTENER_SCRIPT);
+            while let Ok(available) = eval.recv::<bool>().await {
+                pwa_install_available.set(available);
             }
         });
     });
@@ -968,10 +1284,31 @@ pub fn Navbar() -> Element {
     // but land back on the (now-Local) app, not a dead-end login screen.
     // Login is opt-in now (see the vault switcher's "+ Add a vault"), never
     // something a bad cached token can strand you behind.
+    //
+    // `session_check_started` guards this the same way every other one-shot
+    // effect in this file does — reading `auth_token` below makes Dioxus
+    // track it as a dependency, so this whole effect body reruns any time
+    // auth_token changes, including from the refresh a few lines down
+    // setting it to the *new* token it just got. Without the guard, that
+    // rerun spawned a second, fully independent check-and-maybe-refresh
+    // task on top of whatever the first one was still doing. Confirmed
+    // live: two "Session check rejected" log lines at the exact same
+    // timestamp, from two concurrent calls both racing to refresh against
+    // the same refresh_token — Supabase rotates it on every use, so
+    // whichever call loses gets rejected using an already-spent token,
+    // which (per Supabase's reuse-detection) can take the whole session
+    // down with it. That's the real mechanism behind "moments/entities
+    // just stop reaching the server" — every subsequent sync write then
+    // fails auth forever, silently, against a token that never had a
+    // chance to be valid for more than an instant.
     use_effect(move || {
         let Some(token) = auth_token.read().clone() else {
             return;
         };
+        if *session_check_started.read() {
+            return;
+        }
+        session_check_started.set(true);
 
         spawn(async move {
             match get_current_user(token).await {
@@ -1219,7 +1556,11 @@ pub fn Navbar() -> Element {
             OnTheFlyCmp { }
             button {
                 id: "add-moment-button",
-                class: if *is_desktop_viewport.read() { "hidden" } else { "fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95" },
+                // A wide, touch-primary viewport (iPad) still needs this —
+                // there's no hover state on touch to reveal some other way
+                // in, so `is_desktop_viewport` alone (window size only)
+                // wrongly hid it there. See AppState::is_touch_device.
+                class: if *is_desktop_viewport.read() && !*is_touch_device.read() { "hidden" } else { "fixed h-14 w-14 bottom-6 right-6 z-51 rounded-full shadow-lg flex items-center justify-center text-2xl font-semibold text-white transition-transform duration-200 hover:scale-105 active:scale-95" },
                 style: "background-color:{HL};",
                 onclick: move |_| {
                     let current = *momentInputTgl.read();
@@ -1229,7 +1570,7 @@ pub fn Navbar() -> Element {
             }
             div {
                 class: {
-                    let hidden_on_desktop = if *is_desktop_viewport.read() { "hidden " } else { "" };
+                    let hidden_on_desktop = if *is_desktop_viewport.read() && !*is_touch_device.read() { "hidden " } else { "" };
                     if *momentInputTgl.read() {
                         format!("{hidden_on_desktop}fixed inset-x-0 bottom-24 z-50 transition-all duration-200 opacity-100 translate-y-0")
                     } else {
@@ -1369,6 +1710,33 @@ mod sync_flush_tests {
         assert_eq!(remap_value(serde_json::json!("temp-1"), &map), serde_json::json!("real-42"));
         assert_eq!(remap_value(serde_json::json!("other"), &map), serde_json::json!("other"));
         assert_eq!(remap_value(serde_json::json!(5), &map), serde_json::json!(5));
+    }
+
+    // The actual 2026-08-07 bug: a moment's queued "metadata" field update is
+    // a whole object with a temp entity id buried inside
+    // additional_entity_ids (a nested array) — a co-created second @mention
+    // that hadn't resolved to its real server id yet at push time. This has
+    // to come back remapped just as reliably as a bare top-level id would.
+    #[test]
+    fn remap_value_recurses_into_nested_arrays_and_objects() {
+        let mut map = HashMap::new();
+        map.insert("temp-entity-1".to_string(), "real-entity-9".to_string());
+        map.insert("temp-moment-1".to_string(), "real-moment-3".to_string());
+
+        let metadata = serde_json::json!({
+            "tags": ["book-club"],
+            "additional_entity_ids": ["temp-entity-1", "unrelated-entity"],
+            "depends_on": ["temp-moment-1"],
+        });
+        let remapped = remap_value(metadata, &map);
+        assert_eq!(
+            remapped,
+            serde_json::json!({
+                "tags": ["book-club"],
+                "additional_entity_ids": ["real-entity-9", "unrelated-entity"],
+                "depends_on": ["real-moment-3"],
+            })
+        );
     }
 
     #[test]

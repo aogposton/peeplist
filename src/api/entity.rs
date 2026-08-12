@@ -44,13 +44,21 @@ pub async fn update_entity_field(id: String, field: &str, value: Value, token: S
 }
 
 // See moment::getMomentById's doc comment — same purpose (the offline-first
-// sync LWW conflict check in layouts/navbar.rs's flush loop), same shape.
-pub async fn getEntityById(id: String, token: String) -> Result<Option<EntityType>, reqwest::Error> {
+// sync LWW conflict check in layouts/navbar.rs's flush loop), same shape,
+// same fix (StorageError::Remote lets the flush loop give up on a
+// permanently-rejected id instead of retrying it forever).
+pub async fn getEntityById(id: String, token: String) -> Result<Option<EntityType>, StorageError> {
     let response = SupabaseClient::new(token)
         .get(&format!("entities?id=eq.{id}"))
         .send()
-        .await?;
-    let mut entities: Vec<EntityType> = response.json().await?;
+        .await
+        .map_err(StorageError::Network)?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(StorageError::Remote(format!("getEntityById failed ({}): {}", status, text)));
+    }
+    let mut entities: Vec<EntityType> = response.json().await.map_err(StorageError::Network)?;
     Ok(entities.pop())
 }
 

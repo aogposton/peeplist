@@ -77,22 +77,18 @@ where
     }
 }
 
-// Freeform per-entity details collected in the "New Entity" modal. Stored in
-// entities.metadata (jsonb) — mirrors the same pattern used for
-// moments.metadata (tags/sort_index). Surfaced read-only in the Info panel.
+// Used to collect fixed relationship/how-met/birthday/location/why fields
+// (2026-08-03: removed per user request — free-form Info moments, see
+// MomentType::moment_type_id 5, replace them; "they can put it in
+// themselves if it matters to them, no need for the clutter"). Kept as an
+// empty struct rather than dropped outright: EntityType::metadata is a real
+// entities.metadata jsonb column, and storage.rs/local.rs/vault_format.rs
+// all thread `Option<EntityMetadata>` through regardless of what's in it —
+// emptying this out is a much smaller, non-schema-touching change than
+// removing the column/field entirely. Old data with the removed keys still
+// round-trips fine (serde silently ignores unknown fields).
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
-pub struct EntityMetadata {
-    #[serde(default)]
-    pub relationship: String,
-    #[serde(default)]
-    pub how_met: String,
-    #[serde(default)]
-    pub birthday: String,
-    #[serde(default)]
-    pub location: String,
-    #[serde(default)]
-    pub why: String,
-}
+pub struct EntityMetadata {}
 
 // Entities
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -142,9 +138,11 @@ pub struct EntityTypeType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NewEntityType {
     pub name: String,
-    #[serde(serialize_with = "se_flex_id_opt")]
+    // See NewMomentType::entity_id's doc comment — same round-trip-through-
+    // sync_queue requirement, same fix.
+    #[serde(deserialize_with = "de_flex_id_opt", serialize_with = "se_flex_id_opt", default)]
     pub entity_type_id: Option<String>,
-    #[serde(serialize_with = "se_flex_id_opt")]
+    #[serde(deserialize_with = "de_flex_id_opt", serialize_with = "se_flex_id_opt", default)]
     pub parent_entity_id: Option<String>,
     pub user_id: Option<Uuid>,
     pub archived_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -177,6 +175,21 @@ pub struct MomentType {
     pub gravity: Option<i32>,
     #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
     pub entity_id: String,
+    // No enum — plain i64 literals scattered across components/moment.rs,
+    // components/entity.rs, api/vault_format.rs, quick_capture.rs. Kept in
+    // sync by hand (see components/entity.rs's kind_label/vault_format.rs's
+    // moment_type_str for the two label mappings actually worth grepping
+    // for if this list changes):
+    //   1 = Task     (the default/fallback for any unrecognized value)
+    //   2 = Promise
+    //   3 = Note
+    //   4 = Momento  — recurring/personal moments, never created via
+    //                  quick-capture, own dedicated tab (ab_momentos_cmp)
+    //   5 = Info     — a Note subtype (2026-08-03): hidden from the normal
+    //                  moment flow like Momento is, but otherwise rendered
+    //                  wherever Notes are, plus surfaced in the entity Info
+    //                  panel (ab_info_cmp). Reachable via quick-capture
+    //                  (`;i;`), unlike Momento.
     pub moment_type_id: i64,
     pub due_at: Option<String>,
     pub completed_at: Option<String>,
@@ -325,7 +338,9 @@ pub struct ReactionType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct NewReactionType {
     pub description: String,
-    #[serde(serialize_with = "se_flex_id")]
+    // See NewMomentType::entity_id's doc comment — same round-trip-through-
+    // sync_queue requirement, same fix.
+    #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
     pub moment_id: String,
     pub value: i32,
 }
@@ -335,7 +350,15 @@ pub struct NewMomentType {
     pub title: String,
     pub description: Option<String>,
     pub gravity: Option<i32>,
-    #[serde(serialize_with = "se_flex_id")]
+    // Needs both directions, unlike a plain New*Type that only ever gets
+    // serialized for a POST body — sync_queue.rs also round-trips this
+    // struct through JSON in localStorage (queue a create, read it back on
+    // a later flush tick), and serde's default String deserializer rejects
+    // the bare JSON number se_flex_id produces. Serialize-only here used to
+    // mean every single queued moment create failed to decode — the whole
+    // queue array fails to parse on one bad element, so `peek()` silently
+    // came back empty forever, permanently stuck, no error anywhere.
+    #[serde(deserialize_with = "de_flex_id", serialize_with = "se_flex_id")]
     pub entity_id: String,
     pub moment_type_id: i64,
     pub deleted_at: Option<String>

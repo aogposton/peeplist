@@ -2,6 +2,7 @@ use serde_json::Value;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use super::client::SupabaseClient;
+use super::storage::StorageError;
 use crate::types::*;
 
 
@@ -101,11 +102,29 @@ pub async fn restoreMoment(id: String, token: String) -> Result<(), reqwest::Err
 // row is genuinely gone server-side (a real hard delete elsewhere, or
 // already caught by RLS) rather than an error — the flush loop treats that
 // the same as "nothing to conflict with," dropping the stale edit.
-pub async fn getMomentById(id: String, token: String) -> Result<Option<MomentType>, reqwest::Error> {
+//
+// Was `Result<_, reqwest::Error>` with no status check — `?` on
+// `.json().await` only errors when the body fails to *parse*, so a rejected
+// request (any non-2xx, most commonly a stale/never-remapped client-minted
+// id PostgREST can't cast to the real id column's type) surfaced as the
+// exact same "decode error" as a genuine offline/network blip. The flush
+// loop couldn't tell the two apart, so it retried a permanently-invalid id
+// forever — confirmed live: an UpdateMomentField queued against a temp_id
+// whose CreateMoment had already been reconciled in an earlier, separate
+// flush pass hammered this endpoint every tick indefinitely, never able to
+// succeed. StorageError::Remote here lets the flush loop finally give up on
+// that instead of retrying something that can never work.
+pub async fn getMomentById(id: String, token: String) -> Result<Option<MomentType>, StorageError> {
     let response = SupabaseClient::new(token)
         .get(&format!("moments?id=eq.{id}&select=*,reactions(*)"))
         .send()
-        .await?;
-    let mut moments: Vec<MomentType> = response.json().await?;
+        .await
+        .map_err(StorageError::Network)?;
+    let status = response.status();
+    if !status.is_success() {
+        let text = response.text().await.unwrap_or_default();
+        return Err(StorageError::Remote(format!("getMomentById failed ({}): {}", status, text)));
+    }
+    let mut moments: Vec<MomentType> = response.json().await.map_err(StorageError::Network)?;
     Ok(moments.pop())
 }

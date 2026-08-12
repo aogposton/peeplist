@@ -97,16 +97,6 @@ pub struct EntityDoc {
     pub drift: f64,
     #[serde(default)]
     pub created_at: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub relationship: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub how_met: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub birthday: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub location: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub why: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub moments: Vec<MomentEntry>,
 }
@@ -169,19 +159,23 @@ pub struct ReactionEntry {
     pub value: i32,
 }
 
-// --- moment_type_id <-> "task"/"promise"/"note"/"momento" ---------------
+// --- moment_type_id <-> "task"/"promise"/"note"/"momento"/"info" --------
 // Mirrors the mapping already implemented as `kind_label` in
 // src/components/entity.rs — kept in sync by hand since that one renders
-// for display ("Task"/"Promise"/"Note"/"Momento") and this one is a wire
-// format key ("task"/"promise"/"note"/"momento"), not worth sharing a
-// single function over. moment_type_id 4 ("momento") added 2026-08-02 — see
-// scripts/2026-08-02-momento-type.sql for why it's pinned to exactly 4.
+// for display ("Task"/"Promise"/"Note"/"Momento"/"Info") and this one is a
+// wire format key ("task"/"promise"/"note"/"momento"/"info"), not worth
+// sharing a single function over. moment_type_id 4 ("momento") added
+// 2026-08-02 — see scripts/2026-08-02-momento-type.sql for why it's pinned
+// to exactly 4. moment_type_id 5 ("info") added 2026-08-03 — a Note
+// subtype (see MomentType::moment_type_id's doc comment), no schema change
+// needed since it's the same bare integer column momento reused.
 
 fn moment_type_str(moment_type_id: i64) -> &'static str {
     match moment_type_id {
         2 => "promise",
         3 => "note",
         4 => "momento",
+        5 => "info",
         _ => "task",
     }
 }
@@ -191,6 +185,7 @@ pub(crate) fn moment_type_id(kind: &str) -> i64 {
         "promise" => 2,
         "note" => 3,
         "momento" => 4,
+        "info" => 5,
         _ => 1,
     }
 }
@@ -283,7 +278,6 @@ pub(crate) fn entry_to_moment(entry: &MomentEntry, entity_id: &str) -> MomentTyp
 }
 
 pub(crate) fn entity_to_doc(entity: &EntityType, moments: &[MomentType]) -> EntityDoc {
-    let meta = entity.metadata.clone().unwrap_or_default();
     EntityDoc {
         id: entity.id.clone(),
         name: entity.name.clone(),
@@ -291,23 +285,11 @@ pub(crate) fn entity_to_doc(entity: &EntityType, moments: &[MomentType]) -> Enti
         parent_entity_id: entity.parent_entity_id.clone(),
         drift: entity.drift,
         created_at: entity.created_at.clone(),
-        relationship: meta.relationship,
-        how_met: meta.how_met,
-        birthday: meta.birthday,
-        location: meta.location,
-        why: meta.why,
         moments: moments.iter().map(moment_to_entry).collect(),
     }
 }
 
 fn doc_to_entity(doc: &EntityDoc) -> (EntityType, Vec<MomentType>) {
-    let metadata = EntityMetadata {
-        relationship: doc.relationship.clone(),
-        how_met: doc.how_met.clone(),
-        birthday: doc.birthday.clone(),
-        location: doc.location.clone(),
-        why: doc.why.clone(),
-    };
     let entity = EntityType {
         id: doc.id.clone(),
         name: doc.name.clone(),
@@ -316,7 +298,7 @@ fn doc_to_entity(doc: &EntityDoc) -> (EntityType, Vec<MomentType>) {
         created_at: doc.created_at.clone(),
         updated_at: doc.created_at.clone(),
         drift: doc.drift,
-        metadata: Some(metadata),
+        metadata: Some(EntityMetadata::default()),
     };
     let moments = doc.moments.iter().map(|e| entry_to_moment(e, &doc.id)).collect();
     (entity, moments)
@@ -423,16 +405,6 @@ pub struct BackupEntity {
     pub self_entity: bool,
     pub drift: f64,
     pub created_at: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub relationship: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub how_met: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub birthday: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub location: String,
-    #[serde(skip_serializing_if = "str::is_empty", default)]
-    pub why: String,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub moments: Vec<BackupMoment>,
 }
@@ -527,7 +499,6 @@ pub fn build_backup_bundle(
             .filter(|m| m.entity_id == e.id)
             .copied()
             .collect();
-        let meta = e.metadata.clone().unwrap_or_default();
         BackupEntity {
             r#ref: entity_ref_of[&e.id],
             name: e.name.clone(),
@@ -539,11 +510,6 @@ pub fn build_backup_bundle(
             self_entity: is_self_for_backup(e),
             drift: e.drift,
             created_at: e.created_at.clone(),
-            relationship: meta.relationship,
-            how_met: meta.how_met,
-            birthday: meta.birthday,
-            location: meta.location,
-            why: meta.why,
             moments: own_moments.iter().map(|m| {
                 let meta = m.metadata.clone().unwrap_or_default();
                 BackupMoment {
@@ -647,13 +613,7 @@ mod tests {
             created_at: "2024-03-01T10:00:00Z".to_string(),
             updated_at: "2024-03-01T10:00:00Z".to_string(),
             drift: 2.0,
-            metadata: Some(EntityMetadata {
-                relationship: "Close friend".to_string(),
-                how_met: "College".to_string(),
-                birthday: "1990-05-14".to_string(),
-                location: "Seattle, WA".to_string(),
-                why: "She always shows up when it matters.".to_string(),
-            }),
+            metadata: Some(EntityMetadata::default()),
         }
     }
 
@@ -820,7 +780,6 @@ mod tests {
 
         let rendered = render_entity_file(&entity, &[bare_task], "");
         assert!(!rendered.contains("entity_type:"));
-        assert!(!rendered.contains("relationship:"));
         assert!(!rendered.contains("description:"));
         assert!(!rendered.contains("gravity:"));
         assert!(!rendered.contains("due_at:"));

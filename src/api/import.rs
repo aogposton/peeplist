@@ -217,13 +217,7 @@ pub async fn import_backup(target_vault: VaultKind, token: Option<String>, yaml:
             parent_entity_id: None,
             user_id: None,
             archived_at: None,
-            metadata: Some(EntityMetadata {
-                relationship: doc.relationship.clone(),
-                how_met: doc.how_met.clone(),
-                birthday: doc.birthday.clone(),
-                location: doc.location.clone(),
-                why: doc.why.clone(),
-            }),
+            metadata: Some(EntityMetadata::default()),
         };
         match target.create_entity(new_entity).await {
             Ok(created) => {

@@ -332,7 +332,7 @@ pub fn entity_list_cmp() -> Element {
     // sidebar list only.
     let now = chrono::Utc::now();
     let has_active_moment = |entity_id: &str| moments.read().iter()
-        .any(|m| m.involves_entity(entity_id) && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now));
+        .any(|m| m.involves_entity(entity_id) && m.moment_type_id != 3i64 && m.moment_type_id != 5i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now));
     let mut visible_entities: Vec<_> = entities.read().iter()
         .filter(|e| !is_self_entity(e))
         .filter(|e| !*autohide_entities.read() || has_active_moment(&e.id))
@@ -732,7 +732,7 @@ pub fn project_list_cmp() -> Element {
     let project_has_active_moment = |project: &str| moments.read().iter()
         .any(|m| {
             m.metadata.as_ref().and_then(|meta| meta.project.as_deref()) == Some(project)
-                && m.moment_type_id != 3i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now)
+                && m.moment_type_id != 3i64 && m.moment_type_id != 5i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now)
         });
 
     let mut projects: Vec<String> = moments.read().iter()

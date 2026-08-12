@@ -406,6 +406,35 @@ pub struct AppState {
     // it un-folds on its own. Computed alongside is_desktop_viewport in the
     // same VIEWPORT_SCRIPT resize listener.
     pub sidebar_collapsed: Signal<bool>,
+    // Whether this device has a touch pointer at all (JS `'ontouchstart' in
+    // window || navigator.maxTouchPoints > 0`), captured once via
+    // layouts::Navbar's mount effect — distinct from is_desktop_viewport
+    // above, which only measures window dimensions. An iPad's viewport is
+    // wide enough to land in the "desktop" bucket there (and should: the
+    // docked sidebar is genuinely the right call on it), but it's still a
+    // touch device, and a couple of things key specifically off "can the
+    // user actually hover/right-click, or only tap" rather than window
+    // size: the floating quick-add button (a wide *touch* viewport still
+    // needs it — there's no hover state to reveal an alternative), and the
+    // vault switcher's popup Dropdown (a touch tap on an item inside it
+    // closes the menu before the tap registers as a selection — the same
+    // library-level touch/pointer bug already routed around for phones,
+    // which this device-width check alone never caught for iPad). Defaults
+    // to false (assume mouse/desktop) until the first real reading arrives.
+    pub is_touch_device: Signal<bool>,
+    // Whether the browser has handed us a captured `beforeinstallprompt`
+    // event we can still trigger (Settings' install button). Chrome/Edge/
+    // Android only — Safari (iOS and macOS) never fires this event at all,
+    // so Settings falls back to static "Share > Add to Home Screen"
+    // instructions there instead of a button. See layouts::Navbar's mount
+    // effect for where this actually gets set.
+    pub pwa_install_available: Signal<bool>,
+    // Whether the app is currently running as an installed/standalone PWA
+    // rather than a normal browser tab — hides the whole "Install" section
+    // in Settings when there's nothing left to install. Checked once via
+    // `window.matchMedia('(display-mode: standalone)')` (Chrome/Edge) or
+    // `navigator.standalone` (the non-standard Safari equivalent).
+    pub pwa_standalone: Signal<bool>,
 }
 
 fn main() {
@@ -495,6 +524,9 @@ fn App() -> Element {
         is_desktop_viewport: Signal::new(true),
         local_utc_offset_minutes: Signal::new(0),
         sidebar_collapsed: Signal::new(false),
+        is_touch_device: Signal::new(false),
+        pwa_install_available: Signal::new(false),
+        pwa_standalone: Signal::new(false),
     });
     let mut state = use_context::<AppState>();
     use_effect(move || {
@@ -623,7 +655,7 @@ fn App() -> Element {
         // script's own comment for why), so these are literal absolute
         // paths rather than Asset consts like FAVICON above.
         document::Link { rel: "manifest", href: "/manifest.json" }
-        document::Link { rel: "apple-touch-icon", href: "/icon-192.png" }
+        document::Link { rel: "apple-touch-icon", href: "/apple-touch-icon.png" }
         // White, not the app's red highlight color — on a PWA this paints
         // the mobile browser topbar, and red there reads like a screen-
         // recording indicator rather than an app color choice.

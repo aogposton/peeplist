@@ -5,7 +5,7 @@ use crate::theme::*;
 use crate::AppState;
 use crate::ABView;
 use crate::View;
-use crate::api::{ActiveStorage, VaultKind, is_self_entity};
+use crate::api::{ActiveStorage, is_self_entity};
 use crate::components::{GraphViewCmp, CheckboxCmp};
 use lumen_blocks::components::avatar::{Avatar, AvatarFallback};
 use lumen_blocks::components::button::{Button, ButtonVariant, ButtonSize};
@@ -20,88 +20,37 @@ fn stat_row(label: &str, value: &str) -> Element {
     }
 }
 
-// The relationship/how-met/birthday/location/why fields were only ever
-// settable in the New Entity modal at creation time — the Info tab (below)
-// just displayed them read-only forever after, with no way back in. Same
-// read-modify-write-the-whole-blob pattern as moment.rs's
-// patch_moment_metadata, since metadata is one jsonb column, not five.
-async fn patch_entity_metadata(
-    storage: &ActiveStorage,
-    mut entities: Signal<Vec<EntityType>>,
-    mut current_entity: Signal<Option<EntityType>>,
-    id: String,
-    mutate: impl FnOnce(&mut EntityMetadata),
-) {
-    let mut new_meta = entities.read().iter().find(|e| e.id == id).and_then(|e| e.metadata.clone()).unwrap_or_default();
-    mutate(&mut new_meta);
-    if storage.update_entity_field(id.clone(), "metadata", serde_json::json!(new_meta)).await.is_ok() {
-        if let Some(e) = entities.write().iter_mut().find(|e| e.id == id) {
-            e.metadata = Some(new_meta.clone());
-        }
-        if let Some(cur) = current_entity.write().as_mut() {
-            if cur.id == id {
-                cur.metadata = Some(new_meta);
-            }
-        }
-    }
-}
-
-// Same visual shape as stat_row, but an editable input in place of the
-// static value — used for the metadata fields below now that they're
-// editable post-creation, not just at entity creation.
-fn editable_stat_row(
-    label: &str,
-    value: &str,
-    entity_id: String,
-    entities: Signal<Vec<EntityType>>,
-    current_entity: Signal<Option<EntityType>>,
-    auth_token: Signal<Option<String>>,
-    active_vault: Signal<VaultKind>,
-    mutate: impl Fn(&mut EntityMetadata, String) + Copy + 'static,
-) -> Element {
-    rsx! {
-        div {
-            class: "flex justify-between items-center gap-3 text-sm py-1.5",
-            span { class: "text-muted-foreground shrink-0", "{label}" }
-            input {
-                r#type: "text",
-                class: "flex-1 min-w-0 rounded-md border border-transparent hover:border-input focus:border-input bg-transparent text-right text-sm text-foreground px-2 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-                value: "{value}",
-                // oninput, not onchange — onchange only fires on blur, so closing
-                // the activity panel right after typing (without clicking away
-                // first) silently discarded the edit.
-                oninput: move |e| {
-                    let id = entity_id.clone();
-                    let val = e.value();
-                    let token = auth_token;
-                    let vault = active_vault;
-                    spawn(async move {
-                        let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
-                        patch_entity_metadata(&storage, entities, current_entity, id, |m| mutate(m, val)).await;
-                    });
-                }
-            }
-        }
-    }
-}
 
 // Distance: arbitrary units measuring how far a relationship has drifted.
-// Grows by 1 unit every `drift` days since the entity's last *completed*
-// task/promise (logging or completing a note doesn't count — see the
-// Distance/Drift spec). Falls back to the entity's created_at if it has
-// never had a completed task/promise. Never negative.
-// Every entity starts BASE_DISTANCE units away and grows further apart at
-// `drift` units/day since the entity was created (day 1 = 10, day 2 = 12,
-// day 3 = 14 for drift=2 — additive, not a ratio). Distance closes back up
-// when something happens: a completed task/promise, a note that carries
-// a non-zero gravity (logged-but-never-"completed" events, like someone
-// bringing you flowers, still count), or reactions logged on ANY of the
-// entity's moments (reactions are a lighter-weight, in-the-moment signal
-// that isn't gated on moment type or completion the way gravity is).
-// Closing amount is |gravity| (or reaction value) scaled down —
-// GRAVITY_DISTANCE_DIVISOR is a first-draft tuning knob, not final.
+// Every entity starts BASE_DISTANCE units away. From there it grows at
+// `drift` units/day — but the clock resets to zero every time you actually
+// touch this entity (log a moment about them, or complete one), rather than
+// counting up from whenever the entity was first added. Anchoring growth to
+// created_at (the pre-2026-08-07 behavior) was the bug behind a real report:
+// someone met with yesterday looked farther away than someone with a single
+// note added today, because the frequently-contacted entity kept aging from
+// its original add date regardless of the contact, while the brand new one
+// started fresh at day zero. Anchoring to "last touched" instead means
+// staying in regular contact keeps you near BASE_DISTANCE indefinitely, and
+// only actual silence lets the daily drift add up.
+//
+// Distance closes back up (moves toward the center) from two kinds of
+// effect, both additive on top of the base+growth number above:
+//   - Flat baselines, unconditional on gravity: every logged moment (note or
+//     task alike — logging something you learned about someone counts, not
+//     just completing a task) nudges closer by MOMENT_BASELINE. A completed
+//     task/promise gets a second, larger COMPLETION_BASELINE on top, since
+//     following through is a stronger signal than having just logged intent.
+//   - Signed gravity/reaction values (2026-08-07 — previously `.abs()`'d, so
+//     a bad interaction closed distance exactly like a good one). Positive
+//     pulls closer, negative pushes farther away, same divisor either way.
+// GRAVITY_DISTANCE_DIVISOR/MOMENT_BASELINE/COMPLETION_BASELINE are first-
+// draft tuning knobs, not final. Never negative overall (floored at 0).
 const BASE_DISTANCE: f64 = 10.0;
+const DEFAULT_DRIFT: f64 = 1.0;
 const GRAVITY_DISTANCE_DIVISOR: f64 = 20.0;
+const MOMENT_BASELINE: f64 = 3.0;
+const COMPLETION_BASELINE: f64 = 4.0;
 
 pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now: chrono::DateTime<chrono::Utc>) -> f64 {
     let created = chrono::DateTime::parse_from_rfc3339(&entity.created_at)
@@ -109,30 +58,44 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
         .map(|dt| dt.with_timezone(&chrono::Utc));
     let Some(created) = created else { return BASE_DISTANCE; };
 
-    let days_elapsed = ((now - created).num_seconds() as f64 / 86400.0).max(0.0);
-    let drift = if entity.drift > 0.0 { entity.drift } else { 2.0 };
-    let grown = BASE_DISTANCE + drift * days_elapsed;
-
     // involves_entity, not a plain entity_id equality check — a multi-entity
     // moment (2026-07-29) counts fully toward every entity it's attached to,
     // including closing their Distance same as a moment solely theirs would.
     let entity_moments: Vec<&MomentType> = moments.iter().filter(|m| m.involves_entity(&entity.id)).collect();
 
-    let closed_gravity: f64 = entity_moments.iter()
-        .filter(|m| {
-            let completed_task_or_promise = (m.moment_type_id == 1i64 || m.moment_type_id == 2i64) && m.completed_at.is_some();
-            let noteworthy_note = m.moment_type_id == 3i64 && m.gravity.unwrap_or(0) != 0;
-            completed_task_or_promise || noteworthy_note
-        })
-        .map(|m| (m.gravity.unwrap_or(0).unsigned_abs() as f64) / GRAVITY_DISTANCE_DIVISOR)
-        .sum();
+    // Most recent time you engaged with this entity at all — logging a
+    // moment or completing one both count. Falls back to the entity's own
+    // created_at when there's no moment yet, so a brand new zero-moment
+    // entity still grows from the day it was added (this is also what keeps
+    // backdated_created_at_for_distance's individuation math correct: with
+    // no moments, this reduces to exactly the old created_at-anchored
+    // formula it was built to solve).
+    let last_touch = entity_moments.iter()
+        .flat_map(|m| [Some(m.created_at.as_str()), m.completed_at.as_deref()])
+        .flatten()
+        .filter_map(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .max()
+        .unwrap_or(created);
 
-    let closed_reactions: f64 = entity_moments.iter()
+    let days_since_touch = ((now - last_touch).num_seconds() as f64 / 86400.0).max(0.0);
+    let drift = if entity.drift > 0.0 { entity.drift } else { DEFAULT_DRIFT };
+    let grown = BASE_DISTANCE + drift * days_since_touch;
+
+    let moment_baseline = entity_moments.len() as f64 * MOMENT_BASELINE;
+    let completion_baseline = entity_moments.iter()
+        .filter(|m| (m.moment_type_id == 1i64 || m.moment_type_id == 2i64) && m.completed_at.is_some())
+        .count() as f64 * COMPLETION_BASELINE;
+
+    let signed_gravity: f64 = entity_moments.iter()
+        .map(|m| m.gravity.unwrap_or(0) as f64 / GRAVITY_DISTANCE_DIVISOR)
+        .sum();
+    let signed_reactions: f64 = entity_moments.iter()
         .flat_map(|m| m.reactions.iter().flatten())
-        .map(|r| (r.value.unsigned_abs() as f64) / GRAVITY_DISTANCE_DIVISOR)
+        .map(|r| r.value as f64 / GRAVITY_DISTANCE_DIVISOR)
         .sum();
 
-    (grown - closed_gravity - closed_reactions).max(0.0)
+    (grown - moment_baseline - completion_baseline - signed_gravity - signed_reactions).max(0.0)
 }
 
 // Individuation (splitting a person out of a group entity, see memory
@@ -150,7 +113,7 @@ pub(crate) fn compute_distance(entity: &EntityType, moments: &[MomentType], now:
 // this floors at days_elapsed = 0 — the closest honest approximation
 // without inventing moment history that doesn't exist.
 pub(crate) fn backdated_created_at_for_distance(target_distance: f64, drift: f64, now: chrono::DateTime<chrono::Utc>) -> String {
-    let drift = if drift > 0.0 { drift } else { 2.0 };
+    let drift = if drift > 0.0 { drift } else { DEFAULT_DRIFT };
     let days_elapsed = ((target_distance - BASE_DISTANCE) / drift).max(0.0);
     let seconds = (days_elapsed * 86400.0) as i64;
     (now - chrono::Duration::seconds(seconds)).to_rfc3339()
@@ -206,6 +169,13 @@ enum AllEntitiesMode {
 // sidebar links.
 #[component]
 pub fn AllEntitiesViewCmp() -> Element {
+    let state = use_context::<AppState>();
+    let is_desktop_viewport = state.is_desktop_viewport;
+    let sidebar_collapsed = state.sidebar_collapsed;
+    // See views/home.rs's heading_top_pad — same fixed-hamburger overlap,
+    // same fix; this view builds its own heading instead of going through
+    // Home's match arms.
+    let heading_top_pad = if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "pt-4" } else { "pt-16" };
     let mut mode = use_signal(|| AllEntitiesMode::Distance);
     let tab_class = |active: bool| if active {
         "px-3 py-1.5 text-sm font-medium rounded-md bg-muted text-foreground cursor-pointer"
@@ -214,7 +184,7 @@ pub fn AllEntitiesViewCmp() -> Element {
     };
     rsx! {
         div {
-            class: "px-4 pt-4",
+            class: "px-4 {heading_top_pad}",
             div {
                 class: "flex items-start justify-between gap-3 mb-4",
                 div {
@@ -466,8 +436,12 @@ pub fn ab_story_cmp() -> Element {
     // rather than being dropped from the timeline.
     let timeline_key = |m: &MomentType| m.completed_at.clone().unwrap_or_else(|| m.created_at.clone());
 
+    // involves_entity, not a plain entity_id equality check — a moment
+    // co-attributed to two entities (e.g. "@Zerrick and @Breanna... started a
+    // book club") was only ever showing up in the primary entity's Story,
+    // never the additional one's (2026-08-07 bug report).
     let mut entity_moments = moments.read().iter()
-        .filter(|m| Some(m.entity_id.clone()) == entity_id)
+        .filter(|m| entity_id.as_deref().is_some_and(|id| m.involves_entity(id)))
         .cloned()
         .collect::<Vec<_>>();
     entity_moments.sort_by(|a, b| timeline_key(a).cmp(&timeline_key(b)));
@@ -476,6 +450,7 @@ pub fn ab_story_cmp() -> Element {
         2i64 => "Promise",
         3i64 => "Note",
         4i64 => "Momento",
+        5i64 => "Info",
         _ => "Task",
     };
 
@@ -592,7 +567,7 @@ pub fn ab_momentos_cmp() -> Element {
     let today = chrono::Utc::now().date_naive();
 
     let mut momentos: Vec<MomentType> = moments.read().iter()
-        .filter(|m| Some(m.entity_id.clone()) == entity_id && m.moment_type_id == 4i64)
+        .filter(|m| entity_id.as_deref().is_some_and(|id| m.involves_entity(id)) && m.moment_type_id == 4i64)
         .cloned()
         .collect();
     momentos.sort_by(|a, b| a.title.cmp(&b.title));
@@ -1002,7 +977,7 @@ pub fn ab_stats_cmp() -> Element {
     // Promises kept/pending and reaction coverage, scoped to this entity's moments.
     let (promises_kept, promises_pending, tasks_with_reactions) = {
         let all = moments.read();
-        let for_entity = all.iter().filter(|m| Some(m.entity_id.clone()) == entity_id);
+        let for_entity = all.iter().filter(|m| entity_id.as_deref().is_some_and(|id| m.involves_entity(id)));
         for_entity.fold((0usize, 0usize, 0usize), |(kept, pending, reacted), m| {
             let kept = kept + (m.moment_type_id == 2i64 && m.completed_at.is_some()) as usize;
             let pending = pending + (m.moment_type_id == 2i64 && m.completed_at.is_none()) as usize;
@@ -1095,6 +1070,7 @@ pub fn ab_info_cmp() -> Element {
     let mut backdropTgl = state.backdropTgl;
     let mut entity_types = use_signal(|| vec![]);
     let mut confirming_delete = use_signal(|| false);
+    let mut info_input = use_signal(String::new);
 
     use_effect(move || {
         // Reset the confirm step whenever a different entity's Info panel
@@ -1130,11 +1106,73 @@ pub fn ab_info_cmp() -> Element {
         .unwrap_or_else(|| "Unknown".to_string());
     let drift_value = entity.as_ref().map(|e| e.drift).unwrap_or(2.0);
 
-    let meta = entity.as_ref().and_then(|e| e.metadata.clone()).unwrap_or_default();
     // Self isn't deletable — there's no "unselect yourself" concept in this
     // app's model, and every un-attributed moment defaults to Self, so
     // removing it would just get silently recreated on next capture anyway.
     let is_deletable = entity.as_ref().map(|e| !is_self_entity(e)).unwrap_or(false);
+
+    // "Delete this person" used to be hardcoded — now names the entity's
+    // actual type (a pet's delete button should say "pet", not "person").
+    // "Not set" (type_name's own fallback) reads badly as "Delete this Not
+    // set", so this falls back to the generic "entity" instead.
+    let delete_kind = if type_name == "Not set" { "entity".to_string() } else { type_name.to_lowercase() };
+
+    // Free-form facts about this entity (2026-08-03) — replaces the old
+    // fixed Relationship/How you met/Birthday/Location/Why they matter
+    // fields with an open-ended list instead, per explicit user request:
+    // "they can put it in themselves if it matters to them, no need for
+    // the clutter." An Info item is just a Note (moment_type_id 5) hidden
+    // from the normal moment flow — see MomentType::moment_type_id's doc
+    // comment — filtered to this entity and shown newest-first.
+    let info_items: Vec<MomentType> = entity.as_ref()
+        .map(|e| {
+            let mut items: Vec<MomentType> = moments.read().iter()
+                .filter(|m| m.involves_entity(&e.id) && m.moment_type_id == 5i64)
+                .cloned()
+                .collect();
+            items.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            items
+        })
+        .unwrap_or_default();
+
+    let mut submit_info = move || {
+        let Some(entity_id) = current_entity.read().as_ref().map(|e| e.id.clone()) else { return; };
+        let title = info_input.read().trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        info_input.set(String::new());
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            let new_moment = NewMomentType {
+                title,
+                description: None,
+                gravity: None,
+                entity_id,
+                moment_type_id: 5,
+                deleted_at: None,
+            };
+            match storage.create_moment(new_moment).await {
+                Ok(created) => moments.write().push(created),
+                Err(e) => clog!("Error adding info: {}", e),
+            }
+        });
+    };
+
+    let delete_info_item = move |id: String| {
+        let token = auth_token;
+        let vault = active_vault;
+        spawn(async move {
+            let Some(m) = moments.read().iter().find(|m| m.id == id).cloned() else { return; };
+            let storage = ActiveStorage::for_vault(*vault.read(), token.read().clone());
+            match storage.delete_moment(m).await {
+                Ok(()) => { moments.write().retain(|mm| mm.id != id); }
+                Err(e) => clog!("Error deleting info: {}", e),
+            }
+        });
+    };
 
     rsx! {
         div {
@@ -1220,12 +1258,7 @@ pub fn ab_info_cmp() -> Element {
                             {stat_row("Type", &type_name)}
                         }
                         {stat_row("Known since", &known_since)}
-                        if let Some(e) = entity.as_ref() {
-                            {editable_stat_row("Relationship", &meta.relationship, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.relationship = v)}
-                            {editable_stat_row("How you met", &meta.how_met, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.how_met = v)}
-                            {editable_stat_row("Birthday", &meta.birthday, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.birthday = v)}
-                            {editable_stat_row("Location", &meta.location, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.location = v)}
-                            {editable_stat_row("Why they matter", &meta.why, e.id.clone(), entities, current_entity, auth_token, active_vault, |m, v| m.why = v)}
+                        if entity.is_some() {
                             div {
                                 class: "flex justify-between items-center text-sm py-1.5",
                                 span { class: "text-muted-foreground", "Drift (days/unit)" }
@@ -1263,11 +1296,60 @@ pub fn ab_info_cmp() -> Element {
                         }
                     }
                 }
+                if entity.is_some() {
+                    div {
+                        class: "rounded-lg border border-border p-4 flex flex-col gap-3",
+                        span { class: "text-sm font-semibold text-foreground", "Info" }
+                        if info_items.is_empty() {
+                            div {
+                                class: "text-sm text-muted-foreground text-center py-4",
+                                "Nothing added yet."
+                            }
+                        } else {
+                            div {
+                                class: "flex flex-col divide-y divide-border",
+                                for item in info_items.iter() {
+                                    div {
+                                        key: "{item.id}",
+                                        class: "flex items-start justify-between gap-2 py-2",
+                                        span { class: "text-sm text-foreground whitespace-pre-wrap", "{item.title}" }
+                                        button {
+                                            class: "text-xs text-muted-foreground hover:text-destructive shrink-0 cursor-pointer",
+                                            title: "Delete",
+                                            onclick: { let id = item.id.clone(); move |_| delete_info_item(id.clone()) },
+                                            "×"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        div {
+                            class: "flex items-center gap-2",
+                            input {
+                                r#type: "text",
+                                class: "flex-1 min-w-0 rounded-md border border-input bg-background text-sm text-foreground px-3 py-1.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                                placeholder: "Add something worth remembering…",
+                                value: "{info_input}",
+                                oninput: move |e| info_input.set(e.value()),
+                                onkeydown: move |e| {
+                                    if e.key() == Key::Enter {
+                                        submit_info();
+                                    }
+                                }
+                            }
+                            button {
+                                class: "rounded-md border border-transparent bg-primary text-primary-foreground text-sm px-3 py-1.5 font-medium hover:bg-primary/90 transition-colors cursor-pointer shrink-0",
+                                onclick: move |_| submit_info(),
+                                "Add"
+                            }
+                        }
+                    }
+                }
                 if is_deletable {
                     div {
                         class: "rounded-lg border border-destructive/40 p-4 flex items-center justify-between gap-3",
                         div {
-                            span { class: "text-sm font-medium text-foreground", "Delete this person" }
+                            span { class: "text-sm font-medium text-foreground", "Delete this {delete_kind}" }
                             p {
                                 class: "text-xs text-muted-foreground mt-0.5",
                                 "Removes them from your vault. Their history goes to trash, not erased outright."
@@ -1409,6 +1491,120 @@ mod individuation_tests {
             (distance_one_day_later - (original_distance + 5.0)).abs() < 0.01,
             "expected distance to grow by exactly the 5.0/day drift rate, got a delta of {}",
             distance_one_day_later - original_distance
+        );
+    }
+}
+
+#[cfg(test)]
+mod distance_formula_tests {
+    use super::*;
+
+    fn entity_with(created_at: &str, drift: f64) -> EntityType {
+        EntityType {
+            id: "e1".into(),
+            name: "Test Person".into(),
+            entity_type_id: None,
+            parent_entity_id: None,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+            drift,
+            metadata: None,
+        }
+    }
+
+    fn moment_with(moment_type_id: i64, created_at: &str, completed_at: Option<&str>, gravity: Option<i32>) -> MomentType {
+        MomentType {
+            id: "m1".into(),
+            title: "Test moment".into(),
+            description: None,
+            gravity,
+            entity_id: "e1".into(),
+            moment_type_id,
+            due_at: None,
+            completed_at: completed_at.map(|s| s.to_string()),
+            deleted_at: None,
+            reactions: None,
+            created_at: created_at.to_string(),
+            updated_at: created_at.to_string(),
+            depends_on: None,
+            metadata: None,
+        }
+    }
+
+    // Positive gravity should now pull an entity closer (lower distance)
+    // than the same entity with no gravity at all; negative should push it
+    // farther. Pre-2026-08-07 both directions closed distance identically
+    // because the raw value was `.abs()`'d away.
+    #[test]
+    fn signed_gravity_moves_distance_in_opposite_directions() {
+        let now = chrono::Utc::now();
+        let created = (now - chrono::Duration::days(5)).to_rfc3339();
+        let entity = entity_with(&created, 1.0);
+
+        let neutral = compute_distance(&entity, &[moment_with(1, &created, Some(&created), Some(0))], now);
+        let positive = compute_distance(&entity, &[moment_with(1, &created, Some(&created), Some(60))], now);
+        let negative = compute_distance(&entity, &[moment_with(1, &created, Some(&created), Some(-60))], now);
+
+        assert!(positive < neutral, "positive gravity ({positive}) should be closer than neutral ({neutral})");
+        assert!(negative > neutral, "negative gravity ({negative}) should be farther than neutral ({neutral})");
+    }
+
+    // Just logging a note (no gravity, never completed) should still nudge
+    // distance closer than an entity with no moments at all — per explicit
+    // user request: "if I learn something new about someone, baseline, i
+    // did get slightly closer to them."
+    #[test]
+    fn logging_a_plain_note_closes_distance() {
+        let now = chrono::Utc::now();
+        let created = now.to_rfc3339();
+        let entity = entity_with(&created, 1.0);
+
+        let no_moments = compute_distance(&entity, &[], now);
+        let with_note = compute_distance(&entity, &[moment_with(3, &created, None, None)], now);
+
+        assert!(with_note < no_moments, "logging a note ({with_note}) should be closer than no moments ({no_moments})");
+    }
+
+    // Completing a task should close distance by more than just logging one
+    // (and leaving it open) — the completion baseline stacks on top of the
+    // flat per-moment baseline every logged moment gets.
+    #[test]
+    fn completing_a_task_closes_more_than_leaving_it_open() {
+        let now = chrono::Utc::now();
+        let created = now.to_rfc3339();
+        let entity = entity_with(&created, 1.0);
+
+        let open = compute_distance(&entity, &[moment_with(1, &created, None, Some(0))], now);
+        let completed = compute_distance(&entity, &[moment_with(1, &created, Some(&created), Some(0))], now);
+
+        assert!(completed < open, "a completed task ({completed}) should close distance more than an open one ({open})");
+    }
+
+    // The bug report this rebuild fixes: an old entity you still actively
+    // talk to should stay close, not keep aging from whenever it was first
+    // added. Growth now resets from the most recent touch, not created_at.
+    #[test]
+    fn recent_contact_beats_pure_age() {
+        let now = chrono::Utc::now();
+        let old_created = (now - chrono::Duration::days(60)).to_rfc3339();
+        let yesterday = (now - chrono::Duration::days(1)).to_rfc3339();
+
+        // Old entity, but talked to (completed a task) yesterday.
+        let long_known_active = entity_with(&old_created, 1.0);
+        let active_distance = compute_distance(
+            &long_known_active,
+            &[moment_with(1, &yesterday, Some(&yesterday), Some(0))],
+            now,
+        );
+
+        // Brand new entity, added today, with a single note.
+        let today = now.to_rfc3339();
+        let brand_new = entity_with(&today, 1.0);
+        let new_distance = compute_distance(&brand_new, &[moment_with(3, &today, None, None)], now);
+
+        assert!(
+            active_distance < new_distance,
+            "an old entity actively talked to yesterday ({active_distance}) should be closer than a brand-new entity with one note ({new_distance})"
         );
     }
 }

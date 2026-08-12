@@ -19,6 +19,14 @@ use crate::components::context_menu::{ContextMenu, ContextMenuContent, ContextMe
 use web_sys::window;
 use crate::quick_capture::{self, TokenKind};
 
+// Note (3) and Info (5, a Note subtype — see MomentType::moment_type_id's
+// doc comment in types.rs) share every "this doesn't have a completion
+// state / can't block anything / shows wherever Notes show" rule below —
+// one helper instead of duplicating the `== 3 || == 5` check at each site.
+fn is_note_like(moment_type_id: i64) -> bool {
+    moment_type_id == 3 || moment_type_id == 5
+}
+
 // Local-timezone display/edit conversion for due_at/scheduled_at/until_at
 // (2026-08-01) — see AppState::local_utc_offset_minutes's doc comment.
 // Storage is always real UTC; every one of these fields was being shown/
@@ -155,7 +163,7 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
     // Nothing to show, nothing to render — an empty collapsed shell was
     // just visual noise for the common case of a person/tag with no notes
     // at all.
-    if !props.moments.iter().any(|m| m.moment_type_id == 3i64) {
+    if !props.moments.iter().any(|m| is_note_like(m.moment_type_id)) {
         return rsx! {};
     }
     let state = use_context::<AppState>();
@@ -232,7 +240,7 @@ pub fn NotesSectionCmp(props: MomentListProps) -> Element {
                     div {
                         class: "flex flex-col divide-y divide-border",
                         for moment in props.moments.iter() {
-                            if  moment.moment_type_id == 3i64 {
+                            if  is_note_like(moment.moment_type_id) {
                                 ContextMenu {
                                     key: "{moment.id}",
                                     ContextMenuTrigger {
@@ -532,7 +540,7 @@ pub fn MomentListCmp(props: MomentListProps) -> Element {
 
     let current_sort_mode = *sort_mode.read();
     let mut display_list: Vec<MomentType> = moments_list.clone().into_iter()
-        .filter(|m| !m.completed_at.is_some() && m.moment_type_id != 3i64)
+        .filter(|m| !m.completed_at.is_some() && !is_note_like(m.moment_type_id))
         .collect();
     // Fallback ordering when no sort_index is set yet: parses as a number since
     // ids are still Supabase bigints stringified to decimal text (see
@@ -932,7 +940,7 @@ pub fn MomentCmp(props: MomentCmpProps) -> Element {
     // MomentType::dependency_ids) — blocked until every one of them is done.
     let unfinished_blockers: Vec<String> = props.moment.dependency_ids().iter().filter_map(|dep_id| {
         moments.read().iter().find(|m| &m.id == dep_id)
-            .filter(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none())
+            .filter(|dep| !is_note_like(dep.moment_type_id) && dep.completed_at.is_none())
             .map(|dep| dep.title.clone())
     }).collect();
     let is_blocked = !unfinished_blockers.is_empty();
@@ -1479,10 +1487,31 @@ pub struct QuickCaptureInputProps {
 // The title input for MomentInputCmp, with live taskwarrior-style syntax
 // highlighting and an @-mention entity chooser. Built as a colored overlay
 // div stacked on top of a real <input> whose own text is transparent (only
-// its caret shows) — a plain <input> can't render multi-colored text, and a
-// contenteditable div would need its own from-scratch cursor/selection
-// handling, so this "invisible input + decorative backdrop" trick is the
-// standard lightweight way to fake a syntax-highlighted text field.
+// its caret shows) — a plain <input> can't render multi-colored text.
+//
+// A contenteditable div was tried instead (2026-08-07) and reverted the
+// same day — it renders the highlighted spans directly, so there's nothing
+// for a caret to visually desync from, but it turned out to be
+// unusable for a completely different reason: contenteditable lets the
+// browser mutate the DOM natively on every keystroke (that's the entire
+// point of it), while Dioxus's virtual-DOM diffing computes each patch
+// against *its own last-rendered state*, with no idea the browser has
+// already mutated that same DOM out from under it. On an empty field, the
+// browser inserts a bare, un-wrapped text node for the first character
+// typed (there's nothing else there yet to insert it into); Dioxus, still
+// believing the div has zero children from its own last render, then
+// issues an *insert* patch for a new `<span>` around that same character
+// — not a replace, since nothing in Dioxus's own model said a node was
+// already there. Both end up in the DOM side by side: typing "2" produced
+// "22", "asdf" produced "asdffdsa" (confirmed live, reported immediately).
+// This is a well-documented category of bug with any framework that does
+// declarative virtual-DOM reconciliation against a contenteditable region
+// (React has the identical problem) — the real fixes (Slate/ProseMirror/
+// Lexical-style: take that subtree out of the framework's reconciler
+// entirely and patch its DOM by hand) are a much larger undertaking than
+// this input warrants. Back to the overlay approach, with the actual
+// cursor-drift bug fixed properly this time (see the styling comment
+// below) instead of chasing scroll-offset symptoms.
 //
 // The @-mention dropdown is driven purely by trailing_mention_query(), i.e.
 // "is the last word of the string a live @fragment" — not real cursor
@@ -1517,11 +1546,7 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
     // frozen while the (invisible) real caret kept advancing off-screen.
     // Mirrors the real input's scrollLeft onto the overlay's text via a
     // transform on every keystroke/click, so the two stay visually locked
-    // together instead of drifting apart — which on iOS/Safari is also
-    // almost certainly why a cursor-like element looked "unattached" from
-    // the input box: the overlay text the user was actually looking at
-    // wasn't moving while the real (invisible) input + native caret
-    // scrolled correctly underneath it.
+    // together instead of drifting apart.
     let mut input_el = props.input_el;
     let mut scroll_x = use_signal(|| 0.0f64);
     let sync_scroll = move || {
@@ -1659,7 +1684,23 @@ pub fn QuickCaptureInput(props: QuickCaptureInputProps) -> Element {
                     for (i, token) in tokens.iter().enumerate() {
                         span {
                             key: "{i}",
-                            style: if token.kind.is_recognized() { format!("color: {HL}; font-weight: 600;") } else { format!("color: {BaseFont};") },
+                            // No font-weight change here (2026-08-07) — this
+                            // used to add `font-weight: 600` for recognized
+                            // tokens, which was the actual root cause of the
+                            // reported cursor drift: this overlay and the
+                            // real <input> above it are two independently
+                            // rendered copies of the same text, and bold
+                            // glyphs are measurably wider than regular ones
+                            // at the same font size. The instant a keyword
+                            // got recognized, this overlay became wider than
+                            // the real (invisible) input's same characters,
+                            // so the real caret — which is what actually
+                            // tracks typing position — drifted behind where
+                            // the bold overlay had already pushed the text
+                            // to. Color-only keeps every character's width
+                            // identical between the two layers, so they can
+                            // never desync no matter what gets recognized.
+                            style: if token.kind.is_recognized() { format!("color: {HL};") } else { format!("color: {BaseFont};") },
                             "{token.text}"
                         }
                     }
@@ -1792,6 +1833,7 @@ pub fn ab_task_cmp() -> Element {
         2i64 => "Promise",
         3i64 => "Note",
         4i64 => "Momento",
+        5i64 => "Info",
         _ => "Task",
     };
 
@@ -1842,12 +1884,18 @@ pub fn ab_task_cmp() -> Element {
     // it's attributed to — a moment scoped to "only this entity's own
     // moments" (the old behavior) doesn't match how depends_on is actually
     // used; a thing you're waiting on is a thing you're waiting on no
-    // matter whose it is.
+    // matter whose it is. Notes/Info excluded (2026-08-07, explicit user
+    // request) — depending on one never actually blocked anything anyway
+    // (see is_note_like's doc comment), so listing them here as candidates
+    // was just clutter, not a real option. Momento stays included — it's a
+    // genuinely open, never-"complete" moment, and a live recurring
+    // commitment is exactly the kind of thing something else might
+    // legitimately be waiting on.
     let current_dep_ids: Vec<String> = moments.read().iter().find(|m| m.id == id)
         .map(|m| m.dependency_ids())
         .unwrap_or_default();
     let dependency_candidates: Vec<MomentType> = moments.read().iter()
-        .filter(|m| m.id != id && m.completed_at.is_none() && !current_dep_ids.contains(&m.id))
+        .filter(|m| m.id != id && m.completed_at.is_none() && !is_note_like(m.moment_type_id) && !current_dep_ids.contains(&m.id))
         .cloned()
         .collect();
 
@@ -1883,8 +1931,8 @@ pub fn ab_task_cmp() -> Element {
     // never actually blocks completion the way a task/promise dependency
     // does. Symmetrically, a note can't "block" anything it's depended on
     // by either, for the same reason.
-    let is_blocked = blocked_on.iter().any(|dep| dep.moment_type_id != 3 && dep.completed_at.is_none());
-    let blocking_count = if moment.moment_type_id == 3 {
+    let is_blocked = blocked_on.iter().any(|dep| !is_note_like(dep.moment_type_id) && dep.completed_at.is_none());
+    let blocking_count = if is_note_like(moment.moment_type_id) {
         0
     } else {
         moments.read().iter()
@@ -1959,7 +2007,7 @@ pub fn ab_task_cmp() -> Element {
             div {
                 class: "flex flex-col gap-4 px-4 py-4 pb-[200px] overflow-y-auto flex-1 min-h-0",
 
-                if moment.moment_type_id != 3i64 {
+                if !is_note_like(moment.moment_type_id) {
                     div {
                         class: "flex items-center gap-3",
                         // The underlying <input type="checkbox">'s live DOM
@@ -2539,7 +2587,7 @@ pub fn ab_task_cmp() -> Element {
                                         div {
                                             class: "flex items-center gap-1.5 mb-2 text-xs text-destructive",
                                             span { class: "h-1.5 w-1.5 rounded-full bg-destructive shrink-0" }
-                                            "Blocked by \"{blocked_on.iter().filter(|d| d.moment_type_id != 3 && d.completed_at.is_none()).map(|d| d.title.clone()).collect::<Vec<_>>().join(\"\\\", \\\"\")}\""
+                                            "Blocked by \"{blocked_on.iter().filter(|d| !is_note_like(d.moment_type_id) && d.completed_at.is_none()).map(|d| d.title.clone()).collect::<Vec<_>>().join(\"\\\", \\\"\")}\""
                                         }
                                     }
                                     if blocking_count > 0 {
@@ -2602,11 +2650,27 @@ pub fn ab_task_cmp() -> Element {
                                                 onclick: move |e| e.stop_propagation(),
                                                 {
                                                     let query = depends_search.read().to_lowercase();
-                                                    let matches: Vec<MomentType> = dependency_candidates.iter()
+                                                    // Was `.take(8)` straight off the filter with no
+                                                    // sort — with an empty query (the dropdown's very
+                                                    // first open, before typing anything) every
+                                                    // eligible candidate matches, so this just kept
+                                                    // whichever 8 happened to come first in
+                                                    // `moments`'s own (arbitrary, insertion-order)
+                                                    // iteration order, with no way to reach the rest —
+                                                    // "only certain moments are showing up" (2026-08-07
+                                                    // bug report). Sorting first (prefix match, then
+                                                    // alphabetical — same convention as
+                                                    // QuickCaptureInput's own dep_matches) and raising
+                                                    // the cap means this now actually shows "every open
+                                                    // promise/momento/task" for any reasonably-sized
+                                                    // vault; the list is already scrollable
+                                                    // (max-h-56 overflow-y-auto) for the rest.
+                                                    let mut matches: Vec<MomentType> = dependency_candidates.iter()
                                                         .filter(|m| query.is_empty() || m.title.to_lowercase().contains(&query))
-                                                        .take(8)
                                                         .cloned()
                                                         .collect();
+                                                    matches.sort_by_key(|m| (!m.title.to_lowercase().starts_with(&query), m.title.to_lowercase()));
+                                                    matches.truncate(50);
                                                     rsx! {
                                                         if matches.is_empty() {
                                                             div { class: "px-2 py-1.5 text-sm text-muted-foreground", "No matches" }
@@ -3338,6 +3402,7 @@ pub fn FullScreenEditorModalCmp() -> Element {
         2i64 => "Promise",
         3i64 => "Note",
         4i64 => "Momento",
+        5i64 => "Info",
         _ => "Task",
     };
 
@@ -4227,7 +4292,7 @@ pub fn NotesViewCmp() -> Element {
     let mut backdropTgl = state.backdropTgl;
 
     let mut notes: Vec<MomentType> = moments.read().iter()
-        .filter(|m| m.moment_type_id == 3i64)
+        .filter(|m| is_note_like(m.moment_type_id))
         .cloned()
         .collect();
     notes.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -4576,7 +4641,7 @@ pub fn PriorityViewCmp() -> Element {
         // list that assumes due_at means what it means for task/promise.
         // See its own dedicated Momentos tab/view for the RRULE-aware
         // equivalent.
-        .filter(|m| m.moment_type_id != 3i64 && m.moment_type_id != 4i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now))
+        .filter(|m| !is_note_like(m.moment_type_id) && m.moment_type_id != 4i64 && m.completed_at.is_none() && !crate::urgency::is_waiting(m, now) && !crate::urgency::is_missed(m, now))
         .map(|m| (m.clone(), crate::urgency::compute_urgency(m, &all, &all_entities, now, &weights)))
         .collect();
     ranked.sort_by(|a, b| b.1.total().partial_cmp(&a.1.total()).unwrap_or(std::cmp::Ordering::Equal));
@@ -4671,7 +4736,7 @@ pub fn UrgencySettingsCmp() -> Element {
             class: "h-8 w-8 flex items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground transition-colors cursor-pointer text-sm",
             title: "Adjust priority ranking weights",
             onclick: move |_| open.set(true),
-            "⚙"
+            {fa_gear()}
         }
         if *open.read() {
             div {

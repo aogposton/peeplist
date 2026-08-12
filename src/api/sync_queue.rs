@@ -13,11 +13,40 @@
 // remove_front/clear touch the browser.
 
 use crate::types::*;
+use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use web_sys::Storage;
 
 const QUEUE_KEY: &str = "peeplist_synced_cache:queue";
+
+// Bumped by every `push` below — layouts/navbar.rs watches this (a plain
+// counter, not the queue contents themselves) to trigger an immediate flush
+// attempt right after something's queued, instead of waiting for the next
+// periodic tick or 'online' event. Global rather than threaded through
+// AppState because `push` is called from storage.rs's free functions,
+// which have no `use_context` access (they're not components) — a
+// GlobalSignal is readable/writable from anywhere once the app's running,
+// no plumbing required. The periodic/online-listener triggers stay exactly
+// as they were: this is a third, faster trigger for the common case
+// (genuinely online), not a replacement for the offline fallback.
+pub static FLUSH_REQUESTED: GlobalSignal<u64> = GlobalSignal::new(|| 0);
+
+// temp_id -> real server id, accumulated forever (until `clear()`, i.e.
+// logout) across every flush pass — not just within a single one. The flush
+// loop's own per-pass `id_map` only remembers a create's remapping for the
+// rest of *that* pass; anything referencing the same temp_id in a *later*
+// pass (a field edit staged before the create had synced, but only queued
+// or retried after it — e.g. via a cached snapshot elsewhere in the app
+// that doesn't track the live moments/entities Signal, like
+// components/moment.rs's OnTheFlyCmp) found nothing to remap it with and
+// kept sending the server a request built around an id that was never
+// real. Confirmed live: exactly this, retrying forever every tick,
+// hammering the API with a request PostgREST can only ever reject.
+// Seeding each pass's id_map from this closes that gap regardless of which
+// disconnected snapshot leaks a stale id, current or future.
+pub static RESOLVED_IDS: GlobalSignal<HashMap<String, String>> = GlobalSignal::new(HashMap::new);
 
 // Create ops carry a client-minted `temp_id` — the record is shown in the
 // UI (and written into the mirror) under this id the instant it's created,
@@ -50,16 +79,36 @@ fn encode(queue: &[QueuedOp]) -> String {
     serde_json::to_string(queue).unwrap_or_else(|_| "[]".to_string())
 }
 
-fn decode(raw: &str) -> Vec<QueuedOp> {
-    serde_json::from_str(raw).unwrap_or_default()
+// Kept pure (no web_sys) — see the module doc comment — so this stays
+// unit-testable with plain garbage strings. `load` below (which does touch
+// the browser) is where a parse failure actually gets logged; this just
+// reports it rather than swallowing it via `unwrap_or_default`.
+fn decode(raw: &str) -> Result<Vec<QueuedOp>, serde_json::Error> {
+    serde_json::from_str(raw)
 }
 
 fn local_storage() -> Option<Storage> {
     web_sys::window().and_then(|w| w.local_storage().ok().flatten())
 }
 
+// A parse failure here used to be silent and total: one malformed element
+// anywhere in the array fails the whole array, `unwrap_or_default` turned
+// that into an empty queue, and every op in it — not just the bad one —
+// was gone from `peek`'s point of view forever, with nothing left in
+// storage to show it ever existed (see NewMomentType::entity_id's doc
+// comment for the actual bug that produced exactly this). Logging here
+// doesn't fix a bad payload, but it turns "every create silently stops
+// working, no error anywhere" into something that at least shows up in the
+// console the moment it starts happening.
 fn load(storage: &Storage) -> Vec<QueuedOp> {
-    storage.get_item(QUEUE_KEY).ok().flatten().map(|raw| decode(&raw)).unwrap_or_default()
+    let Some(raw) = storage.get_item(QUEUE_KEY).ok().flatten() else { return Vec::new(); };
+    match decode(&raw) {
+        Ok(queue) => queue,
+        Err(e) => {
+            web_sys::console::warn_1(&format!("sync_queue: failed to decode persisted queue, treating as empty ({e}): {raw}").into());
+            Vec::new()
+        }
+    }
 }
 
 fn save(storage: &Storage, queue: &[QueuedOp]) {
@@ -71,6 +120,7 @@ pub fn push(op: QueuedOp) {
     let mut queue = load(&storage);
     queue.push(op);
     save(&storage, &queue);
+    *FLUSH_REQUESTED.write() += 1;
 }
 
 // Reads the queue without removing anything — the flush loop processes
@@ -123,6 +173,7 @@ pub fn clear() {
     if let Some(storage) = local_storage() {
         let _ = storage.remove_item(QUEUE_KEY);
     }
+    RESOLVED_IDS.write().clear();
 }
 
 #[cfg(test)]
@@ -173,19 +224,19 @@ mod tests {
             QueuedOp::RestoreMoment("m2".to_string()),
         ];
         let raw = encode(&ops);
-        let round_tripped = decode(&raw);
+        let round_tripped = decode(&raw).unwrap();
         assert_eq!(ops, round_tripped);
     }
 
     #[test]
-    fn decode_of_garbage_is_an_empty_queue_not_a_panic() {
-        assert_eq!(decode("not json"), Vec::new());
-        assert_eq!(decode(""), Vec::new());
+    fn decode_of_garbage_is_an_error_not_a_panic() {
+        assert!(decode("not json").is_err());
+        assert!(decode("").is_err());
     }
 
     #[test]
     fn decode_of_empty_array_is_empty_queue() {
-        assert_eq!(decode("[]"), Vec::new());
+        assert_eq!(decode("[]").unwrap(), Vec::new());
     }
 
     #[test]

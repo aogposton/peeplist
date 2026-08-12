@@ -58,6 +58,41 @@ pub fn SettingsCmp() -> Element {
     let mut autohide_entities = state.autohide_entities;
     let mut moments = state.moments;
     let mut entities = state.entities;
+    let is_desktop_viewport = state.is_desktop_viewport;
+    let sidebar_collapsed = state.sidebar_collapsed;
+    // See views/home.rs's heading_top_pad — same fixed-hamburger overlap,
+    // same fix.
+    let heading_top_pad = if *is_desktop_viewport.read() && !*sidebar_collapsed.read() { "pt-4" } else { "pt-16" };
+
+    let pwa_install_available = state.pwa_install_available;
+    let pwa_standalone = state.pwa_standalone;
+    let mut install_busy = use_signal(|| false);
+    let mut install_declined = use_signal(|| false);
+    let trigger_install = move |_| {
+        install_busy.set(true);
+        spawn(async move {
+            // Same script as layouts::navbar's INSTALL_PROMPT_LISTENER_SCRIPT
+            // stashes the event for — duplicated locally rather than made
+            // pub across modules for one small, self-contained script (same
+            // call this codebase already makes for LAST_REFRESHED_AT_KEY).
+            let mut eval = document::eval(r#"
+                if (window.__bsbInstallPrompt) {
+                    window.__bsbInstallPrompt.prompt();
+                    const choice = await window.__bsbInstallPrompt.userChoice;
+                    window.__bsbInstallPrompt = null;
+                    dioxus.send(choice.outcome === 'accepted');
+                } else {
+                    dioxus.send(false);
+                }
+            "#);
+            if let Ok(accepted) = eval.recv::<bool>().await {
+                if !accepted {
+                    install_declined.set(true);
+                }
+            }
+            install_busy.set(false);
+        });
+    };
 
     // See navbar.rs's vault_switcher_cmp for why this is auth_token, not
     // user_email — the latter only populates after a session-check round
@@ -298,7 +333,7 @@ pub fn SettingsCmp() -> Element {
 
     rsx! {
         div {
-            class: "px-4 pt-4",
+            class: "px-4 {heading_top_pad}",
             h1 { class: "text-2xl font-semibold text-foreground mb-1", "Settings" }
             p {
                 class: "text-sm text-muted-foreground mb-4",
@@ -315,6 +350,32 @@ pub fn SettingsCmp() -> Element {
         }
         div {
             class: "mx-4 mb-3 flex flex-col gap-4",
+            if !*pwa_standalone.read() {
+                div {
+                    class: "rounded-lg border border-border bg-background p-4",
+                    h3 { class: "text-sm font-semibold text-foreground mb-1", "Install app" }
+                    p {
+                        class: "text-sm text-muted-foreground mb-3",
+                        "Add Black Server Book to your home screen or app dock for quicker access and a full-screen, no-browser-chrome view."
+                    }
+                    if *pwa_install_available.read() {
+                        button {
+                            class: "rounded-md border border-transparent bg-primary text-primary-foreground text-sm px-4 py-1.5 font-medium hover:bg-primary/90 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed",
+                            disabled: *install_busy.read(),
+                            onclick: trigger_install,
+                            if *install_busy.read() { "Installing…" } else { "Install Black Server Book" }
+                        }
+                        if *install_declined.read() {
+                            p { class: "text-sm text-muted-foreground mt-2", "No worries — you can install any time from here." }
+                        }
+                    } else {
+                        p {
+                            class: "text-xs text-muted-foreground rounded-md border border-border bg-muted/30 px-3 py-2",
+                            "Your browser doesn't offer a one-tap install here (common on Safari). On iPhone/iPad: tap the Share icon, then \"Add to Home Screen\". On desktop Chrome/Edge: look for an install icon in the address bar, or the browser menu's \"Install…\" option."
+                        }
+                    }
+                }
+            }
             div {
                 class: "rounded-lg border border-border bg-background p-4",
                 h3 { class: "text-sm font-semibold text-foreground mb-1", "Backup & restore" }

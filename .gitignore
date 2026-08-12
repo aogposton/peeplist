@@ -11,18 +11,15 @@
 .claude/
 CLAUDE.local.md
 
-# Local deploy config (server host/path) — see scripts/.env.deploy.example
-scripts/.env.deploy
-scripts/deploy.sh
+# Deploy tooling, local deploy config, and one-off SQL migrations run
+# directly against the hosted Supabase project — all internal ops/infra
+# detail, not part of the app itself, and too much detail about the live
+# schema/security posture and deploy setup to be comfortable public.
+/scripts/
 
 # Internal working notes — not meant for a public repo
 DESIGN_PROGRESS.md
 AGENTS.md
-
-# One-off SQL fixes run directly against the hosted Supabase project — too
-# much detail about the live schema/security posture to be comfortable
-# public, even after the fix itself is live either way.
-scripts/*.sql
 
 # Marketing site (blackserverbook.com) — separate static site, not part of the app
 /marketing/
